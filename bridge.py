@@ -1,5 +1,5 @@
 """
-Accuretta bridge — local llama.cpp proxy + tools + approvals + static server.
+Accuretta bridge — local Ollama proxy + tools + approvals + static server.
 
 One process. Serves the frontend (index.html / app.js / app.css / Design Change)
 and exposes JSON/SSE endpoints for chat streaming, tool invocation, workspace,
@@ -84,13 +84,6 @@ except Exception:
     _capstone = None  # type: ignore
     _HAVE_CAPSTONE = False
 
-try:
-    import r2pipe as _r2pipe  # type: ignore
-    _HAVE_R2PIPE = True
-except Exception:
-    _r2pipe = None  # type: ignore
-    _HAVE_R2PIPE = False
-
 # Kill switch: when set, every desktop action tool refuses immediately.
 # The frontend panic button and the user deny-action both flip this via
 # `/api/desktop/panic`. Cleared by /api/desktop/resume or a new chat turn.
@@ -129,6 +122,9 @@ _current_chat_id: contextvars.ContextVar[str] = contextvars.ContextVar("_current
 
 # per-chat SSE emitter so tools can stream progress without plumbing emit through every call
 _chat_emitters: dict[str, callable] = {}
+
+# last known prompt token count from llama-server — updated after each turn
+_last_prompt_tokens: int = 0
 
 # per-chat cancellation. `cancel` flips when user hits Stop (via /api/cancel or
 # client disconnect). `resp` is the live urllib response to llama-server, which
@@ -267,11 +263,6 @@ DEFAULT_SETTINGS = {
     "num_predict": -1,
     "temperature": 0.7,
     "top_p": 0.9,
-    "top_k": 40,
-    "min_p": 0.05,
-    "repeat_penalty": 1.1,
-    "presence_penalty": 0.0,
-    "frequency_penalty": 0.0,
     "keep_alive": "30m",
     "theme": "light",
     "auto_approve_read": True,
@@ -2562,498 +2553,6 @@ def tool_disasm_at(args: dict) -> dict:
         return {"error": str(e)}
 
 
-# ============================================================
-# SECURITY ANALYSIS TOOLS
-# All tools degrade gracefully — they report the missing
-# binary/package when invoked so the agent can tell the user.
-# None of these kill startup if not installed.
-# ============================================================
-
-def _sec_which(cmd: str) -> str | None:
-    """Return full path to a CLI tool or None if not found."""
-    return shutil.which(cmd)
-
-
-def _sec_run(cmd: list[str], timeout: int = 120) -> tuple[str, str, int]:
-    """Run a subprocess, return (stdout, stderr, returncode)."""
-    try:
-        r = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return r.stdout, r.stderr, r.returncode
-    except FileNotFoundError:
-        return "", f"binary not found: {cmd[0]}", 127
-    except subprocess.TimeoutExpired:
-        return "", f"timed out after {timeout}s", 1
-    except Exception as e:
-        return "", str(e), 1
-
-
-def _sec_check_path(raw: str) -> tuple[str, dict | None]:
-    """Reuse firmware path checker for security tools."""
-    return _fw_check_path(raw)
-
-
-def tool_unblob_extract(args: dict) -> dict:
-    """Extract firmware using unblob. Handles nested containers (SquashFS
-    inside CPIO inside ZIP, etc). Requires 'unblob' on PATH.
-    pip install unblob — also needs system deps: e2tools, jefferson, etc."""
-    exe = _sec_which("unblob")
-    if not exe:
-        return {"error": "unblob not found. pip install unblob (also needs system deps — see unblob.io)"}
-
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.isfile(path):
-        return {"error": f"not a file: {path}"}
-
-    dest_name = (args.get("dest_name") or "").strip()
-    if not dest_name:
-        dest_name = Path(path).stem + "_unblob"
-    dest = str(Path(path).parent / dest_name)
-
-    if os.path.exists(dest) and not args.get("overwrite"):
-        return {"error": f"destination exists: {dest}. Pass overwrite=true to replace."}
-
-    stdout, stderr, rc = _sec_run([exe, "-e", dest, path], timeout=300)
-
-    if rc != 0:
-        return {"error": f"unblob failed (rc={rc})", "stderr": stderr[:2000]}
-
-    # Inventory the extraction — bounded to 500 entries
-    entries: list[dict] = []
-    try:
-        for root, dirs, files in os.walk(dest):
-            dirs[:] = [d for d in dirs if d not in {".git", "__pycache__"}]
-            for f in files:
-                fp = os.path.join(root, f)
-                try:
-                    sz = os.path.getsize(fp)
-                except OSError:
-                    sz = -1
-                entries.append({
-                    "path": fp,
-                    "size": sz,
-                })
-                if len(entries) >= 500:
-                    break
-            if len(entries) >= 500:
-                break
-    except Exception:
-        pass
-
-    return {
-        "ok": True,
-        "dest": dest,
-        "files_found": len(entries),
-        "truncated": len(entries) >= 500,
-        "files": entries,
-    }
-
-
-def tool_checksec(args: dict) -> dict:
-    """Check ELF binary for exploit mitigations: NX, stack canary, RELRO,
-    PIE, ASLR, FORTIFY. Accepts a single binary or a directory (scans all ELFs).
-    Requires checksec: pip install checksec.py"""
-    exe = _sec_which("checksec")
-    if not exe:
-        return {"error": "checksec not found. pip install checksec.py"}
-
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.exists(path):
-        return {"error": f"path not found: {path}"}
-
-    is_dir = os.path.isdir(path)
-
-    if is_dir:
-        stdout, stderr, rc = _sec_run(
-            [exe, "--dir", path, "--output", "json"], timeout=120
-        )
-    else:
-        stdout, stderr, rc = _sec_run(
-            [exe, "--file", path, "--output", "json"], timeout=30
-        )
-
-    if not stdout.strip():
-        # Try alternate flag style (checksec.sh compatible)
-        if is_dir:
-            stdout, stderr, rc = _sec_run([exe, "--dir=" + path], timeout=120)
-        else:
-            stdout, stderr, rc = _sec_run([exe, "--file=" + path], timeout=30)
-
-    # Try to parse JSON, fall back to raw text
-    result: dict = {"path": path}
-    try:
-        result["data"] = json.loads(stdout)
-    except Exception:
-        # Return raw but bounded
-        lines = stdout.strip().splitlines()
-        result["raw"] = lines[:200]
-        result["truncated"] = len(lines) > 200
-
-    if stderr.strip():
-        result["stderr"] = stderr[:500]
-
-    return result
-
-
-def tool_flawfinder(args: dict) -> dict:
-    """Static analysis of C/C++ source for common vulnerabilities.
-    Returns findings ranked by severity (1-5). Saves full output to
-    workspace as flawfinder_output.txt if findings exceed threshold.
-    Requires: pip install flawfinder"""
-    exe = _sec_which("flawfinder")
-    if not exe:
-        return {"error": "flawfinder not found. pip install flawfinder"}
-
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.exists(path):
-        return {"error": f"path not found: {path}"}
-
-    min_level = max(1, min(int(args.get("min_level") or 1), 5))
-    max_findings = max(1, min(int(args.get("max_findings") or 50), 500))
-
-    stdout, stderr, rc = _sec_run(
-        [exe, "--minlevel", str(min_level), "--dataonly", "--quiet", path],
-        timeout=180,
-    )
-
-    if rc not in (0, 1):  # flawfinder returns 1 when findings exist
-        return {"error": f"flawfinder failed (rc={rc})", "stderr": stderr[:1000]}
-
-    # Parse findings — flawfinder text format
-    # Each finding starts with "filename:line:" pattern
-    finding_re = re.compile(
-        r'^(?P<file>[^\s:]+):(?P<line>\d+):\s+'
-        r'\[(?P<level>\d)\]\s+\((?P<type>[^)]+)\)\s+(?P<func>\S+):\s*(?P<desc>.+)$'
-    )
-    findings: list[dict] = []
-    for line in stdout.splitlines():
-        m = finding_re.match(line.strip())
-        if m:
-            findings.append({
-                "file": m.group("file"),
-                "line": int(m.group("line")),
-                "level": int(m.group("level")),
-                "type": m.group("type"),
-                "function": m.group("func"),
-                "description": m.group("desc").strip(),
-            })
-
-    # Sort by severity descending
-    findings.sort(key=lambda x: x["level"], reverse=True)
-
-    total = len(findings)
-    truncated = total > max_findings
-
-    # Save full output to workspace if large
-    save_path = None
-    if total > 20:
-        try:
-            ws = _get_workspace_dirs()
-            if ws:
-                save_path = os.path.join(ws[0], "flawfinder_output.txt")
-                with open(save_path, "w", encoding="utf-8") as fh:
-                    fh.write(stdout)
-        except Exception:
-            pass
-
-    return {
-        "path": path,
-        "total_findings": total,
-        "min_level": min_level,
-        "truncated": truncated,
-        "shown": min(total, max_findings),
-        "findings": findings[:max_findings],
-        "full_output_saved": save_path,
-    }
-
-
-def tool_firmwalker(args: dict) -> dict:
-    """Search an extracted firmware rootfs for sensitive files: passwords,
-    ssh keys, SSL certs, config files, hardcoded IPs, default creds.
-    Requires firmwalker.sh on PATH or provide explicit path via exe_path.
-    Download: https://github.com/craigz28/firmwalker"""
-    exe_path = (args.get("exe_path") or "").strip()
-    exe = exe_path or _sec_which("firmwalker.sh") or _sec_which("firmwalker")
-    if not exe:
-        return {
-            "error": (
-                "firmwalker not found on PATH. "
-                "Download from https://github.com/craigz28/firmwalker "
-                "and pass exe_path=/full/path/to/firmwalker.sh"
-            )
-        }
-
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.isdir(path):
-        return {"error": f"not a directory: {path}. firmwalker needs the extracted rootfs."}
-
-    stdout, stderr, rc = _sec_run(["bash", exe, path], timeout=120)
-
-    if not stdout.strip():
-        return {"error": "firmwalker produced no output", "stderr": stderr[:500]}
-
-    # Parse into categories — firmwalker outputs section headers in ALL CAPS
-    # followed by file paths / matches
-    categories: dict[str, list[str]] = {}
-    current_cat = "general"
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Section headers are lines that are all-uppercase words + punctuation
-        if stripped.isupper() or (stripped.endswith(":") and stripped[:-1].isupper()):
-            current_cat = stripped.rstrip(":")
-            categories.setdefault(current_cat, [])
-        else:
-            categories.setdefault(current_cat, []).append(stripped)
-
-    # Build summary — cap each category at 20 items
-    summary: dict[str, dict] = {}
-    for cat, items in categories.items():
-        total = len(items)
-        summary[cat] = {
-            "total": total,
-            "items": items[:20],
-            "truncated": total > 20,
-        }
-
-    total_findings = sum(len(v) for v in categories.values())
-
-    # Save full output
-    save_path = None
-    if total_findings > 30:
-        try:
-            ws = _get_workspace_dirs()
-            if ws:
-                save_path = os.path.join(ws[0], "firmwalker_output.txt")
-                with open(save_path, "w", encoding="utf-8") as fh:
-                    fh.write(stdout)
-        except Exception:
-            pass
-
-    return {
-        "path": path,
-        "total_findings": total_findings,
-        "categories": summary,
-        "full_output_saved": save_path,
-    }
-
-
-def _r2_open(path: str) -> tuple[Any, str | None]:
-    """Open a file in radare2 via r2pipe. Returns (r2, error_or_None)."""
-    if not _HAVE_R2PIPE:
-        return None, "r2pipe not installed. pip install r2pipe (also needs radare2 system binary)"
-    if not _sec_which("radare2") and not _sec_which("r2"):
-        return None, "radare2 binary not found. Install from https://rada.re"
-    try:
-        r2 = _r2pipe.open(path, flags=["-2"])  # -2 silences stderr
-        return r2, None
-    except Exception as e:
-        return None, f"r2pipe open failed: {e}"
-
-
-def tool_r2_info(args: dict) -> dict:
-    """Get basic info about a binary via radare2: file type, architecture,
-    OS, compiler, entry point, linked libraries, security mitigations (from r2).
-    Does NOT run full analysis — fast, safe to call first."""
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.isfile(path):
-        return {"error": f"not a file: {path}"}
-
-    r2, err = _r2_open(path)
-    if err:
-        return {"error": err}
-
-    try:
-        info = r2.cmdj("ij") or {}
-        # Pull out the useful bits
-        core = info.get("core", {})
-        bin_ = info.get("bin", {})
-        result = {
-            "path": path,
-            "file_type": core.get("type"),
-            "size": core.get("size"),
-            "arch": bin_.get("arch"),
-            "bits": bin_.get("bits"),
-            "os": bin_.get("os"),
-            "endian": bin_.get("endian"),
-            "entry_point": hex(bin_.get("baddr", 0) + bin_.get("entry", 0)) if bin_.get("entry") else None,
-            "compiler": bin_.get("compiler"),
-            "stripped": bin_.get("stripped"),
-            "static": bin_.get("static"),
-            "canary": bin_.get("canary"),
-            "nx": bin_.get("nx"),
-            "pic": bin_.get("pic"),
-            "relocs": bin_.get("relocs"),
-        }
-        # Linked libraries
-        libs = r2.cmdj("ilj") or []
-        result["libraries"] = libs[:50]
-        return result
-    except Exception as e:
-        return {"error": f"r2 info failed: {e}"}
-    finally:
-        try:
-            r2.quit()
-        except Exception:
-            pass
-
-
-def tool_r2_functions(args: dict) -> dict:
-    """List functions in a binary using radare2 analysis.
-    Runs 'aaa' (full analysis) then returns function list sorted by size.
-    Caps at 200 functions. Pass filter_pattern to regex-match function names.
-    WARNING: aaa on large binaries can take 30-120 seconds."""
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.isfile(path):
-        return {"error": f"not a file: {path}"}
-
-    filter_pat = (args.get("filter_pattern") or "").strip()
-    max_funcs = max(1, min(int(args.get("max_functions") or 100), 200))
-
-    r2, err = _r2_open(path)
-    if err:
-        return {"error": err}
-
-    try:
-        r2.cmd("aaa")  # full analysis
-        funcs = r2.cmdj("aflj") or []
-    except Exception as e:
-        return {"error": f"r2 analysis failed: {e}"}
-    finally:
-        try:
-            r2.quit()
-        except Exception:
-            pass
-
-    # Filter
-    if filter_pat:
-        try:
-            rx = re.compile(filter_pat, re.IGNORECASE)
-            funcs = [f for f in funcs if rx.search(f.get("name", ""))]
-        except re.error as e:
-            return {"error": f"bad filter_pattern: {e}"}
-
-    # Sort by size descending — largest functions first
-    funcs.sort(key=lambda f: f.get("size", 0), reverse=True)
-
-    total = len(funcs)
-    truncated = total > max_funcs
-    funcs = funcs[:max_funcs]
-
-    # Return clean subset of fields
-    clean = []
-    for f in funcs:
-        clean.append({
-            "name": f.get("name"),
-            "offset": hex(f.get("offset", 0)),
-            "size": f.get("size"),
-            "nbbs": f.get("nbbs"),   # number of basic blocks
-            "nargs": f.get("nargs"),
-            "nlocals": f.get("nlocals"),
-        })
-
-    return {
-        "path": path,
-        "total_functions": total,
-        "shown": len(clean),
-        "truncated": truncated,
-        "functions": clean,
-    }
-
-
-def tool_r2_disasm_function(args: dict) -> dict:
-    """Disassemble a single named function using radare2.
-    Provide function name (from r2_functions) or hex address.
-    Hard-capped at 100 instructions to protect context window.
-    Run r2_functions first to find function names."""
-    path, err = _sec_check_path(args.get("path") or "")
-    if err:
-        return err
-    if not os.path.isfile(path):
-        return {"error": f"not a file: {path}"}
-
-    func_name = (args.get("function_name") or "").strip()
-    func_addr = (args.get("function_address") or "").strip()
-    max_instrs = max(1, min(int(args.get("max_instructions") or 64), 100))
-
-    if not func_name and not func_addr:
-        return {"error": "provide function_name or function_address"}
-
-    r2, err = _r2_open(path)
-    if err:
-        return {"error": err}
-
-    try:
-        r2.cmd("aaa")
-
-        # Seek to function
-        if func_addr:
-            r2.cmd(f"s {func_addr}")
-        else:
-            r2.cmd(f"s sym.{func_name}")
-            # Try without sym. prefix if that fails
-            info = r2.cmdj("afij") or []
-            if not info:
-                r2.cmd(f"s {func_name}")
-
-        # Disassemble the function (pdfj = print disasm function as json)
-        disasm = r2.cmdj("pdfj") or {}
-    except Exception as e:
-        return {"error": f"r2 disasm failed: {e}"}
-    finally:
-        try:
-            r2.quit()
-        except Exception:
-            pass
-
-    if not disasm:
-        return {"error": f"function not found: {func_name or func_addr}. Run r2_functions to list available functions."}
-
-    ops = disasm.get("ops", [])
-    total_ops = len(ops)
-    truncated = total_ops > max_instrs
-    ops = ops[:max_instrs]
-
-    # Clean fields
-    clean_ops = []
-    for op in ops:
-        clean_ops.append({
-            "offset": hex(op.get("offset", 0)),
-            "bytes": op.get("bytes"),
-            "type": op.get("type"),
-            "disasm": op.get("disasm"),
-            "comment": op.get("comment"),  # r2 inline comments (xrefs, strings)
-        })
-
-    return {
-        "path": path,
-        "function": disasm.get("name"),
-        "offset": hex(disasm.get("offset", 0)),
-        "size": disasm.get("size"),
-        "total_instructions": total_ops,
-        "shown": len(clean_ops),
-        "truncated": truncated,
-        "instructions": clean_ops,
-    }
-
-
 TOOLS: dict[str, dict] = {
     "list_directory": {
         "description": "List files and folders at a path. Use to explore.",
@@ -3466,137 +2965,6 @@ TOOLS: dict[str, dict] = {
             "required": ["path"],
         },
         "fn": tool_disasm_at,
-    },
-    # ---- security analysis tools -------------------------------------------
-    "unblob_extract": {
-        "description": (
-            "Extract firmware using unblob. Handles nested/unknown containers "
-            "(SquashFS inside CPIO inside ZIP etc) better than extract_archive. "
-            "Use when extract_archive fails or firmware has unusual packaging. "
-            "Requires: pip install unblob + system deps. Requires user approval."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "firmware file to extract"},
-                "dest_name": {"type": "string", "description": "output folder name, default <stem>_unblob"},
-                "overwrite": {"type": "boolean", "description": "replace existing destination"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_unblob_extract,
-    },
-    "checksec": {
-        "description": (
-            "Check ELF binaries for exploit mitigations: NX, stack canary, "
-            "RELRO (full/partial/none), PIE, ASLR, FORTIFY. "
-            "Pass a single binary path or a directory to scan all ELFs. "
-            "Run this on every network-facing binary before disassembling. "
-            "Requires: pip install checksec.py"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "ELF binary or directory containing ELFs"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_checksec,
-    },
-    "flawfinder": {
-        "description": (
-            "Static analysis of C/C++ source code for common vulnerabilities. "
-            "Finds: buffer overflows, format strings, race conditions, crypto misuse, shell injection. "
-            "Returns findings ranked 1-5 by severity. Saves full output to workspace. "
-            "Use on extracted firmware source or CGI scripts. "
-            "Requires: pip install flawfinder"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "source file or directory"},
-                "min_level": {"type": "integer", "description": "minimum severity 1-5, default 1"},
-                "max_findings": {"type": "integer", "description": "findings to return, default 50, max 500"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_flawfinder,
-    },
-    "firmwalker": {
-        "description": (
-            "Search an extracted firmware rootfs for sensitive material: "
-            "passwords, SSH keys, SSL certs, config files, hardcoded IPs, "
-            "default credentials, web server files, databases. "
-            "Run on the extracted rootfs directory AFTER extraction. "
-            "Saves full output to workspace. "
-            "Requires firmwalker.sh — download from https://github.com/craigz28/firmwalker. "
-            "Pass exe_path if not on PATH."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "extracted firmware rootfs directory"},
-                "exe_path": {"type": "string", "description": "full path to firmwalker.sh if not on PATH"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_firmwalker,
-    },
-    "r2_info": {
-        "description": (
-            "Get basic binary info via radare2: arch, bits, OS, entry point, "
-            "linked libraries, compiler, and security flags (canary, NX, PIC). "
-            "Fast — does not run full analysis. Always call this before r2_functions. "
-            "Requires: pip install r2pipe + radare2 system binary."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "ELF or PE binary"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_r2_info,
-    },
-    "r2_functions": {
-        "description": (
-            "List functions in a binary using radare2 full analysis (aaa). "
-            "Returns function names, offsets, sizes, basic block count. "
-            "Sorted by size — largest/most complex first. "
-            "Use filter_pattern to narrow to e.g. 'auth', 'login', 'parse'. "
-            "WARNING: aaa can take 30-120s on large binaries. "
-            "Requires: pip install r2pipe + radare2."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "filter_pattern": {"type": "string", "description": "regex to filter function names, e.g. auth|login|parse"},
-                "max_functions": {"type": "integer", "description": "default 100, max 200"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_r2_functions,
-    },
-    "r2_disasm_function": {
-        "description": (
-            "Disassemble ONE function by name or address using radare2. "
-            "Hard cap: 100 instructions. Always use r2_functions first to get "
-            "the correct function name. Do not call this more than 3 times per "
-            "checkpoint — save checkpoint.json after every 3 functions. "
-            "Requires: pip install r2pipe + radare2."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "function_name": {"type": "string", "description": "function name from r2_functions (e.g. sym.check_auth)"},
-                "function_address": {"type": "string", "description": "hex address (e.g. 0x00401234) if name unknown"},
-                "max_instructions": {"type": "integer", "description": "default 64, hard max 100"},
-            },
-            "required": ["path"],
-        },
-        "fn": tool_r2_disasm_function,
     },
 }
 
@@ -4632,6 +4000,8 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                     reasoning_open = False
                 if last_stats.get("eval_count") is not None:
                     emit({"type": "stats", **last_stats})
+                    global _last_prompt_tokens
+                    _last_prompt_tokens = last_stats.get("prompt_eval_count") or 0
             finally:
                 try:
                     resp.close()
@@ -5031,6 +4401,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, get_settings())
         if p == "/api/workspace":
             return self._send_json(200, get_workspace())
+        if p == "/api/ctx-stats":
+            s = get_settings()
+            cap = int(s.get("num_ctx") or 32768)
+            return self._send_json(200, {"prompt_tokens": _last_prompt_tokens, "capacity": cap})
         if p == "/api/chats":
             return self._send_json(200, get_chats())
         if p == "/api/approvals":
@@ -5904,6 +5278,48 @@ def main():
         except Exception:
             pass
     threading.Thread(target=_open_browser, daemon=True).start()
+
+    # workspace file watcher — polls every 5s, emits workspace:update on changes
+    _ws_snapshot: dict[str, float] = {}  # path -> mtime
+    def _workspace_watcher():
+        import hashlib
+        while True:
+            time.sleep(5)
+            try:
+                ws = get_workspace()
+                folders = ws.get("folders") or []
+                current: dict[str, float] = {}
+                changed = False
+                for f in folders:
+                    p = Path(f)
+                    if not p.is_dir():
+                        continue
+                    for fp in p.rglob("*"):
+                        if not fp.is_file():
+                            continue
+                        # skip hidden / build noise
+                        name = fp.name.lower()
+                        if name.startswith(".") or name.endswith((".pyc", ".log")):
+                            continue
+                        try:
+                            mt = fp.stat().st_mtime
+                        except Exception:
+                            continue
+                        current[str(fp)] = mt
+                        if str(fp) not in _ws_snapshot or abs(_ws_snapshot[str(fp)] - mt) > 0.5:
+                            changed = True
+                # removed files
+                for k in _ws_snapshot:
+                    if k not in current:
+                        changed = True
+                        break
+                _ws_snapshot.clear()
+                _ws_snapshot.update(current)
+                if changed:
+                    broadcast_event({"type": "workspace:update"})
+            except Exception:
+                pass
+    threading.Thread(target=_workspace_watcher, daemon=True).start()
 
     try:
         httpd.serve_forever()

@@ -2,7 +2,7 @@
    Accuretta app — layout + components on top of the design system.
    Imports: /colors_and_type.css
    ============================================================ */
-@import url("/colors_and_type.css");
+@import url("/colors_and_type.css?v=2");
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100vh; overflow: hidden; background: var(--bg); color: var(--fg); }
@@ -102,7 +102,7 @@ button { font-family: inherit; }
   display: flex; align-items: center; gap: 6px;
   padding: 7px 10px 7px 8px;
   font-size: 11px; color: var(--fg-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   cursor: pointer;
   user-select: none;
   border-radius: 4px;
@@ -129,7 +129,7 @@ button { font-family: inherit; }
   padding: 3px 10px 3px 0;
   padding-left: calc(6px + var(--depth, 0) * 12px);
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--fg-muted);
   cursor: pointer;
   user-select: none;
@@ -164,7 +164,7 @@ button { font-family: inherit; }
   font-size: 10px;
   font-style: italic;
   color: var(--fg-faint);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 .ws-add {
   padding: 10px 12px; display: flex; gap: 6px;
@@ -176,7 +176,7 @@ button { font-family: inherit; }
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 5px 8px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
   color: var(--fg);
   outline: none;
@@ -298,7 +298,7 @@ button { font-family: inherit; }
 /* ---- chat ---- */
 .chat { display: grid; grid-template-rows: 1fr auto; min-height: 0; min-width: 0; background: var(--bg); }
 .chat-scroll { overflow-y: auto; padding: 24px 0 16px; }
-.chat-inner { max-width: 820px; margin: 0 auto; padding: 0 24px; display: flex; flex-direction: column; gap: 18px; }
+.chat-inner { max-width: 820px; margin: 0 auto; padding: 0 24px; display: flex; flex-direction: column; gap: 24px; }
 .app.sidebar-collapsed .chat-inner { max-width: 980px; }
 .app.sidebar-collapsed.preview-collapsed .chat-inner { max-width: 1080px; }
 
@@ -316,10 +316,11 @@ button { font-family: inherit; }
 .bubble-row.user .bubble-col { align-items: flex-end; }
 
 .bubble {
-  padding: 11px 15px;
-  border-radius: 14px;
-  font-size: 13px;
-  line-height: 1.6;
+  padding: 14px 18px;
+  border-radius: 20px;
+  font-family: var(--font-sans) !important;
+  font-size: 14px;
+  line-height: 1.65;
   color: var(--fg);
   word-wrap: break-word;
   overflow-wrap: break-word;
@@ -334,6 +335,8 @@ button { font-family: inherit; }
 .bubble.user {
   background: var(--lilac) !important;
   color: var(--off-black) !important;
+  border-top-right-radius: 4px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--lilac) 40%, transparent);
 }
 .bubble.user p,
 .bubble.user strong,
@@ -346,8 +349,9 @@ button { font-family: inherit; }
 .bubble.user pre  { background: rgba(20,20,18,0.12) !important; color: var(--off-black) !important; }
 .bubble.agent {
   background: var(--bg-raised);
-  border: 1px solid var(--border);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  border: none;
+  border-top-left-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.04);
 }
 .bubble.quiet {
   color: var(--fg-muted);
@@ -355,7 +359,7 @@ button { font-family: inherit; }
   background: transparent;
   border-style: dashed;
 }
-.bubble p { margin: 0 0 8px; }
+.bubble p { margin: 0 0 8px; font-family: var(--font-sans) !important; }
 .bubble p:last-child { margin: 0; }
 .bubble code { background: var(--bg-inset); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
 .bubble pre {
@@ -411,11 +415,14 @@ button { font-family: inherit; }
 /* reasoning/thinking indicator */
 .think-line {
   display: inline-flex; align-items: center; gap: 8px;
-  padding: 4px 10px;
-  font-family: var(--font-mono); font-size: 12px;
+  padding: 6px 14px;
+  font-family: var(--font-sans); font-size: 12px;
   color: var(--fg-muted);
   margin: 0 0 4px 0;
   max-width: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-inset) 60%, var(--bg-raised));
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.06);
 }
 .think-line i { font-size: 13px; color: var(--accent); flex-shrink: 0; }
 .think-line span {
@@ -428,27 +435,32 @@ button { font-family: inherit; }
 /* friendly one-line tool status (shimmer while running, check/cross when done) */
 .tool-line {
   display: inline-flex; align-items: center; gap: 8px;
-  padding: 6px 10px;
-  font-family: var(--font-mono); font-size: 12px;
+  padding: 6px 14px;
+  font-family: var(--font-sans); font-size: 12px;
   color: var(--fg-muted);
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg-inset) 60%, var(--bg-raised));
+  border: none;
+  border-left: none;
+  border-radius: 999px;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.06);
   width: fit-content;
   max-width: 100%;
 }
 .tool-line i { font-size: 13px; color: var(--fg-faint); flex-shrink: 0; }
 .tool-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-line.running {
-  border-left-color: var(--accent);
-  background: var(--accent-subtle);
+  background: color-mix(in srgb, var(--accent-subtle) 70%, var(--bg-inset));
 }
 .tool-line.running i { color: var(--accent); animation: spin 1.4s linear infinite; }
-.tool-line.done { border-left-color: var(--mint-3); }
 .tool-line.done i { color: var(--mint-3); }
-.tool-line.err { border-left-color: var(--danger); color: var(--danger); }
+.tool-line.err { color: var(--danger); }
 .tool-line.err i { color: var(--danger); }
+
+/* rich tool output card — soften radius, subtle shadow */
+.tool-line.rich {
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
 
 /* conveyor belt elision pill — appears when older middle messages aren't
    sent to the model so that the conversation stays under ctx budget. */
@@ -456,7 +468,7 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 10px;
   margin-bottom: 6px;
-  font-family: var(--font-mono); font-size: 11px;
+  font-family: var(--font-sans); font-size: 11px;
   color: var(--fg-muted);
   background: transparent;
   border: 1px dashed var(--border-strong);
@@ -475,7 +487,7 @@ button { font-family: inherit; }
 .tool-group-head {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 2px 0;
-  font-family: var(--font-mono); font-size: 12px;
+  font-family: var(--font-sans); font-size: 12px;
   color: var(--fg-muted);
   background: transparent;
   border: 0;
@@ -553,7 +565,7 @@ button { font-family: inherit; }
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
   color: var(--fg-muted);
   margin: 6px 0;
@@ -567,9 +579,8 @@ button { font-family: inherit; }
 
 /* ---- composer ---- */
 .composer-wrap {
-  border-top: 1px solid var(--border);
-  background: linear-gradient(to bottom, transparent, var(--bg-sunken) 30%);
-  padding: 14px 14px 18px;
+  background: transparent;
+  padding: 16px 20px 24px;
   display: flex; justify-content: center;
 }
 .app.sidebar-collapsed .composer { max-width: 980px; }
@@ -577,14 +588,20 @@ button { font-family: inherit; }
 .composer {
   width: 100%;
   max-width: 820px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  padding: 8px 10px 10px;
-  box-shadow: var(--shadow-sm);
+  background: color-mix(in srgb, var(--bg-raised) 85%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 40%, transparent);
+  border-radius: 24px;
+  padding: 10px 12px 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.04);
+  backdrop-filter: blur(20px);
   display: flex; flex-direction: column; gap: 8px;
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
-.composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
+.composer:focus-within {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border-strong));
+  box-shadow: 0 12px 40px rgba(0,0,0,0.08), 0 0 0 3px var(--accent-subtle);
+}
 .composer-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
@@ -593,7 +610,7 @@ button { font-family: inherit; }
   border: 1px solid var(--border);
   background: var(--bg-raised);
   color: var(--fg-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
   cursor: pointer;
 }
@@ -610,7 +627,7 @@ button { font-family: inherit; }
 .composer-input {
   width: 100%; background: transparent; border: none;
   padding: 6px 4px;
-  font-family: var(--font-mono); font-size: 13px;
+  font-family: var(--font-sans); font-size: 13px;
   color: var(--fg);
   resize: none; outline: none; line-height: 1.5;
   min-height: 36px; max-height: 200px;
@@ -620,7 +637,7 @@ button { font-family: inherit; }
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 14px;
-  font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500;
   border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg-raised); color: var(--fg);
   cursor: pointer;
@@ -668,7 +685,7 @@ button { font-family: inherit; }
 }
 .preview-toggle button {
   border: none; background: transparent;
-  padding: 3px 10px; font-family: var(--font-mono); font-size: 10px;
+  padding: 3px 10px; font-family: var(--font-sans); font-size: 10px;
   color: var(--fg-muted); cursor: pointer; border-radius: 999px;
   text-transform: uppercase; letter-spacing: 0.08em;
 }
@@ -687,7 +704,7 @@ button { font-family: inherit; }
   padding: 3px 8px; border-radius: 3px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
-  font-family: var(--font-mono); font-size: 10px;
+  font-family: var(--font-sans); font-size: 10px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -717,7 +734,7 @@ button { font-family: inherit; }
 .code-view {
   height: 100%; overflow: auto;
   background: var(--bg-raised);
-  font-family: var(--font-mono); font-size: 12px;
+  font-family: var(--font-sans); font-size: 12px;
   padding: 14px 16px;
   white-space: pre; color: var(--fg);
   tab-size: 2;
@@ -751,7 +768,7 @@ button { font-family: inherit; }
   cursor: pointer;
   box-shadow: var(--shadow-xs);
   z-index: 900;
-  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em;
+  font-family: var(--font-sans); font-size: 10px; letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 .preview-collapsed .pull-tab { display: inline-flex; }
@@ -817,7 +834,7 @@ button { font-family: inherit; }
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   padding: 7px 10px;
-  font-family: var(--font-mono); font-size: 12px; color: var(--fg);
+  font-family: var(--font-sans); font-size: 12px; color: var(--fg);
   outline: none;
 }
 .form-row input:focus, .form-row select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
@@ -855,7 +872,7 @@ button { font-family: inherit; }
 .approval .cmd {
   background: var(--off-black);
   color: var(--off-white);
-  font-family: var(--font-mono); font-size: 11px;
+  font-family: var(--font-sans); font-size: 11px;
   padding: 8px 10px;
   border-radius: 6px;
   max-height: 200px; overflow: auto;
@@ -930,7 +947,7 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   background: transparent; border: none;
   border-radius: 6px;
   color: var(--fg);
-  font-family: var(--font-mono); font-size: 13px;
+  font-family: var(--font-sans); font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
@@ -1063,7 +1080,7 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .approval-stack { left: 10px; right: 10px; bottom: calc(64px + env(safe-area-inset-bottom, 0)); max-width: none; }
 
   /* compact composer on mobile — everything on one row where possible */
-  .composer { padding: 5px 6px 6px; gap: 3px; border-radius: 10px; }
+  .composer { padding: 5px 6px 6px; gap: 3px; border-radius: 20px; }
   .composer-input { min-height: 26px; max-height: 100px; font-size: 14px; padding: 4px 6px; }
   .composer-tools { gap: 3px; flex-wrap: wrap; }
   .chip { padding: 2px 6px; font-size: 10px; }
@@ -1154,7 +1171,7 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
 
 /* ---- cumulative token readout ---- */
 .tok-total {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
   color: var(--fg-faint);
   padding-left: 8px;
@@ -1351,7 +1368,7 @@ pre.code-block:hover .copy-code,
 .palette-item .pi-sub { font-size: 11px; color: var(--fg-faint); }
 .palette-item .pi-kind {
   flex: none;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
   color: var(--fg-faint);
   text-transform: uppercase;
@@ -1370,7 +1387,7 @@ pre.code-block:hover .copy-code,
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-sunken);
   font-size: 10px; color: var(--fg-faint);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -1378,7 +1395,7 @@ pre.code-block:hover .copy-code,
 .kbd {
   display: inline-block;
   padding: 1px 6px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
   color: var(--fg-muted);
   background: var(--bg);
@@ -1441,7 +1458,7 @@ pre.code-block:hover .copy-code,
 }
 .approval .pv-k {
   flex: none; width: 72px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 10px;
   color: var(--fg-faint);
   text-transform: uppercase;
@@ -1449,7 +1466,7 @@ pre.code-block:hover .copy-code,
 }
 .approval .pv-v {
   flex: 1;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--fg);
   word-break: break-word;
   white-space: pre-wrap;
@@ -1474,7 +1491,7 @@ pre.code-block:hover .copy-code,
 .approval .cmd-details pre {
   margin: 4px 0 0;
   padding: 6px 8px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
   background: var(--bg-sunken);
   border: 1px solid var(--border-subtle);
@@ -1620,4 +1637,29 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   .form-row input, .form-row select, .form-row textarea { padding: 10px 12px; font-size: 14px; }
   /* topbar buttons tappable */
   .iconbtn { width: 36px; height: 36px; }
+}
+
+/* ============================================================
+   DARK MODE OVERRIDES (bubble shadows)
+   ============================================================ */
+[data-theme="dark"],
+.dark {
+  .bubble.agent {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+  }
+  .bubble.user {
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--lilac) 25%, transparent);
+  }
+  .think-line,
+  .tool-line {
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .composer {
+    background: color-mix(in srgb, var(--bg-raised) 75%, transparent);
+    border-color: color-mix(in srgb, var(--border-strong) 30%, transparent);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.15);
+  }
+  .composer:focus-within {
+    box-shadow: 0 12px 40px rgba(0,0,0,0.25), 0 0 0 3px var(--accent-subtle);
+  }
 }

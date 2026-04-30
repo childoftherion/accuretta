@@ -1,12 +1,11 @@
 # ============================================================
-# Accuretta — public repo gitignore
-# data/settings.json is the SEED defaults and is tracked.
-# Everything else under data/ is per-user runtime state.
+# accuretta — production-safe gitignore
+# anything in ./data is user-local (chats, keys, workspace paths,
+# machine scan, model choice). never commit it.
 # ============================================================
 
-# user runtime state — chats, memories, workspace, snapshots, system context
-data/*
-!data/settings.json
+# runtime user data — all of it is per-machine and often sensitive
+data/
 !data/.gitkeep
 
 # python
@@ -22,15 +21,18 @@ env/
 .env.*
 !.env.example
 
-# editor / OS / tool cruft
+# node / editor / ai tools cruft (in case we add any tooling later)
 node_modules/
 .vscode/
 .idea/
 .claude/
 .cursor/
 .cline/
+modelfiles/
 *.swp
 *.swo
+
+# OS
 .DS_Store
 Thumbs.db
 desktop.ini
@@ -38,15 +40,17 @@ desktop.ini
 # build / logs
 *.log
 *.tmp
+dist/
 build/
 coverage/
 
-# safety net — stray runtime files outside data/
+# local design drafts that aren't part of the shipped app
+
+
+# accuretta-specific safety net — if any of these sneak outside ./data
 ACCURETTA.md
 chats.json
+settings.json
 workspace.json
-memories.jsonl
 approvals.json
 versions/
-snapshots/
-pending/

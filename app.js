@@ -35,6 +35,7 @@
     _versionsExpanded: false,
     _lastMsgTokens: 0,
     _lastMsgPromptTokens: 0,
+    _ctxPoll: null,
   };
 
   const app = $("#app");
@@ -394,6 +395,17 @@
       state.mobileTab = "chat";
       applyMobileTab();
     }
+    // start context-stats polling
+    clearInterval(state._ctxPoll);
+    state._ctxPoll = setInterval(async () => {
+      try {
+        const r = await api("/api/ctx-stats");
+        if (r && typeof r.prompt_tokens === "number") {
+          state._lastMsgPromptTokens = r.prompt_tokens;
+          renderCtxGauge();
+        }
+      } catch (_) {}
+    }, 2000);
   }
 
   // ---------- session-scoped desktop kill switch ----------
@@ -1900,14 +1912,21 @@
 
   function renderApprovals() {
     const stack = $("#approval-stack");
-    stack.innerHTML = "";
+    if (stack) stack.innerHTML = "";
+    const chatInner = $("#chat-inner");
+    if (!chatInner) return;
+    chatInner.querySelectorAll(".approval-row").forEach(n => n.remove());
+
     for (const a of state.approvals.values()) {
-      const card = document.createElement("div");
-      card.className = "approval";
+      const row = document.createElement("div");
+      row.className = "bubble-row approval-row";
+      row.dataset.approvalId = a.id;
       const details = a.details || {};
       const tag = details.kind || "command";
-      const isDesktop = String(tag).startsWith("desktop.");
+      const isDesktop = String(tag).startsWith("desktop.") || tag === "ui.action";
       const isDestructive = ["delete", "write_file"].includes(tag);
+      const card = document.createElement("div");
+      card.className = "approval inline";
       if (isDesktop) card.classList.add("kind-desktop");
       if (isDestructive) card.classList.add("kind-destructive");
       card.innerHTML = `
@@ -1922,12 +1941,19 @@
           <div class="cmd">${esc(a.command)}</div>
         </details>
         <div class="actions">
-          <button class="btn danger" data-act="deny">Deny</button>
-          <button class="btn accent" data-act="approve">Approve</button>
+          <button class="btn danger" data-act="deny"><i class="ph ph-x"></i>Deny</button>
+          <button class="btn accent" data-act="approve"><i class="ph-bold ph-check"></i>Approve</button>
         </div>`;
       card.querySelector('[data-act="approve"]').addEventListener("click", () => decideApproval(a.id, "approve"));
       card.querySelector('[data-act="deny"]').addEventListener("click", () => decideApproval(a.id, "deny"));
-      stack.appendChild(card);
+      row.innerHTML = `
+        <div class="avatar approval-avatar"><i class="ph-bold ph-shield-warning"></i></div>
+        <div class="bubble-col"></div>`;
+      row.querySelector(".bubble-col").appendChild(card);
+      chatInner.appendChild(row);
+    }
+    if (state.approvals.size > 0) {
+      requestAnimationFrame(() => scrollToBottom(true));
     }
   }
 

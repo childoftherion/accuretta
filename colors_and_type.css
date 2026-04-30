@@ -173,42 +173,61 @@
 }
 
 /* ============================================================
-   DARK MODE (off-black)
+   DARK MODE — cool neutrals, soft gradient, never max-black.
+   Designed to feel modern and sleek: zinc-toned surfaces, a gentle
+   top-down gradient on the page (raised → bg), no warm/brown cast.
    ============================================================ */
 [data-theme="dark"],
 .dark {
-  --bg:        #0F0F0E;
-  --bg-raised: #181815;
-  --bg-sunken: #0A0A09;
-  --bg-inset:  #232320;
+  /* Cool neutrals: pure-ish gray with a hint of blue, no warm tint.
+     Body sits at #1a1a1d (mid-dark, easy on the eyes), raised lifts
+     to #222227 (cards, panels), sunken drops to #141417 (chat scroll
+     well). All tuned so a 1px border between them is just barely
+     visible — that's where the depth comes from, not max-contrast. */
+  --bg:        #1a1a1d;
+  --bg-raised: #222227;
+  --bg-sunken: #141417;
+  --bg-inset:  #2a2a30;
 
-  --fg:        var(--off-white);
-  --fg-muted:  #B4B0A4;
-  --fg-subtle: var(--gray-40);
-  --fg-faint:  #6E6B62;
+  /* Subtle vertical gradient applied to body — page eases from a
+     slightly lighter top down to the base, which gives the "off-black
+     gradient" feel without darkening the chat itself. */
+  --bg-gradient: linear-gradient(180deg, #1f1f23 0%, #1a1a1d 38%, #161618 100%);
+
+  --fg:        #ECEAE5;
+  --fg-muted:  #A8A6A0;
+  --fg-subtle: #7C7A75;
+  --fg-faint:  #5A5854;
   --fg-invert: var(--off-black);
 
-  --border:        #232320;
-  --border-strong: #34332E;
-  --border-subtle: #1A1A17;
+  --border:        #2a2a2f;
+  --border-strong: #38383e;
+  --border-subtle: #1f1f23;
 
   --accent:        var(--ember);
   --accent-hover:  #F7B884;
-  --accent-subtle: #3A2818;
+  --accent-subtle: rgba(244,162,97,0.14);
   --accent-fg:     var(--off-black);
 
-  --success-subtle: #1D3328;
-  --warning-subtle: #33301D;
-  --danger-subtle:  #33202A;
-  --info-subtle:    #2A2438;
+  --success-subtle: rgba(106,196,154,0.14);
+  --warning-subtle: rgba(232,211,112,0.14);
+  --danger-subtle:  rgba(255,106,0,0.14);
+  --info-subtle:    rgba(142,114,209,0.14);
 
   --shadow-xs: 0 1px 0 rgba(0,0,0,0.3);
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-lg: 0 12px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-pop: 0 20px 60px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-lg: 0 14px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06);
+  --shadow-pop: 0 24px 70px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.08);
 
   --shadow-inset: inset 0 1px 0 rgba(0,0,0,0.3), inset 0 0 0 1px rgba(255,255,255,0.04);
+}
+
+/* Apply the gradient at the page level only — children with their own
+   bg keep their flat color so we don't "double up" gradients. */
+[data-theme="dark"] body,
+.dark body {
+  background: var(--bg-gradient, var(--bg)) fixed;
 }
 
 /* ============================================================
