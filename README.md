@@ -15,9 +15,11 @@
 
 <br />
 
-<video src="https://github.com/user-attachments/assets/ff7ff8b8-56f9-4393-b4fa-1538a99b87f7" controls muted playsinline poster="media/demo-poster.png" width="780"></video>
+<a href="https://github.com/user-attachments/assets/ff7ff8b8-56f9-4393-b4fa-1538a99b87f7" title="Click to play the demo video">
+  <img src="media/demo-poster.png" alt="Accuretta demo. Click to play." width="780" />
+</a>
 
-<sub>If your viewer does not play the video inline, grab it from <a href="media/demo.mp4"><code>media/demo.mp4</code></a>.</sub>
+<sub>Click the image above to watch the demo (about 23 seconds, 1.9 MB).</sub>
 
 </div>
 
