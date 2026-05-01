@@ -44,7 +44,7 @@ I came in fresh from Ollama and figured llama.cpp would be a sidegrade. It was n
 
 ## A look at the agent in action
 
-The agent has hands. It can read files, write files, run commands, fetch web pages, take screenshots, and inspect network state. Every action that touches your disk or your network is gated by an approval card, so nothing happens silently.
+The agent has hands. It can read files, write files, run commands, fetch web pages, take screenshots, and inspect network state. Anything destructive (file writes, shell commands) is gated by an approval card, so nothing dangerous happens silently. Read style actions like web fetches can run automatically depending on the model and your settings.
 
 <p align="center">
   <img src="media/screenshot.png" alt="Agent writing a haiku to disk after exploring an empty workspace folder" width="780" />
@@ -64,7 +64,7 @@ A more interesting example. Below the model is asked to run a network snapshot, 
 * **Live HTML preview.** When the model writes a webpage, you see it render next to the conversation. Switch between rendered view and source with one click.
 * **Open existing HTML from your workspace.** Click the lightning bolt next to any `.html` file in the workspace tree and it loads into the preview pane with its real CSS, JS, and images intact. The bridge serves through a hardened endpoint with strict path traversal checks, so the iframe can only ever reach files inside the folder you opened.
 * **Python syntax checker.** Click the checkmark next to any `.py` file and the bridge runs `compile()` on it. You get a green banner if it parses, or a red one with the line, column, and message. Nothing executes. No imports run. No risk.
-* **Approval cards for everything risky.** File writes, shell commands, web fetches. The agent never silently does the dangerous thing.
+* **Approval cards for everything destructive.** File writes and shell commands always prompt. Read style calls like web fetches can run automatically when you trust the model with that.
 * **Conversation history on disk.** Sessions live in a folder you control. Branch them, rename them, delete them. Nothing is locked into a database.
 * **A real settings drawer.** Context window, sampler temperature, top p, top k, KV cache type, GPU layers, batch size, thinking budget, model swap. All on the fly with a quick reload.
 * **Mobile aware UI.** The whole thing works on a phone browser. Composer, sidebar, settings, swipe back to chat from the menu. No app store, no install, just open the localhost URL on the same network.
@@ -87,9 +87,11 @@ A more interesting example. Below the model is asked to run a network snapshot, 
 
 ## Privacy
 
-Nothing leaves your computer unless you ask. The bridge talks to two things on localhost: your llama-server instance and your browser. That is it. Web fetches go through an approval card before any request fires. There is no telemetry, no analytics, no anonymous account, no cloud sync, no opt out screen because there is nothing to opt out of.
+Nothing about you, your prompts, or your files leaves your computer. The bridge talks to two things on localhost: your llama-server instance and your browser. That is it. There is no telemetry, no analytics, no anonymous account, no cloud sync, no opt out screen because there is nothing to opt out of.
 
-If you are paranoid (and you should be), you can run Wireshark next to it. The only outbound traffic you will see is whatever you explicitly approved.
+The one outbound channel is the agent's own web fetch tool. When the model asks to read a URL, that request goes out from your machine to that site, the same way your browser would. Some models will ask first via an approval card, others will just do it as part of answering your question. Either way nothing is sent unless the model decided it needed something off the open web for the task you gave it.
+
+If you are paranoid (and you should be), run Wireshark next to it. The only outbound traffic you will see is whatever the agent fetched. Want full silence? Run with the network unplugged or block the bridge process at the firewall. The model itself runs offline once loaded, so you can chat all day with no internet at all.
 
 ## Quick start
 
