@@ -48,6 +48,21 @@ echo Settings -^> Models folder. browser opens automatically once ready.
 echo ctrl+c to stop.
 echo.
 
+REM ---- pick which browser to launch ----------------------------
+REM   uncomment ONE of the lines below to override your system default.
+REM   set values: chrome | firefox | edge | brave | opera | vivaldi | none
+REM
+REM set ACCURETTA_BROWSER=chrome
+REM set ACCURETTA_BROWSER=firefox
+REM set ACCURETTA_BROWSER=edge
+REM set ACCURETTA_BROWSER=brave
+REM set ACCURETTA_BROWSER=none
+REM
+REM Or pass it as the first argument: start.bat firefox
+if not "%~1"=="" set "ACCURETTA_BROWSER=%~1"
+if defined ACCURETTA_BROWSER echo browser override: %ACCURETTA_BROWSER%
+echo.
+
 REM bridge spawns llama-server, binds 8787, opens browser, then serves.
 %PYEXE% -u bridge.py
 

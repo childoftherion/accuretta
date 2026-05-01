@@ -1126,6 +1126,126 @@ def tool_run_powershell(args: dict) -> dict:
     return _run_powershell(cmd, timeout=int(args.get("timeout", 120)))
 
 
+_NETSNAP_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$conns = Get-NetTCPConnection -State Established,Listen |
+    Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess
+$udp = Get-NetUDPEndpoint |
+    Select-Object LocalAddress, LocalPort, OwningProcess
+$dns = Get-DnsClientCache |
+    Where-Object { $_.Type -eq 'A' -or $_.Type -eq 'AAAA' -or $_.Type -eq 1 -or $_.Type -eq 28 } |
+    Sort-Object TimeToLive -Descending |
+    Select-Object -First 60 -Property Entry, Name, Type, TimeToLive
+$procs = @{}
+$ids = @($conns.OwningProcess) + @($udp.OwningProcess) | Sort-Object -Unique
+foreach ($procId in $ids) {
+    if (-not $procId) { continue }
+    $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($p) { $procs[[string]$procId] = $p.ProcessName }
+}
+@{
+    tcp = @($conns)
+    udp = @($udp)
+    dns_cache = @($dns)
+    processes = $procs
+} | ConvertTo-Json -Depth 5 -Compress
+"""
+
+
+def tool_network_snapshot(args: dict) -> dict:
+    """Snapshot the host's current network state (no admin, no install).
+    Returns active TCP connections (with owning process names), UDP listeners,
+    and the recent DNS resolver cache so the model can spot weird traffic."""
+    if os.name != "nt":
+        return {"error": "network_snapshot currently only supports Windows (uses Get-NetTCPConnection)"}
+    approval = request_approval(
+        title="Network snapshot",
+        command="Get-NetTCPConnection / Get-NetUDPEndpoint / Get-DnsClientCache",
+        details={"kind": "network_snapshot"},
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied snapshot ({approval.get('status')})"}
+
+    res = _run_powershell(_NETSNAP_PS, timeout=20)
+    if not res.get("ok"):
+        return {"error": (res.get("stderr") or res.get("stdout") or "snapshot failed").strip()[:400]}
+    raw = (res.get("stdout") or "")
+    # PowerShell can prepend a BOM and mix in non-JSON noise (progress lines,
+    # warnings) before ConvertTo-Json's output. Strip BOM, then carve out the
+    # JSON payload by slicing from first '{' / '[' to its matching last brace.
+    raw = raw.lstrip("\ufeff").strip()
+    if not raw:
+        return {"error": "empty output from PowerShell"}
+    data = None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # find the first JSON-looking start, then trim to its matching end
+        start = -1
+        for k, ch in enumerate(raw):
+            if ch in "{[":
+                start = k
+                break
+        if start >= 0:
+            opener = raw[start]
+            closer = "}" if opener == "{" else "]"
+            end = raw.rfind(closer)
+            if end > start:
+                candidate = raw[start:end + 1]
+                try:
+                    data = json.loads(candidate)
+                except Exception:
+                    pass
+    if data is None:
+        return {"error": "parse failed: no valid JSON in PowerShell output", "raw": raw[:600]}
+
+    tcp = data.get("tcp") or []
+    udp = data.get("udp") or []
+    procs = data.get("processes") or {}
+    if isinstance(tcp, dict): tcp = [tcp]
+    if isinstance(udp, dict): udp = [udp]
+
+    # annotate each connection with its owning process name (or "?" if gone).
+    for c in tcp:
+        c["process"] = procs.get(str(c.get("OwningProcess")), "?")
+    for c in udp:
+        c["process"] = procs.get(str(c.get("OwningProcess")), "?")
+
+    # group by remote endpoint so destinations with many connections rise to the top.
+    from collections import Counter
+    remotes = Counter()
+    for c in tcp:
+        addr = c.get("RemoteAddress") or ""
+        port = c.get("RemotePort") or 0
+        if addr and addr not in ("0.0.0.0", "::", "127.0.0.1", "::1"):
+            remotes[(addr, int(port))] += 1
+    top_remotes = [{"address": a, "port": p, "count": n} for (a, p), n in remotes.most_common(30)]
+
+    # connections per process — handy for "what is svchost talking to"
+    by_proc = Counter()
+    for c in tcp:
+        by_proc[c.get("process") or "?"] += 1
+    top_procs = [{"process": k, "connections": v} for k, v in by_proc.most_common(20)]
+
+    listeners = []
+    for c in udp:
+        la = c.get("LocalAddress") or ""
+        if la in ("0.0.0.0", "::"):
+            listeners.append(c)
+    listeners = listeners[:30]
+
+    return {
+        "platform": "windows",
+        "tcp_count": len(tcp),
+        "udp_count": len(udp),
+        "tcp_connections": tcp[:80],
+        "udp_listeners": listeners,
+        "top_remotes": top_remotes,
+        "top_processes": top_procs,
+        "recent_dns": data.get("dns_cache") or [],
+    }
+
+
 def tool_open_program(args: dict) -> dict:
     """Launch a program. Allowed from Program Files and user areas; blocked for Windows/System32 only."""
     path = normalize_path(args.get("path") or "")
@@ -2669,6 +2789,21 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_web_fetch,
     },
+    "network_snapshot": {
+        "description": (
+            "Snapshot the host's current network state. Returns active TCP "
+            "connections (with owning process names), UDP listeners, top remote "
+            "destinations, and the recent DNS resolver cache. No admin required, "
+            "no install. Use to spot weird traffic — unknown processes phoning "
+            "home, unexpected open ports, suspicious resolved domains. Windows-only "
+            "for now. Each call requires user approval."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+        "fn": tool_network_snapshot,
+    },
     "remember": {
         "description": (
             "Save a terse lesson (<= 220 chars) so future sessions start smarter. "
@@ -3058,6 +3193,11 @@ TOOL_ALIASES = {
     "windows": "list_windows",
     "save_memory": "remember",
     "delete_memory": "forget",
+    "netstat": "network_snapshot",
+    "network_scan": "network_snapshot",
+    "inspect_network": "network_snapshot",
+    "list_connections": "network_snapshot",
+    "sniff_network": "network_snapshot",
 }
 
 
@@ -5270,9 +5410,41 @@ def main():
     url = f"http://localhost:{PORT}"
     print(f"\nopen {url}  — or from phone, http://<tailscale-ip>:{PORT}")
 
-    # open browser shortly after bind (in a thread, so serve_forever owns the main thread)
+    # open browser shortly after bind (in a thread, so serve_forever owns the main thread).
+    # Honor ACCURETTA_BROWSER env var so the user can pick a non-default browser:
+    #   chrome | firefox | edge | brave | opera | vivaldi | none | default
     def _open_browser():
         time.sleep(0.8)
+        choice = (os.environ.get("ACCURETTA_BROWSER") or "").strip().lower()
+        if choice in ("none", "off", "skip", "no"):
+            print(f"  [info] ACCURETTA_BROWSER={choice} — not auto-opening a browser. Visit {url} in any browser.")
+            return
+        # Map short names to common Windows install paths + executable names.
+        candidates = {
+            "chrome":  ["chrome.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"],
+            "firefox": ["firefox.exe", r"C:\Program Files\Mozilla Firefox\firefox.exe", r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"],
+            "edge":    ["msedge.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"],
+            "brave":   ["brave.exe", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"],
+            "opera":   ["opera.exe", os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\opera.exe")],
+            "vivaldi": ["vivaldi.exe", os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe")],
+        }
+        if choice and choice in candidates:
+            import shutil, subprocess
+            exe = None
+            for c in candidates[choice]:
+                p = shutil.which(c) if not os.path.sep in c else (c if os.path.exists(c) else None)
+                if p:
+                    exe = p
+                    break
+            if exe:
+                try:
+                    subprocess.Popen([exe, url], close_fds=True)
+                    print(f"  [info] opened {choice} -> {url}")
+                    return
+                except Exception as e:
+                    print(f"  [warn] failed to launch {choice} ({e}); falling back to default browser.")
+            else:
+                print(f"  [warn] ACCURETTA_BROWSER={choice} but {choice} not found; falling back to default browser.")
         try:
             webbrowser.open(url)
         except Exception:

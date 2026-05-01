@@ -97,6 +97,94 @@
     return (n / 1024 / 1024).toFixed(2) + " MB";
   }
 
+  // ---------- tool icons (inlined so no extra HTTP / static-whitelist changes) ----------
+  const TOOL_SVG = {
+    searching_computer: '<svg viewBox="0 0 150.817 150.817" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M58.263,64.946c3.58-8.537,9.834-16.039,18.456-21.02c6.644-3.842,14.225-5.876,21.902-5.876c6.376,0,12.568,1.461,18.207,4.031V21.677C116.829,9.706,92.563,0,62.641,0C32.71,0,8.448,9.706,8.448,21.677v21.681C8.436,54.75,30.372,64.061,58.263,64.946z M62.629,5.416c29.77,0,48.768,9.633,48.768,16.255c0,6.634-18.998,16.258-48.768,16.258c-29.776,0-48.774-9.624-48.774-16.258C13.855,15.049,32.853,5.416,62.629,5.416z M8.429,75.883V54.202c0,10.973,20.396,20.015,46.841,21.449c-1.053,7.21-0.311,14.699,2.375,21.799C30.055,96.445,8.436,87.184,8.429,75.883z M95.425,125.631c-9.109,2.771-20.457,4.445-32.796,4.445c-29.931,0-54.193-9.706-54.193-21.684V86.709c0,11.983,24.256,21.684,54.193,21.684c0.341,0,0.673-0.018,1.014-0.018C71.214,118.373,82.827,124.656,95.425,125.631z M131.296,63.11c-10.388-17.987-33.466-24.174-51.46-13.785c-17.987,10.388-24.173,33.463-13.792,51.45c10.388,17.993,33.478,24.174,51.465,13.798C135.51,104.191,141.684,81.102,131.296,63.11z M71.449,97.657C62.778,82.66,67.945,63.394,82.955,54.72c15.01-8.662,34.275-3.504,42.946,11.509c8.672,15.013,3.502,34.279-11.508,42.943C99.377,117.85,80.117,112.686,71.449,97.657z M139.456,133.852l-16.203,9.353l-12.477-21.598l16.209-9.359L139.456,133.852z M137.708,149.562c-4.488,2.582-10.199,1.06-12.794-3.429l16.216-9.353C143.718,141.268,142.184,146.979,137.708,149.562z"/></svg>',
+    computer_search_failed: '<svg viewBox="0 0 139.558 139.558" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M54.19,65.705c29.938,0,54.19-9.703,54.19-21.681V22.344c0-11.977-24.265-21.68-54.19-21.68C24.263,0.664,0,10.367,0,22.344v21.681C0,56.002,24.256,65.705,54.19,65.705z M54.19,6.089c29.773,0,48.771,9.627,48.771,16.255c0,6.628-18.998,16.262-48.771,16.262c-29.772,0-48.771-9.627-48.771-16.255C5.419,15.722,24.418,6.089,54.19,6.089z"/><path d="M54.19,98.225c6.467,0,12.638-0.476,18.39-1.304c4.643-15.381,18.928-26.609,35.801-26.609V54.866c0,11.971-24.265,21.681-54.19,21.681C24.263,76.547,0,66.844,0,54.866v21.681C0,88.518,24.256,98.225,54.19,98.225z"/><path d="M54.19,109.057c-29.934,0-54.19-9.7-54.19-21.678v21.678c0,11.978,24.263,21.684,54.19,21.684c8.306,0,16.148-0.779,23.19-2.107c-3.997-5.906-6.342-13.006-6.394-20.648C65.696,108.673,60.058,109.057,54.19,109.057z"/><path d="M108.381,76.541c-17.214,0-31.176,13.962-31.176,31.176c0,17.215,13.962,31.177,31.176,31.177s31.177-13.962,31.177-31.177C139.558,90.503,125.595,76.541,108.381,76.541z M122.709,115.432l-6.613,6.613l-7.715-7.709l-7.715,7.709l-6.612-6.613l7.708-7.715l-7.708-7.715l6.612-6.613l7.715,7.722l7.715-7.722l6.613,6.613L115,107.717L122.709,115.432z"/></svg>',
+    writing_file: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M17.093,1.293l-11.2,11.2a.99.99,0,0,0-.242.391l-1.6,4.8A1,1,0,0,0,5,19a1.014,1.014,0,0,0,.316-.051l4.8-1.6a1.006,1.006,0,0,0,.391-.242l11.2-11.2a1,1,0,0,0,0-1.414l-3.2-3.2A1,1,0,0,0,17.093,1.293ZM9.26,15.526l-2.679.893.893-2.679L17.8,3.414,19.586,5.2ZM3,21H20a1,1,0,0,1,0,2H3a1,1,0,0,1,0-2Z"/></svg>',
+    editing_file: '<svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5,9.2H9.2v0H35.1a3.9828,3.9828,0,0,1,3.7,3.7l.1123,20.7359"/><path d="M9.281,13.7433,9.2,35.1a3.9807,3.9807,0,0,0,3.7,3.7H38.8v0h3.7"/><path d="M16.6,31.4V27.7L27.7,16.6l3.7,3.7L20.3,31.4Z"/></svg>',
+    deleted: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.3094 2.25002H13.6908C13.9072 2.24988 14.0957 2.24976 14.2737 2.27819C14.977 2.39049 15.5856 2.82915 15.9146 3.46084C15.9978 3.62073 16.0573 3.79961 16.1256 4.00494L16.2373 4.33984C16.2562 4.39653 16.2616 4.41258 16.2661 4.42522C16.4413 4.90933 16.8953 5.23659 17.4099 5.24964C17.4235 5.24998 17.44 5.25004 17.5001 5.25004H20.5001C20.9143 5.25004 21.2501 5.58582 21.2501 6.00004C21.2501 6.41425 20.9143 6.75004 20.5001 6.75004H3.5C3.08579 6.75004 2.75 6.41425 2.75 6.00004C2.75 5.58582 3.08579 5.25004 3.5 5.25004H6.50008C6.56013 5.25004 6.5767 5.24998 6.59023 5.24964C7.10488 5.23659 7.55891 4.90936 7.73402 4.42524C7.73863 4.41251 7.74392 4.39681 7.76291 4.33984L7.87452 4.00496C7.94281 3.79964 8.00233 3.62073 8.08559 3.46084C8.41453 2.82915 9.02313 2.39049 9.72643 2.27819C9.90445 2.24976 10.093 2.24988 10.3094 2.25002ZM9.00815 5.25004C9.05966 5.14902 9.10531 5.04404 9.14458 4.93548C9.1565 4.90251 9.1682 4.86742 9.18322 4.82234L9.28302 4.52292C9.37419 4.24941 9.39519 4.19363 9.41601 4.15364C9.52566 3.94307 9.72853 3.79686 9.96296 3.75942C10.0075 3.75231 10.067 3.75004 10.3553 3.75004H13.6448C13.9331 3.75004 13.9927 3.75231 14.0372 3.75942C14.2716 3.79686 14.4745 3.94307 14.5842 4.15364C14.605 4.19363 14.626 4.2494 14.7171 4.52292L14.8169 4.82216L14.8556 4.9355C14.8949 5.04405 14.9405 5.14902 14.992 5.25004H9.00815Z"/><path d="M5.91509 8.45015C5.88754 8.03685 5.53016 7.72415 5.11686 7.7517C4.70357 7.77925 4.39086 8.13663 4.41841 8.54993L4.88186 15.5017C4.96736 16.7844 5.03642 17.8205 5.19839 18.6336C5.36679 19.4789 5.65321 20.185 6.2448 20.7385C6.8364 21.2919 7.55995 21.5308 8.4146 21.6425C9.23662 21.7501 10.275 21.7501 11.5606 21.75H12.4395C13.7251 21.7501 14.7635 21.7501 15.5856 21.6425C16.4402 21.5308 17.1638 21.2919 17.7554 20.7385C18.347 20.185 18.6334 19.4789 18.8018 18.6336C18.9638 17.8206 19.0328 16.7844 19.1183 15.5017L19.5818 8.54993C19.6093 8.13663 19.2966 7.77925 18.8833 7.7517C18.47 7.72415 18.1126 8.03685 18.0851 8.45015L17.6251 15.3493C17.5353 16.6971 17.4713 17.6349 17.3307 18.3406C17.1943 19.025 17.004 19.3873 16.7306 19.6431C16.4572 19.8989 16.083 20.0647 15.391 20.1552C14.6776 20.2485 13.7376 20.25 12.3868 20.25H11.6134C10.2626 20.25 9.32255 20.2485 8.60915 20.1552C7.91715 20.0647 7.54299 19.8989 7.26958 19.6431C6.99617 19.3873 6.80583 19.025 6.66948 18.3406C6.52892 17.6349 6.46489 16.6971 6.37503 15.3493L5.91509 8.45015Z"/><path d="M9.42546 10.2538C9.83762 10.2125 10.2052 10.5133 10.2464 10.9254L10.7464 15.9254C10.7876 16.3376 10.4869 16.7051 10.0747 16.7463C9.66256 16.7875 9.29503 16.4868 9.25381 16.0747L8.75381 11.0747C8.7126 10.6625 9.01331 10.295 9.42546 10.2538Z"/><path d="M14.5747 10.2538C14.9869 10.295 15.2876 10.6625 15.2464 11.0747L14.7464 16.0747C14.7052 16.4868 14.3376 16.7875 13.9255 16.7463C13.5133 16.7051 13.2126 16.3376 13.2538 15.9254L13.7538 10.9254C13.795 10.5133 14.1626 10.2125 14.5747 10.2538Z"/></svg>',
+    running_command: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 17H20"/><path d="M5 7L10 12L5 17"/></svg>',
+    command_failed: '<svg viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><rect x="17" y="23" width="6" height="2"/><polygon points="7 24.11 16.6 19.7 16.6 17.89 7 13.48 7 15.68 13.79 18.8 7 21.91 7 24.11"/><path d="M33.68,15.4H32V29H4V10.8H18.68A3.66,3.66,0,0,1,19,9.89l.4-.69H4V7H20.71l1.15-2H4A2,2,0,0,0,2,7V29a2,2,0,0,0,2,2H32a2,2,0,0,0,2-2V15.38Z"/><path d="M26.85,1.14,21.13,11A1.28,1.28,0,0,0,22.23,13H33.68A1.28,1.28,0,0,0,34.78,11L29.06,1.14A1.28,1.28,0,0,0,26.85,1.14Z"/></svg>',
+    downloading_file: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11C3 11.9319 3 12.3978 3.15224 12.7654C3.35523 13.2554 3.74458 13.6448 4.23463 13.8478C4.60218 14 5.06812 14 6 14H6.67544C7.25646 14 7.54696 14 7.77888 14.1338C7.83745 14.1675 7.89245 14.2072 7.94303 14.2521C8.14326 14.4298 8.23513 14.7054 8.41886 15.2566L8.54415 15.6325C8.76416 16.2925 8.87416 16.6225 9.13605 16.8112C9.39794 17 9.7458 17 10.4415 17H13.5585C14.2542 17 14.6021 17 14.864 16.8112C15.1258 16.6225 15.2358 16.2925 15.4558 15.6325L15.5811 15.2566C15.7649 14.7054 15.8567 14.4298 16.057 14.2521C16.1075 14.2072 16.1625 14.1675 16.2211 14.1338C16.453 14 16.7435 14 17.3246 14H18C18.9319 14 19.3978 14 19.7654 13.8478C20.2554 13.6448 20.6448 13.2554 20.8478 12.7654C21 12.3978 21 11.9319 21 11"/><path d="M8 9L12 12M12 12L16 9M12 12L12 2"/><path d="M16 5H17C18.8856 5 19.8284 5 20.4142 5.58579C21 6.17157 21 7.11438 21 9V17C21 18.8856 21 19.8284 20.4142 20.4142C19.8284 21 18.8856 21 17 21H7C5.11438 21 4.17157 21 3.58579 20.4142C3 19.8284 3 18.8856 3 17V9C3 7.11438 3 6.17157 3.58579 5.58579C4.17157 5 5.11438 5 7 5H8"/></svg>',
+    multiple_tasks_complete: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.00009 13L12.2278 16.3821C12.6557 16.7245 13.2794 16.6586 13.6264 16.2345L22.0001 6"/><path d="M9.6434 11.5995L14.5356 5.6201"/><path d="M2.36 13.52L4.87309 16.9049C5.559 17.4193 6.52849 17.3016 7.07142 16.638L8.03225 15.4637"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  };
+  const TOOL_ICON_MAP = {
+    list_directory:  { run: "searching_computer", err: "computer_search_failed" },
+    read_file:       { run: "searching_computer", err: "computer_search_failed" },
+    grep_files:      { run: "searching_computer", err: "computer_search_failed" },
+    write_file:      { run: "writing_file",       err: "command_failed" },
+    edit_file:       { run: "editing_file",       err: "command_failed" },
+    patch_file:      { run: "editing_file",       err: "command_failed" },
+    delete_file:     { run: "deleted",            err: "command_failed" },
+    run_powershell:  { run: "running_command",    err: "command_failed" },
+    open_program:    { run: "running_command",    err: "command_failed" },
+    web_fetch:       { run: "downloading_file",   err: "command_failed" },
+    web_search:      { run: "globe",              err: "computer_search_failed" },
+    network_snapshot:{ run: "globe",              err: "computer_search_failed" },
+  };
+  function renderWebSearchChips(results) {
+    if (!results || !results.length) return "";
+    const max = 4;
+    const visible = results.slice(0, max);
+    const overflow = results.length - visible.length;
+    const chips = visible.map(r => {
+      let host = "";
+      try { host = new URL(r.url).hostname.replace(/^www\./, ""); } catch {}
+      const label = host || r.url;
+      const fav = host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : "";
+      // Wrap: globe fallback always rendered; img sits on top, hides itself on error.
+      const favHtml = `<span class="web-fav-wrap">${TOOL_SVG.globe}${fav ? `<img class="web-fav" src="${esc(fav)}" alt="" loading="lazy" onerror="this.style.display='none'">` : ""}</span>`;
+      return `<a class="web-chip" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.title || r.url)}">${favHtml}<span>${esc(label)}</span></a>`;
+    }).join("");
+    const moreChip = overflow > 0
+      ? `<span class="web-chip web-chip-more">+${overflow} more</span>`
+      : "";
+    return `<div class="web-results">${chips}${moreChip}</div>`;
+  }
+
+  function renderNetworkChart(res) {
+    if (!res || res.error) return "";
+    const tcp = res.tcp_count || 0;
+    const udp = res.udp_count || 0;
+    const dns = (res.recent_dns || []).length;
+    const procs = (res.top_processes || []).slice(0, 6);
+    const remotes = (res.top_remotes || []).slice(0, 6);
+    const procMax = procs.reduce((m, p) => Math.max(m, p.connections || 0), 1);
+    const remMax = remotes.reduce((m, r) => Math.max(m, r.count || 0), 1);
+    const stat = (label, n, cls) => `<div class="net-stat ${cls}"><div class="net-stat-num">${n}</div><div class="net-stat-lbl">${label}</div></div>`;
+    const procRow = (p) => {
+      const w = Math.max(4, Math.round(((p.connections || 0) / procMax) * 100));
+      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(p.process || "?")}">${esc(p.process || "?")}</span><span class="net-bar-track"><span class="net-bar-fill net-bar-proc" style="width:${w}%"></span></span><span class="net-bar-num">${p.connections || 0}</span></div>`;
+    };
+    const remRow = (r) => {
+      const w = Math.max(4, Math.round(((r.count || 0) / remMax) * 100));
+      const lbl = `${r.address || "?"}${r.port ? ":" + r.port : ""}`;
+      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(lbl)}">${esc(lbl)}</span><span class="net-bar-track"><span class="net-bar-fill net-bar-rem" style="width:${w}%"></span></span><span class="net-bar-num">${r.count || 0}</span></div>`;
+    };
+    const procBlock = procs.length
+      ? `<div class="net-block"><div class="net-block-title">Top processes</div>${procs.map(procRow).join("")}</div>`
+      : "";
+    const remBlock = remotes.length
+      ? `<div class="net-block"><div class="net-block-title">Top remote endpoints</div>${remotes.map(remRow).join("")}</div>`
+      : "";
+    return `<div class="netscan-card">
+      <div class="net-stats">${stat("TCP", tcp, "net-stat-tcp")}${stat("UDP", udp, "net-stat-udp")}${stat("DNS", dns, "net-stat-dns")}</div>
+      ${procBlock}${remBlock}
+    </div>`;
+  }
+
+  function toolIconHtml(name, kind /* "run" | "done" | "err" */) {
+    const map = TOOL_ICON_MAP[name];
+    if (!map) return null;
+    const which = kind === "err" ? map.err : map.run;
+    const svg = TOOL_SVG[which];
+    if (!svg) return null;
+    const cls = `tool-svg ${kind === "run" ? "breathing" : kind === "err" ? "is-err" : "is-done"}`;
+    return `<span class="${cls}">${svg}</span>`;
+  }
+
   // ---------- friendly tool call labels ----------
   function shortPath(p) {
     if (!p) return "";
@@ -113,7 +201,12 @@
     "desktop_launch_app", "desktop_focus_window", "desktop_click",
     "desktop_type_text", "desktop_press_keys", "desktop_close_window",
   ]);
+  // Tools whose result is the point — collapsing them defeats the purpose.
+  // web_search renders a chip row of sources that the user clicks through; it
+  // must stay visible after the run finishes, not get folded into the wrench.
+  const ALWAYS_INLINE_TOOLS = new Set(["web_search", "network_snapshot"]);
   function isCommandTool(name) { return COMMAND_TOOLS.has(name); }
+  function isInlineTool(name) { return COMMAND_TOOLS.has(name) || ALWAYS_INLINE_TOOLS.has(name); }
 
   function getOrCreateToolGroup(stack) {
     let group = stack.querySelector(".tool-group:last-of-type");
@@ -172,6 +265,7 @@
       case "run_powershell": return `Running command…`;
       case "open_program":   return `Opening ${args.name || args.path || "program"}…`;
       case "web_fetch":      return `Fetching ${args.url || "the web"}…`;
+      case "network_snapshot": return `Scanning network…`;
       default:               return `Running ${name || "tool"}…`;
     }
   }
@@ -194,6 +288,12 @@
       }
       case "open_program":   return `Opened ${res.name || ""}`;
       case "web_fetch":      return `Fetched ${shortPath(res.url)}`;
+      case "network_snapshot": {
+        const t = res.tcp_count || 0;
+        const u = res.udp_count || 0;
+        const d = (res.recent_dns || []).length;
+        return `Scan: ${t} TCP · ${u} UDP · ${d} DNS entries`;
+      }
       default:               return `${name} complete`;
     }
   }
@@ -243,13 +343,97 @@
       return `\x00F${fences.length - 1}\x00`;
     });
 
-    let out = esc(text)
+    let escaped = esc(text);
+
+    // --- block-level passes (work on escaped text, line-by-line) ---
+    const lines = escaped.split("\n");
+    const blocks = [];
+    let i2 = 0;
+    while (i2 < lines.length) {
+      const ln = lines[i2];
+      // pipe table: header row + separator (| --- | --- |) + body rows
+      if (/^\s*\|.*\|\s*$/.test(ln) && i2 + 1 < lines.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(lines[i2 + 1])) {
+        const headerCells = ln.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+        const sepCells = lines[i2 + 1].trim().replace(/^\||\|$/g, "").split("|");
+        const aligns = sepCells.map(c => {
+          const t = c.trim();
+          if (t.startsWith(":") && t.endsWith(":")) return "center";
+          if (t.endsWith(":")) return "right";
+          return "left";
+        });
+        const rows = [];
+        let j = i2 + 2;
+        while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) {
+          rows.push(lines[j].trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim()));
+          j++;
+        }
+        const inline = (s) => s
+          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+          .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+          .replace(/`([^`]+)`/g, "<code>$1</code>");
+        const thead = "<thead><tr>" + headerCells.map((c, k) => `<th style="text-align:${aligns[k] || "left"}">${inline(c)}</th>`).join("") + "</tr></thead>";
+        const tbody = "<tbody>" + rows.map(r => "<tr>" + r.map((c, k) => `<td style="text-align:${aligns[k] || "left"}">${inline(c)}</td>`).join("") + "</tr>").join("") + "</tbody>";
+        blocks.push(`<table class="md-table">${thead}${tbody}</table>`);
+        i2 = j;
+        continue;
+      }
+      // ATX headings
+      const h = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(ln);
+      if (h) {
+        const lvl = h[1].length;
+        blocks.push(`<h${lvl} class="md-h${lvl}">${h[2]}</h${lvl}>`);
+        i2++;
+        continue;
+      }
+      // horizontal rule
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(ln)) {
+        blocks.push(`<hr class="md-hr">`);
+        i2++;
+        continue;
+      }
+      // unordered list
+      if (/^\s*[-*]\s+/.test(ln)) {
+        const items = [];
+        while (i2 < lines.length && /^\s*[-*]\s+/.test(lines[i2])) {
+          items.push(lines[i2].replace(/^\s*[-*]\s+/, ""));
+          i2++;
+        }
+        blocks.push("<ul class=\"md-list\">" + items.map(t => `<li>${t}</li>`).join("") + "</ul>");
+        continue;
+      }
+      // ordered list
+      if (/^\s*\d+\.\s+/.test(ln)) {
+        const items = [];
+        while (i2 < lines.length && /^\s*\d+\.\s+/.test(lines[i2])) {
+          items.push(lines[i2].replace(/^\s*\d+\.\s+/, ""));
+          i2++;
+        }
+        blocks.push("<ol class=\"md-list\">" + items.map(t => `<li>${t}</li>`).join("") + "</ol>");
+        continue;
+      }
+      // accumulate paragraph lines until blank
+      const para = [];
+      while (i2 < lines.length && lines[i2].trim() !== "" &&
+             !/^\s*\|.*\|\s*$/.test(lines[i2]) &&
+             !/^#{1,6}\s+/.test(lines[i2]) &&
+             !/^\s*(---|\*\*\*|___)\s*$/.test(lines[i2]) &&
+             !/^\s*[-*]\s+/.test(lines[i2]) &&
+             !/^\s*\d+\.\s+/.test(lines[i2])) {
+        para.push(lines[i2]);
+        i2++;
+      }
+      if (para.length) {
+        blocks.push("<p>" + para.join("<br>") + "</p>");
+      } else {
+        i2++;
+      }
+    }
+
+    let out = blocks.join("")
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\n\n/g, "</p><p>")
-      .replace(/\n/g, "<br>");
-    out = "<p>" + out + "</p>";
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+
     out = out.replace(/\x00F(\d+)\x00/g, (_, i) => {
       const { lang, code } = fences[+i];
       return `<pre data-lang="${esc(lang)}"><code>${esc(code)}</code></pre>`;
@@ -1102,12 +1286,14 @@
     } else if (evt.type === "tool_start") {
       const card = document.createElement("div");
       card.className = "tool-line running";
-      card.innerHTML = `<i class="ph ph-circle-notch"></i><span class="shimmer">${esc(toolLabel(evt.name, evt.arguments))}</span>`;
+      const customIcon = toolIconHtml(evt.name, "run");
+      const iconHtml = customIcon || `<i class="ph ph-circle-notch"></i>`;
+      card.innerHTML = `${iconHtml}<span class="shimmer">${esc(toolLabel(evt.name, evt.arguments))}</span>`;
       card.dataset.name = evt.name || "";
-      // command-like tools always show inline (user wants to see paths/cmds);
-      // everything else folds into a collapsible group so reads/searches don't
-      // wall-of-text the chat.
-      if (isCommandTool(evt.name)) {
+      // Inline tools (commands + web_search) render directly in the chat so
+      // their paths/commands/result-chips stay visible. Everything else folds
+      // into a collapsible wrench group so reads/listings don't wall-of-text.
+      if (isInlineTool(evt.name)) {
         toolStack.appendChild(card);
       } else {
         getOrCreateToolGroup(toolStack).body.appendChild(card);
@@ -1137,9 +1323,32 @@
         const isErr = evt.result && evt.result.error;
         card.classList.remove("running");
         card.classList.add(isErr ? "err" : "done");
-        const icon = isErr ? "ph-x-circle" : "ph-check";
+        const customIcon = toolIconHtml(evt.name, isErr ? "err" : "done");
+        const iconHtml = customIcon || `<i class="ph ${isErr ? "ph-x-circle" : "ph-check"}"></i>`;
         const label = toolResultLabel(evt.name, evt.result);
-        card.innerHTML = `<i class="ph ${icon}"></i><span>${esc(label)}</span>`;
+        card.innerHTML = `${iconHtml}<span>${esc(label)}</span>`;
+        // web_search: append link-chip row beneath the line so the user can click straight through.
+        if (!isErr && evt.name === "web_search") {
+          const chips = renderWebSearchChips(evt.result && evt.result.results);
+          if (chips) {
+            const wrap = document.createElement("div");
+            wrap.className = "web-results-wrap";
+            wrap.appendChild(card.cloneNode(true));
+            wrap.insertAdjacentHTML("beforeend", chips);
+            card.replaceWith(wrap);
+          }
+        }
+        // network_snapshot: render bar-chart card so the user sees what was captured.
+        if (!isErr && evt.name === "network_snapshot") {
+          const chart = renderNetworkChart(evt.result);
+          if (chart) {
+            const wrap = document.createElement("div");
+            wrap.className = "web-results-wrap";
+            wrap.appendChild(card.cloneNode(true));
+            wrap.insertAdjacentHTML("beforeend", chart);
+            card.replaceWith(wrap);
+          }
+        }
         updateToolGroupHead(toolStack);
       }
     } else if (evt.type === "context_trimmed") {
@@ -1502,6 +1711,7 @@
     $("#preview-empty").classList.add("hidden");
     if (state.view === "preview") {
       $("#code-view").classList.add("hidden");
+      $("#preview-stage").classList.remove("hidden");
       // recreate iframe each time we switch back — srcdoc on a hidden iframe
       // can end up blank in some browsers. Cheap and always correct.
       const old = $("#preview-frame");
@@ -1512,7 +1722,7 @@
       fresh.srcdoc = buildPreviewHtml();
       old.replaceWith(fresh);
     } else {
-      $("#preview-frame").classList.add("hidden");
+      $("#preview-stage").classList.add("hidden");
       const c = $("#code-view");
       c.classList.remove("hidden");
       c.innerHTML = highlightHTML(state.currentHtml);
@@ -1906,6 +2116,10 @@
       pair("launches", d.path || "?");
     } else if (kind === "powershell") {
       pair("runs PowerShell", "check the command below");
+    } else if (kind === "network_snapshot") {
+      pair("reads", "active TCP/UDP connections + DNS cache");
+      pair("admin needed", "no");
+      pair("network access", "read-only — no packets sent");
     }
     return rows.length ? `<div class="pv">${rows.join("")}</div>` : "";
   }
@@ -2393,30 +2607,65 @@
   }
 
   
-  // ===== MOBILE TOOLBAR OVERFLOW =====
-  function initMobileToolbarOverflow() {
-    const overflowBtn = $("#btn-toolbar-overflow");
-    const overflowMenu = $("#toolbar-overflow-menu");
-    if (!overflowBtn || !overflowMenu) return;
-    overflowBtn.addEventListener("click", (e) => {
+  // ===== TOOLBAR OVERFLOW MENU =====
+  function wireOverflow(btnSel, menuSel) {
+    const btn = $(btnSel);
+    const menu = $(menuSel);
+    if (!btn || !menu) return;
+    // Move menu out of composer/preview-head — those have backdrop-filter/transform
+    // which create a containing block for position:fixed children, so the menu
+    // would otherwise stay clipped inside its parent. Re-parenting to <body>
+    // makes the viewport its containing block, so JS coords actually work.
+    if (menu.parentNode !== document.body) {
+      document.body.appendChild(menu);
+    }
+    function positionMenu() {
+      const r = btn.getBoundingClientRect();
+      const mw = menu.offsetWidth || 180;
+      const mh = menu.offsetHeight || 200;
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let top = r.top - mh - 6;
+      if (top < margin) top = r.bottom + 6;
+      if (top + mh > vh - margin) top = Math.max(margin, vh - mh - margin);
+      let left = r.left;
+      if (left + mw > vw - margin) left = vw - mw - margin;
+      if (left < margin) left = margin;
+      menu.style.top = `${Math.round(top)}px`;
+      menu.style.left = `${Math.round(left)}px`;
+    }
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      overflowMenu.classList.toggle("open");
-    });
-    document.addEventListener("click", (e) => {
-      if (!overflowMenu.contains(e.target) && e.target !== overflowBtn) {
-        overflowMenu.classList.remove("open");
+      const willOpen = !menu.classList.contains("open");
+      if (willOpen) {
+        menu.classList.add("open");
+        // measure AFTER it's displayed, then reposition
+        positionMenu();
+        // re-measure on next frame in case fonts/content shifted size
+        requestAnimationFrame(positionMenu);
+      } else {
+        menu.classList.remove("open");
       }
     });
-    const twDesktop = $("#toggle-tailwind");
-    const twMobile = $("#toggle-tailwind-mobile");
-    const mfDesktop = $("#toggle-multifile");
-    const mfMobile = $("#toggle-multifile-mobile");
-    if (twDesktop && twMobile) {
-      twMobile.addEventListener("click", () => twDesktop.click());
-    }
-    if (mfDesktop && mfMobile) {
-      mfMobile.addEventListener("click", () => mfDesktop.click());
-    }
+    menu.addEventListener("click", (e) => {
+      if (e.target.closest(".mm-item, .chip")) menu.classList.remove("open");
+    });
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+        menu.classList.remove("open");
+      }
+    });
+    window.addEventListener("resize", () => {
+      if (menu.classList.contains("open")) positionMenu();
+    });
+    window.addEventListener("scroll", () => {
+      if (menu.classList.contains("open")) positionMenu();
+    }, true);
+  }
+  function initMobileToolbarOverflow() {
+    wireOverflow("#btn-toolbar-overflow", "#toolbar-overflow-menu");
+    wireOverflow("#btn-preview-overflow", "#preview-overflow-menu");
   }
 
   function wireEvents() {
@@ -2602,6 +2851,22 @@
       await saveSettings({ ide_multifile: next });
       reflectIdeToggles();
       toast(next ? "Model will emit multi-file folder structure" : "Single-file mode", "info", 2200, "ide-mf");
+    });
+
+    // Network: quick prompt insert for "scan this machine"
+    $("#quick-netscan-mothership")?.addEventListener("click", () => {
+      const ta = $("#composer-input");
+      if (!ta) return;
+      const tmpl = "Run a network snapshot on this machine (call network_snapshot). Then: list the active TCP connections grouped by process, flag anything that looks unusual (unknown processes, connections to suspicious IPs/domains, unexpected open ports), summarize the recent DNS queries, and tell me whether anything warrants a closer look.";
+      const cur = ta.value.trim();
+      ta.value = cur ? cur + "\n\n" + tmpl : tmpl;
+      ta.focus();
+      autoResize(ta);
+      $("#toolbar-overflow-menu")?.classList.remove("open");
+    });
+    $("#quick-netscan-device")?.addEventListener("click", () => {
+      $("#toolbar-overflow-menu")?.classList.remove("open");
+      toast("Sniff-this-device needs a netagent on the remote box — coming soon.", "info", 3500, "netagent-soon");
     });
 
     // preview: screenshot the iframe to PNG

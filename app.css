@@ -456,10 +456,190 @@ button { font-family: inherit; }
 .tool-line.err { color: var(--danger); }
 .tool-line.err i { color: var(--danger); }
 
+/* custom inline-SVG icons for tool calls (read/write/edit/run/etc.) */
+.tool-svg {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+  flex-shrink: 0;
+  color: var(--fg-faint);
+}
+.tool-svg svg { width: 100%; height: 100%; display: block; }
+.tool-line.running .tool-svg { color: var(--accent); }
+.tool-line.done .tool-svg { color: var(--mint-3); }
+.tool-line.err .tool-svg, .tool-svg.is-err { color: var(--danger); }
+/* breathing pulse while a tool is in flight — gentle scale + opacity */
+.tool-svg.breathing {
+  animation: tool-breathe 1.6s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes tool-breathe {
+  0%, 100% { transform: scale(1);    opacity: 0.6; }
+  50%      { transform: scale(1.18); opacity: 1;   }
+}
+
+/* web search rich results — link chips with favicons (mimics native search UI) */
+.web-results-wrap { display: flex; flex-direction: column; gap: 6px; width: fit-content; max-width: 100%; }
+.web-results {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding-left: 22px;
+}
+.tool-group-body .web-results { padding-left: 0; }
+.web-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 6px;
+  font-family: var(--font-sans); font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  text-decoration: none;
+  max-width: 200px;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.web-chip:hover { color: var(--fg); background: var(--bg-inset); border-color: var(--border-strong); }
+.web-chip span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.web-chip-more {
+  color: var(--fg-faint);
+  cursor: default;
+  padding: 4px 10px;
+}
+.web-fav-wrap {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  color: var(--fg-faint);
+  flex-shrink: 0;
+}
+.web-fav-wrap svg { width: 14px; height: 14px; display: block; }
+.web-fav {
+  position: absolute; inset: 0;
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  background: transparent;
+  object-fit: contain;
+}
+
 /* rich tool output card — soften radius, subtle shadow */
 .tool-line.rich {
   border-radius: 16px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+/* markdown rendering inside chat bubbles */
+.md-h1, .md-h2, .md-h3, .md-h4, .md-h5, .md-h6 {
+  margin: 14px 0 6px;
+  line-height: 1.25;
+  color: var(--fg);
+  font-weight: 600;
+}
+.md-h1 { font-size: 1.35em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.md-h2 { font-size: 1.2em;  border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+.md-h3 { font-size: 1.08em; color: var(--accent); }
+.md-h4 { font-size: 1em; }
+.md-h5, .md-h6 { font-size: 0.95em; color: var(--fg-muted); }
+.md-hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.md-list { margin: 6px 0 10px; padding-left: 22px; }
+.md-list li { margin: 2px 0; }
+.md-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 0.92em;
+  width: auto;
+  max-width: 100%;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: table;
+}
+.md-table th, .md-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.md-table th {
+  background: var(--bg-inset);
+  color: var(--fg);
+  font-weight: 600;
+  font-size: 0.9em;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.md-table tr:last-child td { border-bottom: none; }
+.md-table tr:hover td { background: color-mix(in srgb, var(--accent-subtle) 30%, transparent); }
+.md-table code {
+  background: var(--bg-inset);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.95em;
+}
+
+/* network_snapshot bar-chart card */
+.netscan-card {
+  margin-left: 22px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex; flex-direction: column; gap: 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  max-width: 460px;
+}
+.tool-group-body .netscan-card { margin-left: 0; }
+.net-stats { display: flex; gap: 8px; }
+.net-stat {
+  flex: 1;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.net-stat-num { font-size: 16px; font-weight: 600; color: var(--fg); line-height: 1.1; }
+.net-stat-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); margin-top: 2px; }
+.net-stat-tcp .net-stat-num { color: var(--accent); }
+.net-stat-udp .net-stat-num { color: #b07cff; }
+.net-stat-dns .net-stat-num { color: #2ec27e; }
+.net-block { display: flex; flex-direction: column; gap: 4px; }
+.net-block-title {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-faint); padding-bottom: 2px;
+}
+.net-bar-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+}
+.net-bar-lbl {
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.net-bar-track {
+  position: relative;
+  height: 8px;
+  background: var(--bg-inset);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.net-bar-fill {
+  position: absolute; inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+  transition: width 0.4s ease-out;
+}
+.net-bar-proc { background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #b07cff)); }
+.net-bar-rem  { background: linear-gradient(90deg, #2ec27e, #4cb8ff); }
+.net-bar-num {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: right;
 }
 
 /* conveyor belt elision pill — appears when older middle messages aren't
@@ -602,7 +782,46 @@ button { font-family: inherit; }
   border-color: color-mix(in srgb, var(--accent) 60%, var(--border-strong));
   box-shadow: 0 12px 40px rgba(0,0,0,0.08), 0 0 0 3px var(--accent-subtle);
 }
-.composer-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.composer-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; position: relative; }
+.toolbar-overflow-wrap { position: relative; display: inline-flex; align-items: center; }
+.toolbar-overflow {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--fg-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toolbar-overflow:hover { color: var(--fg); border-color: var(--border-strong); }
+.toolbar-overflow-menu {
+  position: fixed;
+  /* top/left set by JS at open time so the menu can never clip */
+  top: 0; left: 0;
+  z-index: 200;
+  min-width: 180px;
+  max-width: calc(100vw - 16px);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+  padding: 6px;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+}
+.toolbar-overflow-menu.open { display: flex; }
+.toolbar-overflow-menu .chip { width: 100%; justify-content: flex-start; border-radius: 6px; padding: 6px 10px; }
+.toolbar-overflow-menu .overflow-section-label {
+  font-family: var(--font-sans);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  padding: 6px 10px 2px;
+}
+.toolbar-overflow-menu .overflow-section-label:first-child { padding-top: 2px; }
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 8px;
@@ -616,6 +835,9 @@ button { font-family: inherit; }
 }
 .chip:hover { color: var(--fg); border-color: var(--border-strong); }
 .chip.on { background: var(--accent-subtle); color: #5A3A1E; border-color: var(--safety-2); }
+[data-theme="dark"] .chip.on,
+[data-theme="dark"] .toolbar-overflow-menu .chip.on,
+[data-theme="dark"] .preview-overflow-menu .chip.on { color: #ffd9b5; }
 .composer-spacer { flex: 1; }
 .model-pill {
   font-size: 10px; padding: 3px 8px;
@@ -667,7 +889,42 @@ button { font-family: inherit; }
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
+  flex-wrap: nowrap;
+  min-width: 0;
 }
+.preview-head .title { flex-shrink: 1; min-width: 0; overflow: hidden; }
+.preview-head .title span:not(.url-pill) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preview-head .url-pill { flex-shrink: 0; }
+.preview-head > * { flex-shrink: 0; }
+.preview-head > .title { flex-shrink: 1; }
+
+.preview-overflow-wrap { position: relative; display: inline-flex; }
+.preview-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 200px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+  padding: 6px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+}
+.preview-overflow-menu.open { display: flex; }
+.preview-overflow-menu .mm-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  background: transparent; border: none; border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--font-sans); font-size: 12px;
+  text-align: left; cursor: pointer; width: 100%;
+}
+.preview-overflow-menu .mm-item:hover { background: var(--bg-inset); }
+.preview-overflow-menu .mm-item i { font-size: 14px; color: var(--fg-muted); flex-shrink: 0; }
 .preview-head .title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; }
 .preview-head .title i { color: var(--fg-muted); }
 .preview-head .url-pill {
@@ -960,13 +1217,7 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
    ============================================================ */
 
 @media (max-width: 600px) {
-  .composer-tools {
-    position: relative;
-    flex-wrap: nowrap !important;
-    overflow: hidden;
-  }
-
-  /* Primary buttons — always visible */
+  .composer-tools { flex-wrap: nowrap !important; overflow: hidden; }
   .composer-tools .chip[data-mode="ide"],
   .composer-tools .chip[data-mode="agent"],
   .composer-tools .chip[data-mode="auto"],
@@ -974,70 +1225,12 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
     display: inline-flex !important;
     flex-shrink: 0;
   }
-
-  /* Secondary buttons — hidden on mobile, moved to overflow */
-  .composer-tools #toggle-tailwind,
-  .composer-tools #toggle-multifile {
-    display: none !important;
-  }
-
-  /* Overflow toggle button */
-  .composer-tools .toolbar-overflow {
-    display: inline-flex !important;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 24px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--bg-raised);
-    color: var(--fg-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    margin-left: 2px;
-  }
-  .composer-tools .toolbar-overflow:hover {
-    color: var(--fg);
-    border-color: var(--border-strong);
-  }
-
-  /* Overflow dropdown */
-  .toolbar-overflow-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    z-index: 50;
-    min-width: 180px;
-    background: var(--bg-raised);
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    box-shadow: var(--shadow-lg, 0 10px 30px rgba(0,0,0,0.35));
-    padding: 6px;
-    display: none;
-    flex-direction: column;
-    gap: 2px;
-  }
-  .toolbar-overflow-menu.open {
-    display: flex;
-  }
-  .toolbar-overflow-menu .chip {
-    width: 100%;
-    justify-content: flex-start;
-    border-radius: 6px;
-    padding: 6px 10px;
-  }
-
-  /* Model pill — compress */
   .composer-tools .model-pill {
     max-width: 100px !important;
     font-size: 9px;
     padding: 2px 6px;
   }
-
-  /* Spacer shrinks */
-  .composer-tools .composer-spacer {
-    min-width: 4px;
-  }
+  .composer-tools .composer-spacer { min-width: 4px; }
 }
 
 /* Info tooltip icons in settings */

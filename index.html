@@ -116,12 +116,16 @@
             <button class="chip on" id="mode-auto" data-mode="auto"><i class="ph ph-lightning"></i>Auto</button>
             <button class="chip" id="btn-attach-image" title="Attach image — the vision model reads it and hands a description to the main model"><i class="ph ph-image"></i>Image</button>
             <input type="file" id="file-image" accept="image/*" multiple hidden>
-            <button class="chip" id="toggle-tailwind" title="Inject the Tailwind Play CDN into generated HTML and ask the model to use Tailwind classes"><i class="ph ph-wind"></i>Tailwind CDN</button>
-            <button class="chip" id="toggle-multifile" title="Have the model emit a small folder structure (index.html, style.css, script.js, assets/) — preview inlines it, Export Project zips the files separately"><i class="ph ph-folder-simple"></i>Multi-file</button>
-            <button class="toolbar-overflow mobile-only" id="btn-toolbar-overflow" title="More tools"><i class="ph ph-dots-three"></i></button>
-            <div class="toolbar-overflow-menu" id="toolbar-overflow-menu">
-              <button class="chip" id="toggle-tailwind-mobile"><i class="ph ph-wind"></i>Tailwind CDN</button>
-              <button class="chip" id="toggle-multifile-mobile"><i class="ph ph-folder-simple"></i>Multi-file</button>
+            <div class="toolbar-overflow-wrap">
+              <button class="toolbar-overflow" id="btn-toolbar-overflow" title="Build options"><i class="ph ph-sliders-horizontal"></i></button>
+              <div class="toolbar-overflow-menu" id="toolbar-overflow-menu">
+                <div class="overflow-section-label">Build</div>
+                <button class="chip" id="toggle-tailwind" title="Inject the Tailwind Play CDN into generated HTML and ask the model to use Tailwind classes"><i class="ph ph-wind"></i>Tailwind CDN</button>
+                <button class="chip" id="toggle-multifile" title="Have the model emit a small folder structure (index.html, style.css, script.js, assets/) — preview inlines it, Export Project zips the files separately"><i class="ph ph-folder-simple"></i>Multi-file</button>
+                <div class="overflow-section-label">Network</div>
+                <button class="chip" id="quick-netscan-mothership" title="Inserts a prompt asking the model to scan THIS machine's active TCP/UDP connections and recent DNS, then flag anything weird"><i class="ph ph-radio"></i>Sniff mothership</button>
+                <button class="chip" id="quick-netscan-device" title="Coming soon — sniff the device you're browsing from. Needs a small netagent installed there."><i class="ph ph-laptop"></i>Sniff this device</button>
+              </div>
             </div>
             <span class="composer-spacer"></span>
             <button class="model-pill" id="model-pill">select model</button>
@@ -160,13 +164,18 @@
         <button class="vp-btn" data-vp="mobile" title="Mobile 390px"><i class="ph ph-device-mobile"></i></button>
       </div>
       <button class="iconbtn" id="btn-refresh" title="Refresh"><i class="ph ph-arrow-clockwise"></i></button>
-      <button class="iconbtn" id="btn-screenshot" title="Screenshot the preview as PNG"><i class="ph ph-camera"></i></button>
-      <button class="iconbtn" id="btn-export-project" title="Export as .zip (index.html + any companion files)"><i class="ph ph-package"></i></button>
-      <button class="iconbtn" id="btn-save-snapshot" title="Save preview to data/snapshots/"><i class="ph ph-floppy-disk"></i></button>
-      <button class="iconbtn" id="btn-copy-dataurl" title="Copy as data: URL (portable, no server needed)"><i class="ph ph-link-simple"></i></button>
-      <button class="iconbtn" id="btn-toggle-console" title="Toggle console pane"><i class="ph ph-terminal"></i></button>
-      <button class="iconbtn" id="btn-review-ui" title="Screenshot the preview and attach it to the composer so you can ask the model to review it"><i class="ph ph-magnifying-glass"></i></button>
-      <button class="iconbtn" id="btn-open-new" title="Open in new tab"><i class="ph ph-arrow-square-out"></i></button>
+      <div class="preview-overflow-wrap">
+        <button class="iconbtn" id="btn-preview-overflow" title="More actions"><i class="ph ph-dots-three"></i></button>
+        <div class="preview-overflow-menu" id="preview-overflow-menu">
+          <button class="mm-item" id="btn-screenshot" title="Screenshot the preview as PNG"><i class="ph ph-camera"></i><span>Screenshot</span></button>
+          <button class="mm-item" id="btn-export-project" title="Export as .zip (index.html + any companion files)"><i class="ph ph-package"></i><span>Export project</span></button>
+          <button class="mm-item" id="btn-save-snapshot" title="Save preview to data/snapshots/"><i class="ph ph-floppy-disk"></i><span>Save snapshot</span></button>
+          <button class="mm-item" id="btn-copy-dataurl" title="Copy as data: URL (portable, no server needed)"><i class="ph ph-link-simple"></i><span>Copy as data URL</span></button>
+          <button class="mm-item" id="btn-toggle-console" title="Toggle console pane"><i class="ph ph-terminal"></i><span>Toggle console</span></button>
+          <button class="mm-item" id="btn-review-ui" title="Screenshot the preview and attach it to the composer"><i class="ph ph-magnifying-glass"></i><span>Review UI</span></button>
+          <button class="mm-item" id="btn-open-new" title="Open in new tab"><i class="ph ph-arrow-square-out"></i><span>Open in new tab</span></button>
+        </div>
+      </div>
       <button class="iconbtn" id="btn-close-preview" title="Minimize"><i class="ph ph-x"></i></button>
     </div>
 
