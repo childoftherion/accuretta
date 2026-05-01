@@ -125,4 +125,4 @@ Personal project. I work on it when I feel like it. Pull requests are welcome bu
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Use it, change it, ship it, sell it. The only thing I ask is that you do not pretend you wrote the parts you did not.
+MIT. See [LICENSE](LICENSE). Free for personal use. Use it, change it, ship it. The only thing I ask is that you do not pretend you wrote the parts you did not.
