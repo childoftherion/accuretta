@@ -15,9 +15,11 @@
 
 <br />
 
-<video src="https://raw.githubusercontent.com/mkultraware/accuretta/main/media/demo.mp4" controls muted width="780"></video>
+<a href="https://github.com/mkultraware/accuretta/raw/main/media/demo.mp4" title="Click to play the demo video">
+  <img src="media/demo-poster.png" alt="Accuretta demo. Click to play." width="780" />
+</a>
 
-<sub>If your viewer does not play the video inline, click <a href="media/demo.mp4"><code>media/demo.mp4</code></a> to watch it directly on GitHub.</sub>
+<sub>Click the image above to watch the demo (about 23 seconds, 1.9 MB mp4).</sub>
 
 </div>
 
