@@ -688,6 +688,91 @@ def _workspace_root_for(path: str) -> str | None:
     return None
 
 
+# MIME map for the /api/wsfs/ endpoint. Anything not listed falls through
+# to application/octet-stream (browser will offer to download instead of
+# rendering — safe default).
+_WS_FILE_MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".htm":  "text/html; charset=utf-8",
+    ".css":  "text/css; charset=utf-8",
+    ".js":   "application/javascript; charset=utf-8",
+    ".mjs":  "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg":  "image/svg+xml",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+    ".ico":  "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2":"font/woff2",
+    ".ttf":  "font/ttf",
+    ".otf":  "font/otf",
+    ".txt":  "text/plain; charset=utf-8",
+    ".md":   "text/markdown; charset=utf-8",
+    ".xml":  "application/xml; charset=utf-8",
+    ".map":  "application/json; charset=utf-8",
+}
+
+# Cap workspace-served file size — keeps a 4GB log from being streamed to a
+# browser tab, OOMing both the bridge and the renderer.
+_WS_FILE_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def resolve_workspace_file(root_raw: str, rel_raw: str) -> tuple["Path | None", "dict | None"]:
+    """Resolve `<root>/<rel>` and verify the result is strictly inside the
+    workspace root. Returns (resolved_path, None) on success, (None, error_dict)
+    on rejection. Hardening:
+      - root must exactly match a configured workspace folder (no parent dirs)
+      - rel must be relative (no absolute paths, no drive letters)
+      - .. is allowed in the input string but the resolved path MUST stay
+        inside the resolved root (defends against `a/../../../etc`)
+      - symlinks that escape the root are rejected (resolve() follows them,
+        so the boundary check catches them)
+      - .accurettaignore rules apply (consistency with the read tools)
+      - file must exist and be a regular file (no dirs, no devices)
+    """
+    if not root_raw or not rel_raw:
+        return None, {"error": "root and path required"}
+    # 1. root must be one of the configured workspace folders, exactly
+    configured = [normalize_path(f) for f in get_workspace().get("folders", [])]
+    root_norm = normalize_path(root_raw)
+    if root_norm not in configured:
+        return None, {"error": "root not in workspace"}
+    # 2. reject obviously-absolute or drive-rooted relatives
+    rel = rel_raw.replace("\\", "/").lstrip("/")
+    if not rel:
+        return None, {"error": "empty path"}
+    if os.path.isabs(rel) or (len(rel) >= 2 and rel[1] == ":"):
+        return None, {"error": "absolute path not allowed"}
+    # 3. resolve and re-check containment
+    try:
+        root_resolved = Path(root_norm).resolve(strict=True)
+    except Exception:
+        return None, {"error": "workspace root unreadable"}
+    try:
+        target_resolved = (root_resolved / rel).resolve(strict=True)
+    except FileNotFoundError:
+        return None, {"error": "file not found"}
+    except Exception as e:
+        return None, {"error": f"resolve failed: {e}"}
+    try:
+        # commonpath() raises ValueError on different drives; that's a reject too
+        common = Path(os.path.commonpath([str(root_resolved), str(target_resolved)]))
+    except ValueError:
+        return None, {"error": "path escapes workspace"}
+    if common != root_resolved:
+        return None, {"error": "path escapes workspace"}
+    # 4. must be a real file
+    if not target_resolved.is_file():
+        return None, {"error": "not a file"}
+    # 5. honour .accurettaignore (same rules the read tools use)
+    if is_ignored(str(target_resolved)):
+        return None, {"error": "file is ignored by .accurettaignore"}
+    return target_resolved, None
+
+
 def is_ignored(path: str) -> bool:
     """True if `path` matches a rule in the enclosing workspace's .accurettaignore."""
     root = _workspace_root_for(path)
@@ -4469,12 +4554,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _send_bytes(self, status: int, data: bytes, ctype: str):
+    def _send_bytes(self, status: int, data: bytes, ctype: str, extra_headers: dict | None = None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                # Cache-Control passed via extra_headers takes precedence — overwrite
+                if k.lower() == "cache-control":
+                    continue
+                self.send_header(k, v)
         self._set_cors()
         self.end_headers()
         try:
@@ -4676,6 +4767,50 @@ class Handler(BaseHTTPRequestHandler):
                 "allowlist": s.get("desktop_app_allowlist") or [],
                 "max_actions_per_minute": int(s.get("desktop_max_actions_per_minute") or 30),
             })
+        if p.startswith("/api/wsfs/"):
+            # Stream a single file from inside a configured workspace folder.
+            # Path-style URL on purpose: `/api/wsfs/<token>/<relative>`. This
+            # way the browser's relative-URL resolution (which only looks at
+            # the URL *path*, not the query string) correctly maps an HTML
+            # file's `./style.css` to `/api/wsfs/<token>/style.css` — keeping
+            # every fetched asset routed through this same hardened endpoint.
+            #
+            # Token is urlsafe-base64 of the configured workspace root path.
+            # The root is then re-validated against the live workspace list
+            # on every request, so revoking a folder kills outstanding URLs.
+            rest = p[len("/api/wsfs/"):]
+            if "/" not in rest:
+                return self._send_json(400, {"error": "missing path"})
+            token, rel = rest.split("/", 1)
+            try:
+                # add padding back for b64decode (we strip it on the JS side)
+                pad = "=" * (-len(token) % 4)
+                root = _b64.urlsafe_b64decode((token + pad).encode("ascii")).decode("utf-8")
+            except Exception:
+                return self._send_json(400, {"error": "bad root token"})
+            rel = urllib.parse.unquote(rel)
+            target, err = resolve_workspace_file(root, rel)
+            if err:
+                msg = err.get("error", "")
+                code = 403 if ("escape" in msg or "absolute" in msg or "not in workspace" in msg) else 404
+                return self._send_json(code, err)
+            try:
+                size = target.stat().st_size
+            except Exception:
+                return self._send_json(500, {"error": "stat failed"})
+            if size > _WS_FILE_MAX_BYTES:
+                return self._send_json(413, {"error": f"file too large (>{_WS_FILE_MAX_BYTES // (1024*1024)} MB)"})
+            try:
+                data = target.read_bytes()
+            except Exception as e:
+                return self._send_json(500, {"error": f"read failed: {e}"})
+            ct = _WS_FILE_MIME.get(target.suffix.lower(), "application/octet-stream")
+            extra = {
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+            }
+            return self._send_bytes(200, data, ct, extra_headers=extra)
         if p == "/api/list-folder":
             qs = urllib.parse.parse_qs(parsed.query)
             raw = (qs.get("path") or [""])[0]
@@ -4736,6 +4871,53 @@ class Handler(BaseHTTPRequestHandler):
             save_json(WORKSPACE_FILE, {"folders": folders})
             broadcast_event({"type": "workspace:update"})
             return self._send_json(200, {"folders": folders})
+        if p == "/api/py-check":
+            # Pure syntax check — never executes the code, never imports
+            # anything. compile() builds the AST and validates structure;
+            # SyntaxError gives us line/col/msg for the diagnostic banner.
+            # Accepts either {root, path} (read from workspace) or {code}
+            # (raw snippet — used for unsaved buffers later if needed).
+            code = body.get("code")
+            file_label = "<snippet>"
+            if code is None:
+                root = body.get("root") or ""
+                rel = body.get("path") or ""
+                target, err = resolve_workspace_file(root, rel)
+                if err:
+                    return self._send_json(400, err)
+                # 5 MB cap on Python files for the syntax check — anything
+                # bigger is almost certainly not a real source file.
+                try:
+                    if target.stat().st_size > 5 * 1024 * 1024:
+                        return self._send_json(413, {"error": "file too large for syntax check"})
+                    code = target.read_text(encoding="utf-8", errors="replace")
+                    file_label = target.name
+                except Exception as e:
+                    return self._send_json(500, {"error": f"read failed: {e}"})
+            else:
+                code = str(code)
+            try:
+                compile(code, file_label, "exec")
+                return self._send_json(200, {
+                    "ok": True,
+                    "file": file_label,
+                    "lines": code.count("\n") + 1,
+                    "msg": "syntax OK",
+                })
+            except SyntaxError as e:
+                return self._send_json(200, {
+                    "ok": False,
+                    "file": file_label,
+                    "line": e.lineno,
+                    "col": e.offset,
+                    "end_line": getattr(e, "end_lineno", None),
+                    "end_col": getattr(e, "end_offset", None),
+                    "msg": e.msg,
+                    "hint": (e.text or "").rstrip("\n"),
+                })
+            except ValueError as e:
+                # null bytes in source etc.
+                return self._send_json(200, {"ok": False, "file": file_label, "msg": str(e)})
         if p == "/api/browse-folder":
             # native OS folder picker, only on the machine running the bridge.
             title = (body.get("title") or "Pick a folder").strip()

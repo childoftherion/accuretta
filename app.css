@@ -157,6 +157,39 @@ button { font-family: inherit; }
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* inline action buttons on file rows (lightning-bolt for HTML preview,
+   checkmark for Python syntax check). Hidden by default, fade in on row
+   hover so the tree stays uncluttered. */
+.tree-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--dur-fast, 120ms) var(--ease-out, ease);
+}
+.tree-row:hover .tree-actions { opacity: 1; }
+.tree-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--fg-faint);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color var(--dur-fast, 120ms) var(--ease-out, ease),
+              color var(--dur-fast, 120ms) var(--ease-out, ease);
+}
+.tree-action:hover { background: var(--accent-subtle); color: var(--accent); }
+.tree-action svg { display: block; }
+/* on mobile/touch devices the actions need to be visible without hover */
+@media (hover: none), (max-width: 600px) {
+  .tree-actions { opacity: 1; }
+  .tree-action { width: 30px; height: 30px; }
+}
 .tree-children { display: flex; flex-direction: column; }
 .tree-loading, .tree-empty {
   padding: 3px 10px;
@@ -241,6 +274,14 @@ button { font-family: inherit; }
 .modal-body code { background: var(--bg-inset); padding: 1px 5px; border-radius: 3px; font-size: 12px; color: var(--fg); }
 .faq-q { font-family: var(--font-display); color: var(--fg); font-weight: 500; margin: 14px 0 6px; font-size: 13px; letter-spacing: -0.005em; }
 .faq-q:first-child { margin-top: 0; }
+/* inline SVG icons in FAQ paragraphs — sit on the text baseline so they
+   read as part of the sentence, not as floating decorations */
+.faq-svg {
+  display: inline-block;
+  vertical-align: -2px;
+  margin: 0 1px;
+  color: var(--accent);
+}
 
 /* toast host — bottom-right stack */
 #toast-host {
@@ -1919,6 +1960,73 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   white-space: pre-wrap;
   word-wrap: break-word;
 }
+
+/* ============================================================
+   Python syntax-check panel — lives inside .preview-body, sits
+   alongside the iframe stage and the code-view. Banner up top,
+   numbered source below, error line highlighted.
+   ============================================================ */
+.pycheck-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.pycheck-pane.hidden { display: none; }
+.pycheck-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--fg);
+  flex-shrink: 0;
+}
+.pycheck-banner svg { flex-shrink: 0; }
+.pycheck-banner.pending { color: var(--fg-muted); }
+.pycheck-banner.ok {
+  background: color-mix(in srgb, #2f9e44 14%, var(--bg-raised));
+  color: #2f7a3a;
+  border-bottom-color: color-mix(in srgb, #2f9e44 40%, var(--border));
+}
+.pycheck-banner.err {
+  background: color-mix(in srgb, var(--danger, #c92a2a) 14%, var(--bg-raised));
+  color: var(--danger, #c92a2a);
+  border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
+}
+[data-theme="dark"] .pycheck-banner.ok { color: #95e0a8; }
+[data-theme="dark"] .pycheck-banner.err { color: #ff9b9b; }
+.pycheck-code {
+  flex: 1; min-height: 0;
+  margin: 0;
+  padding: 12px 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow: auto;
+  white-space: pre;
+}
+.pycheck-code .pyc-line { display: block; padding: 0 14px; }
+.pycheck-code .pyc-num {
+  display: inline-block;
+  width: 4ch;
+  margin-right: 12px;
+  color: var(--fg-faint);
+  user-select: none;
+  text-align: right;
+}
+.pycheck-code .pyc-line.err {
+  background: color-mix(in srgb, var(--danger, #c92a2a) 18%, transparent);
+  border-left: 3px solid var(--danger, #c92a2a);
+  padding-left: 11px;
+}
+.pycheck-code .pyc-line.err .pyc-num { color: var(--danger, #c92a2a); font-weight: 600; }
 
 /* ============================================================
    DARK MODE OVERRIDES (bubble shadows)

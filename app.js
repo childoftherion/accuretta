@@ -1524,6 +1524,8 @@
 
   async function setActiveVersion(vid) {
     state.activeVersion = vid;
+    // user is opening a model-generated version → leave workspace-preview mode
+    state.workspacePreview = null;
     const resp = await fetch(`/api/versions/${state.chatId}/${vid}`);
     const html = await resp.text();
     state.currentHtml = html;
@@ -1545,11 +1547,13 @@
     state.currentHtml = "";
     state.currentFiles = {};
     state.activeVersion = null;
+    state.workspacePreview = null;
     $("#preview-url").textContent = "—";
     $("#preview-meta").textContent = "—";
     $("#preview-size").textContent = "—";
     $("#preview-frame").classList.add("hidden");
     $("#code-view").classList.add("hidden");
+    document.getElementById("pycheck-pane")?.classList.add("hidden");
     $("#preview-empty").classList.remove("hidden");
     renderVersions();
   }
@@ -1725,6 +1729,176 @@
     html = injectConsoleForwarder(html);
     html = injectCspIfNeeded(html);
     return html;
+  }
+
+  // ---------- workspace file actions ----------
+  // urlsafe-base64 encode the workspace root path so the bridge can recover
+  // it from a path segment (no query string → relative-asset URLs in served
+  // HTML resolve correctly through the same /api/wsfs/<token>/... endpoint).
+  function wsRootToken(root) {
+    // unicode-safe utf8 → base64, then urlsafe (+→-, /→_) and strip padding
+    const utf8 = unescape(encodeURIComponent(root));
+    return btoa(utf8).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function wsFileUrl(root, rel) {
+    // encode each path segment but keep the slashes as separators
+    const encRel = (rel || "").replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
+    return `/api/wsfs/${wsRootToken(root)}/${encRel}`;
+  }
+
+  // Stream an existing .html from a workspace folder into the preview iframe.
+  // Uses iframe `src` (not srcdoc) so relative asset URLs resolve back through
+  // /api/wsfs/<token>/... — the bridge enforces strict containment so the
+  // page can only ever load assets that live inside the same workspace root.
+  function previewWorkspaceHtml(root, rel, displayName) {
+    if (!root || !rel) return;
+    // make sure preview pane is open
+    const app = document.getElementById("app");
+    if (app && app.classList.contains("preview-collapsed")) {
+      app.classList.remove("preview-collapsed");
+    }
+    // remember BEFORE rendering so view-toggle / refresh handlers can detect mode
+    state.workspacePreview = { root, rel, name: displayName || rel };
+    state.currentHtml = "";  // ensure model-output flow doesn't fight us
+    state.view = "preview";
+    document.getElementById("btn-view-preview")?.classList.add("active");
+    document.getElementById("btn-view-code")?.classList.remove("active");
+    renderWorkspacePreview();
+  }
+
+  // Renders the current workspace-preview state into the right pane.
+  // Honours state.view so the user can toggle Preview ↔ Code on workspace
+  // files exactly like they can on model-generated HTML.
+  async function renderWorkspacePreview() {
+    const wp = state.workspacePreview;
+    if (!wp) return;
+    document.getElementById("preview-empty")?.classList.add("hidden");
+    document.getElementById("pycheck-pane")?.classList.add("hidden");
+    const pill = document.getElementById("preview-url");
+    if (pill) pill.textContent = wp.name || wp.rel;
+    const meta = document.getElementById("preview-meta");
+    if (meta) meta.textContent = `workspace · ${wp.name || wp.rel}`;
+
+    if (state.view === "code") {
+      // hide iframe stage, show code-view, fetch source as text
+      document.getElementById("preview-stage")?.classList.add("hidden");
+      const c = document.getElementById("code-view");
+      if (!c) return;
+      c.classList.remove("hidden");
+      c.textContent = "loading…";
+      try {
+        const r = await fetch(wsFileUrl(wp.root, wp.rel));
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          c.textContent = `error: ${j.error || r.statusText}`;
+          return;
+        }
+        const txt = await r.text();
+        c.innerHTML = highlightHTML(txt);
+      } catch (e) {
+        c.textContent = `error: ${e.message || e}`;
+      }
+      return;
+    }
+
+    // preview mode — recreate iframe pointing at the path-style endpoint
+    document.getElementById("code-view")?.classList.add("hidden");
+    const stage = document.getElementById("preview-stage");
+    if (stage) stage.classList.remove("hidden");
+    const old = document.getElementById("preview-frame");
+    const fresh = document.createElement("iframe");
+    fresh.id = "preview-frame";
+    fresh.className = "preview-frame";
+    fresh.setAttribute("sandbox", "allow-scripts allow-forms allow-modals allow-popups allow-same-origin");
+    fresh.src = wsFileUrl(wp.root, wp.rel);
+    old?.replaceWith(fresh);
+  }
+
+  // Run a server-side Python syntax check on a workspace .py file. Renders
+  // the result in a dedicated panel: ✓ or ✗ banner + the source with the
+  // error line highlighted. Never executes the script.
+  async function runPythonCheck(root, rel, displayName) {
+    if (!root || !rel) return;
+    const app = document.getElementById("app");
+    if (app && app.classList.contains("preview-collapsed")) {
+      app.classList.remove("preview-collapsed");
+    }
+    // hide other views
+    document.getElementById("preview-empty")?.classList.add("hidden");
+    document.getElementById("preview-stage")?.classList.add("hidden");
+    document.getElementById("code-view")?.classList.add("hidden");
+    let pane = document.getElementById("pycheck-pane");
+    if (!pane) {
+      // lazy-create the panel so we don't bloat the empty initial DOM
+      pane = document.createElement("div");
+      pane.id = "pycheck-pane";
+      pane.className = "pycheck-pane";
+      pane.innerHTML = `
+        <div class="pycheck-banner" id="pycheck-banner">checking…</div>
+        <pre class="pycheck-code" id="pycheck-code"><code></code></pre>`;
+      document.getElementById("preview-body")?.appendChild(pane);
+    }
+    pane.classList.remove("hidden");
+    const banner = pane.querySelector("#pycheck-banner");
+    const codeEl = pane.querySelector("#pycheck-code code");
+    banner.className = "pycheck-banner pending";
+    banner.textContent = `checking ${displayName || rel}…`;
+    codeEl.textContent = "";
+
+    let res;
+    try {
+      const r = await fetch("/api/py-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root, path: rel }),
+      });
+      res = await r.json();
+    } catch (e) {
+      banner.className = "pycheck-banner err";
+      banner.textContent = `request failed: ${e.message || e}`;
+      return;
+    }
+    if (res.error) {
+      banner.className = "pycheck-banner err";
+      banner.textContent = res.error;
+      return;
+    }
+
+    // also fetch the actual source to show under the banner
+    let srcText = "";
+    try {
+      const sr = await fetch(wsFileUrl(root, rel));
+      if (sr.ok) srcText = await sr.text();
+    } catch {}
+
+    const lines = srcText.split("\n");
+    const errLine = res.ok ? -1 : Math.max(1, parseInt(res.line || 0, 10));
+    const numbered = lines.map((ln, i) => {
+      const n = i + 1;
+      const isErr = !res.ok && n === errLine;
+      const lineHtml = `<span class="pyc-num">${String(n).padStart(4, " ")}</span> ${esc(ln)}`;
+      return isErr ? `<span class="pyc-line err">${lineHtml}</span>` : `<span class="pyc-line">${lineHtml}</span>`;
+    }).join("\n");
+    codeEl.innerHTML = numbered;
+
+    if (res.ok) {
+      banner.className = "pycheck-banner ok";
+      banner.innerHTML = `${SVG_PYCHECK} <strong>syntax OK</strong> · ${esc(res.file || displayName || rel)} · ${res.lines} lines`;
+    } else {
+      const at = res.line ? ` at line ${res.line}${res.col ? `, col ${res.col}` : ""}` : "";
+      banner.className = "pycheck-banner err";
+      banner.innerHTML = `<strong>SyntaxError</strong>${esc(at)}: ${esc(res.msg || "unknown")} · ${esc(res.file || displayName || rel)}`;
+      // scroll to the error line
+      requestAnimationFrame(() => {
+        const errEl = pane.querySelector(".pyc-line.err");
+        if (errEl) errEl.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    }
+    state.workspacePreview = null;
+    const pill = document.getElementById("preview-url");
+    if (pill) pill.textContent = `pycheck · ${displayName || rel}`;
+    const meta = document.getElementById("preview-meta");
+    if (meta) meta.textContent = `python syntax · ${displayName || rel}`;
   }
 
   function renderPreview() {
@@ -1977,17 +2151,51 @@
       return { _error: e.message || String(e) };
     }
   }
-  function renderTreeNode(entry, depth) {
+  // SVG icons for inline file actions. Phosphor's <i class="ph"> would work
+  // but inline SVG keeps the tree row from stealing the icon font's vertical
+  // metrics, and the user explicitly asked for SVG over emoji/icon-font.
+  const SVG_LIGHTNING = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+  const SVG_PYCHECK  = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+
+  // relative path from a workspace root → entry.path. `entry.path` is the
+  // absolute on-disk path returned by /api/list-folder.
+  function relPathFromRoot(root, abs) {
+    const r = (root || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    const a = (abs  || "").replace(/\\/g, "/");
+    if (r && a.toLowerCase().startsWith(r.toLowerCase() + "/")) return a.slice(r.length + 1);
+    return a; // fallback — bridge will still validate
+  }
+
+  function isPreviewableHtml(name) {
+    const n = (name || "").toLowerCase();
+    return n.endsWith(".html") || n.endsWith(".htm");
+  }
+  function isPythonFile(name) {
+    return (name || "").toLowerCase().endsWith(".py");
+  }
+
+  function renderTreeNode(entry, depth, rootFolder) {
     const node = document.createElement("div");
     node.className = entry.is_dir ? "tree-node tree-dir" : "tree-node tree-file";
     node.style.setProperty("--depth", depth);
     const icon = entry.is_dir ? "ph-folder" : fileIconFor(entry.name, entry.ext);
     const chev = entry.is_dir ? `<i class="ph ph-caret-right tree-chev"></i>` : `<span class="tree-chev-spacer"></span>`;
+    // file-type-specific inline action buttons (SVG, not emoji)
+    let actions = "";
+    if (!entry.is_dir) {
+      if (isPreviewableHtml(entry.name)) {
+        actions += `<button class="tree-action ws-preview-html" title="Preview this HTML in the panel">${SVG_LIGHTNING}</button>`;
+      }
+      if (isPythonFile(entry.name)) {
+        actions += `<button class="tree-action ws-pycheck" title="Check Python syntax">${SVG_PYCHECK}</button>`;
+      }
+    }
     node.innerHTML = `
       <div class="tree-row" title="${esc(entry.path)}">
         ${chev}
         <i class="ph ${icon} tree-icon"></i>
         <span class="tree-name">${esc(entry.name)}</span>
+        ${actions ? `<span class="tree-actions">${actions}</span>` : ""}
       </div>
       ${entry.is_dir ? `<div class="tree-children" hidden></div>` : ""}`;
     if (entry.is_dir) {
@@ -2013,11 +2221,30 @@
           } else if (!entries.length) {
             kids.innerHTML = `<div class="tree-empty" style="--depth:${depth + 1}">empty</div>`;
           } else {
-            for (const child of entries) kids.appendChild(renderTreeNode(child, depth + 1));
+            for (const child of entries) kids.appendChild(renderTreeNode(child, depth + 1, rootFolder));
           }
           loaded = true;
         }
       });
+    } else {
+      // wire file-action buttons; both stop propagation so clicking them
+      // doesn't also toggle the row.
+      const previewBtn = node.querySelector(".ws-preview-html");
+      if (previewBtn) {
+        previewBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          previewWorkspaceHtml(rootFolder, relPathFromRoot(rootFolder, entry.path), entry.name);
+        });
+      }
+      const pyBtn = node.querySelector(".ws-pycheck");
+      if (pyBtn) {
+        pyBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          runPythonCheck(rootFolder, relPathFromRoot(rootFolder, entry.path), entry.name);
+        });
+      }
     }
     return node;
   }
@@ -2071,7 +2298,7 @@
           } else if (!entries.length) {
             tree.innerHTML = `<div class="tree-empty" style="--depth:1">empty</div>`;
           } else {
-            for (const child of entries) tree.appendChild(renderTreeNode(child, 1));
+            for (const child of entries) tree.appendChild(renderTreeNode(child, 1, f));
           }
           loaded = true;
         }
@@ -2951,15 +3178,20 @@
       state.view = "preview";
       $("#btn-view-preview").classList.add("active");
       $("#btn-view-code").classList.remove("active");
+      if (state.workspacePreview) { renderWorkspacePreview(); return; }
       renderPreview();
     });
     $("#btn-view-code").addEventListener("click", () => {
       state.view = "code";
       $("#btn-view-code").classList.add("active");
       $("#btn-view-preview").classList.remove("active");
+      if (state.workspacePreview) { renderWorkspacePreview(); return; }
       renderPreview();
     });
-    $("#btn-refresh").addEventListener("click", renderPreview);
+    $("#btn-refresh").addEventListener("click", () => {
+      if (state.workspacePreview) { renderWorkspacePreview(); return; }
+      renderPreview();
+    });
     $("#btn-open-new").addEventListener("click", () => {
       if (!state.activeVersion) return;
       window.open(`/api/versions/${state.chatId}/${state.activeVersion}`, "_blank");
