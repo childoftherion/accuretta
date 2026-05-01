@@ -343,6 +343,19 @@
       return `\x00F${fences.length - 1}\x00`;
     });
 
+    // extract scratchpad markers (bridge.py wraps prior <think> blocks as
+    // [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn] so the
+    // model's own reasoning survives chat-template stripping). Render as a
+    // small icon + italic body instead of leaking the literal tag text.
+    const scratchpads = [];
+    text = text.replace(
+      /\[scratchpad-from-earlier-turn\]([\s\S]*?)\[\/scratchpad-from-earlier-turn\]/gi,
+      (_m, body) => {
+        scratchpads.push((body || "").trim());
+        return `\x00S${scratchpads.length - 1}\x00`;
+      }
+    );
+
     let escaped = esc(text);
 
     // --- block-level passes (work on escaped text, line-by-line) ---
@@ -437,6 +450,14 @@
     out = out.replace(/\x00F(\d+)\x00/g, (_, i) => {
       const { lang, code } = fences[+i];
       return `<pre data-lang="${esc(lang)}"><code>${esc(code)}</code></pre>`;
+    });
+
+    // restore scratchpad blocks as a small icon + italic body
+    const SCRATCH_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>';
+    out = out.replace(/\x00S(\d+)\x00/g, (_, i) => {
+      const body = scratchpads[+i] || "";
+      const safe = esc(body).replace(/\n/g, "<br>");
+      return `<span class="scratchpad-block" title="model's scratchpad from an earlier turn"><span class="scratchpad-tag">${SCRATCH_SVG}<span class="scratchpad-label">scratchpad</span></span><em class="scratchpad-body">${safe}</em></span>`;
     });
     return out;
   }
@@ -2663,9 +2684,56 @@
       if (menu.classList.contains("open")) positionMenu();
     }, true);
   }
+  // On mobile, move the IDE/Agent/Auto/Image chips into the overflow menu so
+  // the composer toolbar isn't crowded and clipping. On desktop, restore them
+  // to the toolbar in their original order. Idempotent — safe to call on every
+  // resize.
+  const _MOBILE_TOOLBAR_IDS = ["mode-ide", "mode-agent", "mode-auto", "btn-attach-image"];
+  function applyMobileToolbarLayout() {
+    const tools = document.querySelector(".composer-tools");
+    const menu = document.getElementById("toolbar-overflow-menu");
+    const wrap = document.querySelector(".toolbar-overflow-wrap");
+    if (!tools || !menu || !wrap) return;
+    const mobile = isMobile();
+    if (mobile) {
+      // ensure a "Mode" section label sits at the top of the menu
+      let modeLabel = menu.querySelector('.overflow-section-label[data-section="mode"]');
+      if (!modeLabel) {
+        modeLabel = document.createElement("div");
+        modeLabel.className = "overflow-section-label";
+        modeLabel.dataset.section = "mode";
+        modeLabel.textContent = "Mode";
+        menu.insertBefore(modeLabel, menu.firstChild);
+      }
+      // place each chip immediately after the Mode label, in declared order
+      let cursor = modeLabel.nextSibling;
+      _MOBILE_TOOLBAR_IDS.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (el.parentNode === menu && el === cursor) {
+          cursor = cursor.nextSibling;
+          return;
+        }
+        menu.insertBefore(el, cursor);
+      });
+    } else {
+      // restore chips to the toolbar, before the overflow wrap, in declared order
+      _MOBILE_TOOLBAR_IDS.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (el.parentNode !== tools) {
+          tools.insertBefore(el, wrap);
+        }
+      });
+      const modeLabel = menu.querySelector('.overflow-section-label[data-section="mode"]');
+      if (modeLabel) modeLabel.remove();
+    }
+  }
+
   function initMobileToolbarOverflow() {
     wireOverflow("#btn-toolbar-overflow", "#toolbar-overflow-menu");
     wireOverflow("#btn-preview-overflow", "#preview-overflow-menu");
+    applyMobileToolbarLayout();
   }
 
   function wireEvents() {
@@ -3004,7 +3072,40 @@
     // responsive
     window.addEventListener("resize", () => {
       document.body.classList.toggle("is-mobile", isMobile());
+      applyMobileToolbarLayout();
     });
+
+    // ----- mobile swipe-left from sidebar back to chat -----
+    // when the sidebar/sessions screen is showing on mobile, a left swipe
+    // (>60px horizontal, dominant over vertical) flips back to the chat tab.
+    // touchmove fires on the sidebar element only, so vertical scrolling
+    // inside the chat list still works normally.
+    (function wireSidebarSwipe() {
+      const sidebar = document.getElementById("sidebar");
+      if (!sidebar) return;
+      let startX = 0, startY = 0, tracking = false;
+      sidebar.addEventListener("touchstart", (e) => {
+        if (!isMobile()) return;
+        if (state.mobileTab !== "sessions") return;
+        const t = e.touches[0];
+        startX = t.clientX;
+        startY = t.clientY;
+        tracking = true;
+      }, { passive: true });
+      sidebar.addEventListener("touchend", (e) => {
+        if (!tracking) return;
+        tracking = false;
+        const t = (e.changedTouches && e.changedTouches[0]);
+        if (!t) return;
+        const dx = t.clientX - startX;
+        const dy = t.clientY - startY;
+        if (Math.abs(dx) < 60) return;             // not far enough
+        if (Math.abs(dy) > Math.abs(dx)) return;   // mostly vertical, ignore
+        // either direction returns to chat — sidebar is the "above" layer
+        state.mobileTab = "chat";
+        applyMobileTab();
+      }, { passive: true });
+    })();
 
     // ----- command palette -----
     $("#btn-palette")?.addEventListener("click", openPalette);

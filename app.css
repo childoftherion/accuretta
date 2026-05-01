@@ -1217,20 +1217,35 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
    ============================================================ */
 
 @media (max-width: 600px) {
-  .composer-tools { flex-wrap: nowrap !important; overflow: hidden; }
-  .composer-tools .chip[data-mode="ide"],
-  .composer-tools .chip[data-mode="agent"],
-  .composer-tools .chip[data-mode="auto"],
-  .composer-tools #btn-attach-image {
-    display: inline-flex !important;
-    flex-shrink: 0;
+  /* JS reparents the mode chips + image button into the overflow menu on
+     mobile, so the composer toolbar row only carries the overflow trigger
+     and a spacer. Model pill is hidden on mobile (eats too much room) — pick
+     models from Settings instead. */
+  .composer-tools { flex-wrap: nowrap !important; overflow: visible; gap: 8px; }
+  .composer-tools .composer-spacer { min-width: 4px; flex: 1; }
+  .composer-tools .model-pill,
+  .composer .model-pill,
+  .model-pill { display: none !important; }
+  /* the overflow trigger is now the primary "options" button — make it big */
+  .toolbar-overflow {
+    width: 38px !important;
+    height: 32px !important;
+    border-radius: 999px;
   }
-  .composer-tools .model-pill {
-    max-width: 100px !important;
-    font-size: 9px;
-    padding: 2px 6px;
+  .toolbar-overflow i { font-size: 16px; }
+  /* chips inside the overflow menu need finger-sized rows */
+  .toolbar-overflow-menu { min-width: 240px; padding: 8px; }
+  .toolbar-overflow-menu .chip {
+    padding: 10px 12px !important;
+    font-size: 13px !important;
+    min-height: 40px;
+    border-radius: 8px;
   }
-  .composer-tools .composer-spacer { min-width: 4px; }
+  .toolbar-overflow-menu .chip i { font-size: 16px; }
+  .toolbar-overflow-menu .overflow-section-label {
+    font-size: 10px;
+    padding: 8px 10px 4px;
+  }
 }
 
 /* Info tooltip icons in settings */
@@ -1272,17 +1287,19 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .drawer { width: 100%; }
   .approval-stack { left: 10px; right: 10px; bottom: calc(64px + env(safe-area-inset-bottom, 0)); max-width: none; }
 
-  /* compact composer on mobile — everything on one row where possible */
-  .composer { padding: 5px 6px 6px; gap: 3px; border-radius: 20px; }
-  .composer-input { min-height: 26px; max-height: 100px; font-size: 14px; padding: 4px 6px; }
-  .composer-tools { gap: 3px; flex-wrap: wrap; }
-  .chip { padding: 2px 6px; font-size: 10px; }
-  .model-pill { max-width: 140px; font-size: 10px; padding: 2px 6px; }
-  .composer-foot { padding-top: 2px; }
+  /* roomier composer on mobile — bigger tap targets, fills the bottom area */
+  .composer { padding: 10px 12px 12px; gap: 8px; border-radius: 22px; }
+  .composer-input { min-height: 44px; max-height: 140px; font-size: 16px; padding: 8px 10px; }
+  .composer-tools { gap: 8px; flex-wrap: nowrap; }
+  .chip { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+  .model-pill { max-width: 160px; font-size: 11px; padding: 6px 12px; min-height: 32px; }
+  .composer-foot { padding-top: 4px; gap: 8px; }
   .composer-hint { display: none; }
-  .btn { padding: 5px 9px; font-size: 11px; }
-  /* put Send inline so the composer doesn't grow another row */
-  #btn-send { padding: 6px 12px; }
+  .btn { padding: 10px 16px; font-size: 13px; min-height: 42px; border-radius: 10px; }
+  .btn.sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+  /* Send button gets the prominent finger-sized action target */
+  #btn-send { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
+  #btn-stop { padding: 10px 14px; min-height: 44px; }
 
   /* sidebar becomes an overlay panel on mobile */
   .sidebar {
@@ -1307,14 +1324,15 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .mobile-tabs { display: none !important; }
   /* composer sits directly above the OS safe area; reserve enough scroll
      padding so the tail of the last message is never hidden by the composer
-     or the mobile browser's own URL bar */
-  .chat-scroll { padding-bottom: 200px; scroll-padding-bottom: 200px; }
+     or the mobile browser's own URL bar. composer-wrap pads its own bottom
+     into the safe-area so the buttons don't get covered by the home-bar. */
+  .chat-scroll { padding-bottom: 240px; scroll-padding-bottom: 240px; }
   .composer-wrap {
     position: fixed;
-    bottom: calc(env(safe-area-inset-bottom, 0px));
+    bottom: 0;
     left: 0; right: 0; z-index: 10;
     background: var(--bg);
-    padding: 6px 8px 10px;
+    padding: 8px 10px calc(env(safe-area-inset-bottom, 0px) + 12px);
     border-top: 1px solid var(--border);
   }
 
@@ -1322,9 +1340,24 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .app.m-tab-approvals::before { inset: 48px 0 0 0; }
   .approval-stack { bottom: calc(env(safe-area-inset-bottom, 0) + 140px); }
 
-  /* keep everything in the drawer inside its box — no horizontal swipe */
-  .drawer { width: 100%; max-width: 100vw; overflow-x: hidden; }
-  .drawer-body { overflow-x: hidden; padding: 14px 14px 24px; }
+  /* keep everything in the drawer inside its box — no horizontal swipe.
+     use 100dvh so iOS Safari URL bar collapsing/expanding doesn't crop
+     the drawer, and pad the bottom past the home-bar safe area so the
+     last setting row + Save button are reachable. */
+  .drawer {
+    width: 100%; max-width: 100vw; overflow-x: hidden;
+    top: 0; bottom: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+  .drawer-body {
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 14px 14px calc(env(safe-area-inset-bottom, 0px) + 80px);
+    flex: 1 1 auto;
+    min-height: 0;
+  }
   .drawer-body * { max-width: 100%; box-sizing: border-box; }
   .drawer-body input,
   .drawer-body select,
@@ -1817,19 +1850,74 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   }
 }
 
-/* mobile: bigger tap targets, more breathing room ----------- */
+/* mobile: bigger tap targets, more breathing room -----------
+   NOTE: this block lives at the bottom of the file deliberately so its
+   rules win the cascade over the desktop "polish layer" defaults above. */
 @media (max-width: 600px) {
   /* assistant action buttons need a finger-sized target */
-  .bubble-action { width: 34px; height: 34px; border-radius: 8px; }
-  .bubble-action i { font-size: 16px; }
-  /* composer slightly larger so the input isn't cramped against the screen edge */
-  .composer { border-radius: 12px; padding: 8px 10px 10px; }
-  .composer-input { font-size: 15px; min-height: 32px; }
+  .bubble-action { width: 40px; height: 40px; border-radius: 10px; }
+  .bubble-action i { font-size: 18px; }
   /* drawer rows roomier on mobile */
   .form-row { margin-bottom: 16px; }
-  .form-row input, .form-row select, .form-row textarea { padding: 10px 12px; font-size: 14px; }
-  /* topbar buttons tappable */
-  .iconbtn { width: 36px; height: 36px; }
+  .form-row input, .form-row select, .form-row textarea { padding: 12px 14px; font-size: 15px; min-height: 44px; }
+  /* topbar buttons tappable — 44px is the iOS HIG minimum */
+  .iconbtn { width: 44px; height: 44px; border-radius: 10px; }
+  .iconbtn i { font-size: 18px; }
+  /* mobile menu items: bigger */
+  .mm-item { padding: 12px 14px; font-size: 14px; min-height: 44px; }
+  .mm-item i { font-size: 18px; }
+  /* sidebar / workspace / sessions list rows: easier to tap */
+  .chatlist .chat-item, .workspace .ws-row { min-height: 44px; padding: 10px 12px; }
+  /* re-assert composer + button sizing AFTER the polish layer so it wins */
+  .composer { padding: 10px 12px 12px; gap: 8px; border-radius: 22px; }
+  .composer-input { font-size: 16px; min-height: 44px; max-height: 140px; padding: 8px 10px; line-height: 1.5; }
+  .composer-tools { gap: 8px; }
+  .composer-foot { gap: 8px; padding-top: 4px; }
+  .btn { padding: 10px 16px; font-size: 13px; min-height: 42px; border-radius: 10px; }
+  .btn.sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+  #btn-send { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
+  #btn-stop { padding: 10px 14px; min-height: 44px; }
+  .toolbar-overflow { width: 38px; height: 32px; }
+  .toolbar-overflow i { font-size: 16px; }
+  .composer-tools .model-pill { font-size: 11px; padding: 6px 12px; min-height: 32px; max-width: 160px; }
+}
+
+/* ============================================================
+   Scratchpad markers — bridge.py wraps prior <think> blocks as
+   [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn].
+   Render them inline so the user sees a tidy icon + italic body
+   instead of literal tag text.
+   ============================================================ */
+.scratchpad-block {
+  display: block;
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--fg-faint) 7%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 0 8px 8px 0;
+  color: var(--fg-muted);
+  font-size: 0.92em;
+  line-height: 1.55;
+}
+.scratchpad-tag {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.scratchpad-tag svg { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+.scratchpad-label { font-family: var(--font-sans); }
+.scratchpad-body {
+  display: block;
+  font-style: italic;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
 /* ============================================================
