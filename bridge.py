@@ -1065,7 +1065,7 @@ def _emit_tool_stream(name: str, text: str) -> None:
             pass
 
 
-def _run_powershell(cmd: str, timeout: int = 120) -> dict:
+def _run_powershell(cmd: str, timeout: int = 120, max_stdout: int = 16000) -> dict:
     try:
         proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
@@ -1101,7 +1101,7 @@ def _run_powershell(cmd: str, timeout: int = 120) -> dict:
     t_out.join(timeout=5)
     t_err.join(timeout=5)
 
-    stdout = "".join(out_lines)[-16000:]
+    stdout = "".join(out_lines)[-max_stdout:]
     stderr = "".join(err_lines)[-4000:]
     return {
         "ok": proc.returncode == 0,
@@ -1152,6 +1152,27 @@ foreach ($procId in $ids) {
 """
 
 
+def _netsnap_debug_dump(stdout: str, stderr: str, exit_code=None, reason: str = "") -> str:
+    """Write the raw PowerShell stdout/stderr to ./data/netsnap-debug.log so we
+    can see exactly what came back when the JSON parse fails. Returns the path."""
+    try:
+        log_dir = (DATA_DIR if "DATA_DIR" in globals() else Path("data"))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "netsnap-debug.log"
+        sep = "=" * 70
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        body = (
+            f"\n{sep}\n[{ts}]  reason={reason}  exit_code={exit_code}\n"
+            f"--- stdout (len={len(stdout)}) ---\n{stdout}\n"
+            f"--- stderr (len={len(stderr)}) ---\n{stderr}\n"
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(body)
+        return str(path)
+    except Exception as e:
+        return f"<debug-dump failed: {e}>"
+
+
 def tool_network_snapshot(args: dict) -> dict:
     """Snapshot the host's current network state (no admin, no install).
     Returns active TCP connections (with owning process names), UDP listeners,
@@ -1166,21 +1187,25 @@ def tool_network_snapshot(args: dict) -> dict:
     if approval.get("decision") != "approve":
         return {"error": f"user denied snapshot ({approval.get('status')})"}
 
-    res = _run_powershell(_NETSNAP_PS, timeout=20)
-    if not res.get("ok"):
-        return {"error": (res.get("stderr") or res.get("stdout") or "snapshot failed").strip()[:400]}
-    raw = (res.get("stdout") or "")
-    # PowerShell can prepend a BOM and mix in non-JSON noise (progress lines,
-    # warnings) before ConvertTo-Json's output. Strip BOM, then carve out the
-    # JSON payload by slicing from first '{' / '[' to its matching last brace.
-    raw = raw.lstrip("\ufeff").strip()
+    # 2 MiB cap — busy machines easily produce >16 KiB of JSON. The model never
+    # sees this raw output (only the aggregated top_processes/top_remotes), so
+    # there's no context-window cost to keeping the full payload.
+    res = _run_powershell(_NETSNAP_PS, timeout=20, max_stdout=2_000_000)
+    raw_stdout = res.get("stdout") or ""
+    raw_stderr = res.get("stderr") or ""
+    ok_flag = res.get("ok")
+    if not ok_flag:
+        # dump everything we know about the failure so we can diagnose
+        _netsnap_debug_dump(raw_stdout, raw_stderr, exit_code=res.get("returncode"), reason="powershell-not-ok")
+        return {"error": (raw_stderr or raw_stdout or "snapshot failed").strip()[:400]}
+    raw = raw_stdout.lstrip("\ufeff").strip()
     if not raw:
+        _netsnap_debug_dump(raw_stdout, raw_stderr, exit_code=res.get("returncode"), reason="empty-stdout")
         return {"error": "empty output from PowerShell"}
     data = None
     try:
         data = json.loads(raw)
     except Exception:
-        # find the first JSON-looking start, then trim to its matching end
         start = -1
         for k, ch in enumerate(raw):
             if ch in "{[":
@@ -1197,7 +1222,13 @@ def tool_network_snapshot(args: dict) -> dict:
                 except Exception:
                     pass
     if data is None:
-        return {"error": "parse failed: no valid JSON in PowerShell output", "raw": raw[:600]}
+        debug_path = _netsnap_debug_dump(raw_stdout, raw_stderr, exit_code=res.get("returncode"), reason="json-parse-failed")
+        return {
+            "error": "parse failed: no valid JSON in PowerShell output",
+            "raw": raw[:600],
+            "debug_dump": debug_path,
+            "stderr_head": raw_stderr[:300],
+        }
 
     tcp = data.get("tcp") or []
     udp = data.get("udp") or []
@@ -3116,7 +3147,22 @@ _DESKTOP_TOOL_NAMES = {
 _ANALYSIS_TOOL_NAMES = {
     "strings_dump", "grep_files", "disasm_at",
     "binwalk_scan", "find_files", "file_inspect", "read_bytes",
+    "network_snapshot",
 }
+# Per-tool result caps for the model context. Tools not listed here use the
+# defaults in _tool_result_cap() below (16K for analysis tools, 4K otherwise).
+# network_snapshot routinely returns ~20 KB on a busy host (per-connection
+# entries + UDP listeners + top remotes/processes + DNS); 16K chops it
+# mid-JSON and leaves the model with garbage, which is why it spirals into
+# random run_powershell calls trying to recover.
+_TOOL_RESULT_CAPS = {
+    "network_snapshot": 32000,
+}
+
+def _tool_result_cap(name: str) -> int:
+    if name in _TOOL_RESULT_CAPS:
+        return _TOOL_RESULT_CAPS[name]
+    return 16000 if name in _ANALYSIS_TOOL_NAMES else 4000
 
 
 def _active_tools() -> dict:
@@ -4249,7 +4295,7 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                 # analysis tools produce large structured output (string lists,
                 # grep hit lists, disasm listings). Cap looser so the model can
                 # actually reason over the output. Chatty tools stay tight.
-                _trunc = 16000 if name in _ANALYSIS_TOOL_NAMES else 4000
+                _trunc = _tool_result_cap(name)
                 conversation.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or name,
