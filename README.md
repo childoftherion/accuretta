@@ -58,6 +58,20 @@ A more interesting example. Below the model is asked to run a network snapshot, 
   <img src="media/network_sniff_investigation.png" alt="Agent running a network snapshot tool and producing a TCP analysis grouped by process" width="780" />
 </p>
 
+One more, from a real session. I asked the agent to help tune my in-ear monitors (Linsoul 7Hz x Crinacle Zero:2) using Peace Equalizer APO. It searched audio review sites, Reddit threads, and AutoEQ measurement databases, picked a target curve (Harman In-Ear 2019), generated ten parametric filters with the right gain/Q/frequency for that specific IEM, and wrote a complete `.peace` profile straight into the EqualizerAPO config folder — including a PreAmp setting to prevent clipping and a heads-up that one of the boosts was unusually aggressive. No copy-pasting filters from a forum. No translating frequency tables into config syntax by hand. Ask, approve the writes, done.
+
+<p align="center">
+  <img src="media/Sound_Question_and_search.png" alt="Agent researching IEM tuning across reference-audio-analyzer.pro, audiosciencereview.com, head-fi.org, and Reddit" width="780" />
+</p>
+
+<p align="center"><em>Above: the agent searches reference-audio-analyzer.pro, audiosciencereview.com, head-fi.org, and Reddit for measurements and recommended targets for the specific IEMs.</em></p>
+
+<p align="center">
+  <img src="media/sound_profile_applied_by_accuretta.png" alt="Agent writing a complete Peace Equalizer profile to disk with activation instructions" width="780" />
+</p>
+
+<p align="center"><em>Above: ten parametric filters written to <code>C:\Program Files\EqualizerAPO\config\Qwen_Optimized.peace</code>, with clear activation steps and a frank note about the more aggressive corrections so I could dial them back if I wanted.</em></p>
+
 ## What you get
 
 * **Chat with real tool use.** Read files, write files, run shell commands, fetch URLs, take screenshots, inspect processes and network state. Every destructive call goes through an approval card.
@@ -69,6 +83,18 @@ A more interesting example. Below the model is asked to run a network snapshot, 
 * **A real settings drawer.** Context window, sampler temperature, top p, top k, KV cache type, GPU layers, batch size, thinking budget, model swap. All on the fly with a quick reload.
 * **Mobile aware UI.** The whole thing works on a phone browser. Composer, sidebar, settings, swipe back to chat from the menu. No app store, no install, just open the localhost URL on the same network.
 * **Tiny surface area.** A few static files and one Python script. Auditable in an afternoon.
+
+## One-click auto-tune
+
+Picking a model in Settings (with a VRAM tier set) automatically runs a tuner that reads the GGUF header for the model's actual architecture — layer count, attention config, MoE expert count, KV head dimensions — and computes the largest context window and the right CPU/GPU offload split for your card. No more hand-picking `--n-cpu-moe`, `--ctx-size`, or `--batch-size`. It picks them, applies them, reloads the model, you chat.
+
+* **GGUF-direct math, not eyeballed.** KV cache cost per token comes from the model's actual `2 × n_layer × head_count_kv × head_dim × dtype_bytes`, not a size bucket. So a Q3 of a given architecture gets *more* context than a Q4 of the same architecture, because the smaller weights file leaves more VRAM free for KV cache.
+* **MoE aware.** When the model is mixture-of-experts, the tuner figures out the dense vs expert split and offloads only as many expert layers to CPU as needed to fit, with a 70%-of-layers cap before it nudges you to grab a smaller quant instead. Speculative decoding is auto-disabled because it's net-negative on MoE per public benchmarks.
+* **Grow only on context.** If autotune comes back with a smaller number than what you already had working, the larger value wins. Your saved ctx never shrinks behind your back.
+* **Self-healing on boot.** Every time the app starts, autotune quietly re-runs in the background and updates flags if the algorithm has improved since you last saved. One toast tells you what changed.
+* **Single click, single load.** Picking a model = "do the right thing for this model on my GPU." No separate Suggest step, no Save step, no manual reload.
+
+> **\*Caveat — bigger context is not always better.** Some models will happily autoload very large contexts (200K+ tokens) when their GGUF reports it as supported. The math says it fits in VRAM, but attention itself slows down as the context window grows even before the conversation fills it. If you care more about tokens-per-second than maximum context, **lower the context window manually in Settings** for that specific use case. On a 16 GB card with a small MoE, **32K-65K is usually the sweet spot for sustained 30+ tok/s**. Bigger ctx = more headroom for long documents and conversations; smaller ctx = faster generation. Pick the one that matches what you are actually doing.
 
 ## Who this is for
 
@@ -104,6 +130,14 @@ If you are paranoid (and you should be), run Wireshark next to it. The only outb
 7. Open Settings, point it at your models folder and llama-server binary, pick a model, and chat.
 
 The first session creates a `data/` folder next to `bridge.py` that holds your chats, settings, workspace pointers, and memories. Back it up if you care about it. Delete it if you want a clean slate.
+
+## Remote access over Tailscale
+
+The bridge listens on your LAN by default, so any device on the same network can already reach it at `http://<your-machine-name>:8787`. Pair that with [Tailscale](https://tailscale.com) and you have your own private AI server reachable from anywhere — laptop in a coffee shop, phone on cellular, friend's couch. Same UI, same model, same conversation history. Nothing leaves your tailnet.
+
+No cloud relay, no port forwarding, no exposing your machine to the open internet. Install Tailscale on the machine running Accuretta and on whatever device you want to chat from, and the URL `http://<machine-name>:8787` (or the tailnet IP) just works. The mobile UI is built for this exact use case — phone browser, no app store, no install. Open the URL and you are in.
+
+A nice side effect: your conversations and your model never round-trip through someone else's data center. The privacy story holds even when you are not at home.
 
 ## Repository layout
 

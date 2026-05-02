@@ -281,6 +281,19 @@ DEFAULT_SETTINGS = {
     "models_dir": "",               # folder containing .gguf files (set via Settings -> Models folder)
     "model_path": "",               # full path to the currently loaded .gguf
     "llama_bin": "",                # override path to llama-server.exe (auto-detected if blank)
+    # llama-server tuning (all map to llama-server CLI flags). Restart required.
+    "n_cpu_moe": 0,                 # --n-cpu-moe: how many MoE experts to keep on CPU. 0 = all on GPU.
+                                    # The killer flag for fitting big MoE models (Qwen3 35B-A3B, GLM 4.7) on small VRAM.
+    "flash_attn": True,             # --flash-attn on/off. Off only if your GPU/build doesn't support it.
+    "n_parallel": 1,                # --parallel: concurrent sequences. 1 is fine for chat. 2+ wastes ctx.
+    "n_ubatch": 0,                  # --ubatch-size. 0 = auto (half of batch, clamped 512..1024).
+    "enable_speculative": True,     # speculative decoding (ngram-mod). Free speedup; turn off if it confuses your model.
+    "no_warmup": False,             # --no-warmup. Saves a few seconds at startup.
+    "enable_metrics": False,        # --metrics. Exposes Prometheus metrics on /metrics. Off by default.
+    "llama_extra_args": "",         # Free-form extra flags appended verbatim, e.g. "--alias my-model --rope-scaling linear".
+                                    # Power-user escape hatch. Whitespace-split. Use with care.
+    # Auto-tune helper (UI persistence only — does not get sent to llama-server directly).
+    "vram_tier_gb": 0,              # 0 = auto-detect via nvidia-smi. Otherwise a fixed VRAM budget the suggester targets.
 }
 
 
@@ -4465,20 +4478,55 @@ def _sanitize_messages_for_openai(msgs: list[dict]) -> list[dict]:
 
 # ---- versioning ------------------------------------------------------------
 
-HTML_BLOCK_RE = re.compile(r"```(?:html|HTML)\s*\n([\s\S]*?)```", re.MULTILINE)
+# Match any fenced code block with optional language hint. We pick the first
+# one whose contents look like HTML (DOCTYPE / <html). This is more lenient
+# than requiring an explicit ```html tag — Qwen and others sometimes emit
+# bare ``` fences for HTML.
+HTML_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+\-]*)\s*\n([\s\S]*?)```", re.MULTILINE)
 
 
 def extract_html(text: str) -> str | None:
+    """Extract a complete HTML document from a model response.
+    Tries, in order:
+      1. Fenced code block tagged ```html (the canonical case)
+      2. Any fenced code block whose contents start with <!DOCTYPE / <html
+      3. The whole response if it starts with <!DOCTYPE / <html
+      4. The substring from <!DOCTYPE / <html to </html> if found anywhere
+    Lenient extraction is the right call here — false positives just preview
+    the wrong block, false negatives mean the user gets no preview at all.
+    """
     if not text:
         return None
-    m = HTML_BLOCK_RE.search(text)
-    if m:
-        html = m.group(1).strip()
-        if "<" in html and ">" in html:
-            return html
+    # 1 + 2: walk fenced blocks, prefer html-tagged, then any html-looking content.
+    html_tagged = None
+    html_untagged = None
+    for m in HTML_BLOCK_RE.finditer(text):
+        lang = (m.group(1) or "").lower()
+        body = m.group(2).strip()
+        bl = body.lower()
+        if lang in ("html", "htm", "xhtml") and "<" in body and ">" in body:
+            html_tagged = body
+            break  # explicit html tag wins immediately
+        if bl.startswith("<!doctype") or bl.startswith("<html"):
+            if html_untagged is None:
+                html_untagged = body
+    if html_tagged:
+        return html_tagged
+    if html_untagged:
+        return html_untagged
+    # 3: bare HTML response, no fence
     stripped = text.strip()
-    if stripped.lower().startswith("<!doctype") or stripped.lower().startswith("<html"):
+    sl = stripped.lower()
+    if sl.startswith("<!doctype") or sl.startswith("<html"):
         return stripped
+    # 4: HTML embedded in prose — find first doctype/<html and last </html>
+    lower = text.lower()
+    starts = [i for i in (lower.find("<!doctype"), lower.find("<html")) if i >= 0]
+    if starts:
+        start = min(starts)
+        end = lower.rfind("</html>")
+        if end > start:
+            return text[start:end + len("</html>")].strip()
     return None
 
 
@@ -4811,6 +4859,10 @@ class Handler(BaseHTTPRequestHandler):
                 "Cache-Control": "no-store",
             }
             return self._send_bytes(200, data, ct, extra_headers=extra)
+        if p == "/api/llama/detect-vram":
+            # GET — best-effort GPU VRAM probe via nvidia-smi. Used by the
+            # Settings drawer to pre-fill the VRAM tier dropdown.
+            return self._send_json(200, detect_vram_gb())
         if p == "/api/list-folder":
             qs = urllib.parse.parse_qs(parsed.query)
             raw = (qs.get("path") or [""])[0]
@@ -4918,6 +4970,25 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 # null bytes in source etc.
                 return self._send_json(200, {"ok": False, "file": file_label, "msg": str(e)})
+        if p == "/api/llama/auto-tune":
+            # POST {model_path?, vram_gb} -> suggested llama-server settings.
+            # If model_path is omitted, uses the currently configured model_path
+            # from settings. If vram_gb is omitted or 0, tries nvidia-smi.
+            mp = (body.get("model_path") or get_settings().get("model_path") or "").strip()
+            vram = float(body.get("vram_gb") or 0)
+            detected = None
+            if vram <= 0:
+                detected = detect_vram_gb()
+                vram = float(detected.get("gb") or 0)
+            suggested = auto_tune(mp, vram)
+            profile = inspect_model(mp)
+            return self._send_json(200, {
+                "vram_gb": vram,
+                "vram_source": (detected or {}).get("source", "user"),
+                "vram_name": (detected or {}).get("name", ""),
+                "model": profile,
+                "suggested": suggested,
+            })
         if p == "/api/browse-folder":
             # native OS folder picker, only on the machine running the bridge.
             title = (body.get("title") or "Pick a folder").strip()
@@ -5366,6 +5437,565 @@ class Handler(BaseHTTPRequestHandler):
 # UI without restarting anything. Set settings.model_path to the .gguf and we
 # (re)spawn llama-server with the unsloth-tuned flag set.
 
+
+# ---- VRAM detection + auto-tune --------------------------------------------
+# The goal is "no friction": user picks (or we detect) their VRAM tier and we
+# fill in sensible llama-server flags. Power users can still override every
+# field. Heuristics here are deliberately conservative — leaving 10-15% VRAM
+# headroom beats hitting an OOM mid-generation.
+
+def detect_vram_gb() -> dict:
+    """Best-effort GPU VRAM probe. Returns {gb, name, source} or
+    {gb: 0, name: "", source: "none"} on failure. Tries nvidia-smi first
+    (most common), then falls back to silence. Never raises."""
+    out = {"gb": 0, "name": "", "source": "none"}
+    # nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits
+    smi = shutil.which("nvidia-smi")
+    if smi:
+        try:
+            r = subprocess.run(
+                [smi, "--query-gpu=memory.total,name", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3,
+                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                # First line = primary GPU. "12282, NVIDIA GeForce RTX 4070"
+                first = r.stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in first.split(",", 1)]
+                if parts and parts[0].isdigit():
+                    mb = int(parts[0])
+                    out["gb"] = round(mb / 1024, 1)
+                    out["name"] = parts[1] if len(parts) > 1 else "NVIDIA GPU"
+                    out["source"] = "nvidia-smi"
+                    return out
+        except Exception:
+            pass
+    return out
+
+
+# Filename patterns that indicate a Mixture-of-Experts model. Used as a fallback
+# when GGUF header parsing fails or the model file is unreachable.
+_MOE_FILENAME_HINTS = (
+    "moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-coder-v2",
+    "qwen3.5-moe", "qwen3-moe", "qwen3.6", "glm-4.7", "glm-4.6", "glm-4.5",
+    "phi-3.5-moe", "grok", "dbrx", "jamba", "arctic",
+)
+# A3B / A13B style suffix: "active 3B" or "active 13B" — also MoE.
+_ACTIVE_RE = re.compile(r"-a(\d+)b", re.IGNORECASE)
+# Total params: "35B", "47B", "8x7B" (treat as ~47B), etc.
+_TOTAL_RE = re.compile(r"\b(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)b\b|\b(\d+(?:\.\d+)?)b\b", re.IGNORECASE)
+
+# Quant suffix in filename, e.g. "Q4_K_M", "Q3_K_S", "IQ4_XS", "F16".
+_QUANT_RE = re.compile(r"\b(IQ\d_[A-Z]{1,3}|Q\d_[KS01]?_?[MS]?|Q\d_K|F16|BF16|F32)\b", re.IGNORECASE)
+
+
+def read_gguf_metadata(path: str, max_bytes: int = 4 * 1024 * 1024) -> dict:
+    """Parse the GGUF v2/v3 header and return architecture-level metadata.
+    Reads at most a few MB from the file's start — the metadata block lives
+    right after the magic. Never raises; returns {ok: False} on any parse
+    failure so callers can fall back to filename heuristics.
+
+    GGUF spec reference: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
+    Layout: "GGUF" magic, uint32 version, uint64 tensor_count, uint64 kv_count,
+    then kv_count entries of (str key, uint32 value_type, value).
+    """
+    out = {
+        "ok": False,
+        "architecture": "",
+        "size_label": "",
+        "block_count": 0,             # n_layer
+        "expert_count": 0,            # 0 for dense, > 0 for MoE
+        "expert_used_count": 0,       # active experts per token
+        "head_count": 0,              # query heads
+        "head_count_kv": 0,           # KV heads (smaller for GQA)
+        "key_length": 0,              # per-head key dim
+        "value_length": 0,            # per-head value dim
+        "embedding_length": 0,
+        "feed_forward_length": 0,
+        "expert_feed_forward_length": 0,  # MoE: per-expert FFN width
+        "context_length": 0,              # the model's trained max context
+    }
+    if not path:
+        return out
+    try:
+        import struct
+        with open(path, "rb") as f:
+            data = f.read(max_bytes)
+        if len(data) < 24 or data[:4] != b"GGUF":
+            return out
+        pos = 4
+        version = struct.unpack_from("<I", data, pos)[0]; pos += 4
+        if version < 2:
+            return out  # v1 had a different layout
+        # tensor_count, kv_count
+        struct.unpack_from("<Q", data, pos)[0]; pos += 8  # tensor_count, unused
+        kv_count = struct.unpack_from("<Q", data, pos)[0]; pos += 8
+
+        # GGUF value type enum
+        T_UINT8, T_INT8 = 0, 1
+        T_UINT16, T_INT16 = 2, 3
+        T_UINT32, T_INT32 = 4, 5
+        T_FLOAT32, T_BOOL, T_STRING, T_ARRAY = 6, 7, 8, 9
+        T_UINT64, T_INT64, T_FLOAT64 = 10, 11, 12
+        scalar_fmt = {
+            T_UINT8: ("<B", 1), T_INT8: ("<b", 1),
+            T_UINT16: ("<H", 2), T_INT16: ("<h", 2),
+            T_UINT32: ("<I", 4), T_INT32: ("<i", 4),
+            T_FLOAT32: ("<f", 4), T_BOOL: ("<?", 1),
+            T_UINT64: ("<Q", 8), T_INT64: ("<q", 8),
+            T_FLOAT64: ("<d", 8),
+        }
+
+        def read_str(p):
+            n = struct.unpack_from("<Q", data, p)[0]
+            p += 8
+            s = data[p:p + n].decode("utf-8", errors="replace")
+            return s, p + n
+
+        def read_value(p, vtype):
+            if vtype in scalar_fmt:
+                fmt, sz = scalar_fmt[vtype]
+                return struct.unpack_from(fmt, data, p)[0], p + sz
+            if vtype == T_STRING:
+                return read_str(p)
+            if vtype == T_ARRAY:
+                etype = struct.unpack_from("<I", data, p)[0]; p += 4
+                ecount = struct.unpack_from("<Q", data, p)[0]; p += 8
+                # We never need array contents for tuning; just skip past them.
+                if etype in scalar_fmt:
+                    _, sz = scalar_fmt[etype]
+                    return None, p + sz * ecount
+                if etype == T_STRING:
+                    for _ in range(ecount):
+                        n = struct.unpack_from("<Q", data, p)[0]
+                        p += 8 + n
+                    return None, p
+                # Nested arrays / unknown — bail safely
+                return None, p
+            return None, p  # unknown scalar type, give up gracefully
+
+        meta: dict = {}
+        for _ in range(kv_count):
+            try:
+                key, pos = read_str(pos)
+                vtype = struct.unpack_from("<I", data, pos)[0]; pos += 4
+                val, pos = read_value(pos, vtype)
+                if val is not None:
+                    meta[key] = val
+            except (struct.error, IndexError):
+                # Ran past the buffered window — stop gracefully, keep what we got.
+                break
+
+        arch = str(meta.get("general.architecture", "")).strip()
+        if not arch:
+            return out
+        out["architecture"] = arch
+        out["size_label"] = str(meta.get("general.size_label", "")).strip()
+
+        def num(*keys):
+            for k in keys:
+                v = meta.get(k)
+                if isinstance(v, (int, float)) and v:
+                    return int(v)
+            return 0
+
+        out["block_count"] = num(f"{arch}.block_count")
+        out["expert_count"] = num(f"{arch}.expert_count")
+        out["expert_used_count"] = num(f"{arch}.expert_used_count")
+        out["head_count"] = num(f"{arch}.attention.head_count")
+        out["head_count_kv"] = num(
+            f"{arch}.attention.head_count_kv",
+            f"{arch}.attention.head_count",  # MHA: kv = q
+        )
+        out["key_length"] = num(f"{arch}.attention.key_length")
+        out["value_length"] = num(f"{arch}.attention.value_length")
+        out["embedding_length"] = num(f"{arch}.embedding_length")
+        out["feed_forward_length"] = num(f"{arch}.feed_forward_length")
+        out["expert_feed_forward_length"] = num(f"{arch}.expert_feed_forward_length")
+        out["context_length"] = num(f"{arch}.context_length")
+
+        # Derive missing dims when possible
+        if not out["key_length"] and out["embedding_length"] and out["head_count"]:
+            out["key_length"] = out["embedding_length"] // out["head_count"]
+        if not out["value_length"]:
+            out["value_length"] = out["key_length"]
+
+        out["ok"] = bool(out["architecture"] and out["block_count"])
+        return out
+    except Exception:
+        return out
+
+
+def inspect_model(model_path: str) -> dict:
+    """Return a profile of a GGUF model. Reads the GGUF header for accurate
+    architecture data (layer count, MoE expert count, GQA config). Falls back
+    to filename heuristics when the header is unavailable.
+    Never raises — returns sensible defaults if anything fails.
+    """
+    out = {
+        "path": model_path or "",
+        "name": "",
+        "size_gb": 0.0,
+        "is_moe": False,
+        "active_params_b": 0,
+        "total_params_b": 0,
+        "quant": "",
+        # GGUF-derived (zero when header unreadable)
+        "architecture": "",
+        "block_count": 0,
+        "expert_count": 0,
+        "expert_used_count": 0,
+        "head_count_kv": 0,
+        "key_length": 0,
+        "value_length": 0,
+        "embedding_length": 0,
+        "feed_forward_length": 0,
+        "expert_feed_forward_length": 0,
+        "context_length": 0,
+        "metadata_source": "filename",  # or "gguf"
+    }
+    if not model_path:
+        return out
+    try:
+        p = Path(model_path)
+        out["name"] = p.name
+        out["size_gb"] = round(p.stat().st_size / (1024 ** 3), 2)
+    except Exception:
+        return out
+    name_lc = out["name"].lower()
+    qm = _QUANT_RE.search(out["name"])
+    if qm:
+        out["quant"] = qm.group(1).upper()
+
+    # Try GGUF header first — authoritative when present.
+    gg = read_gguf_metadata(model_path)
+    if gg.get("ok"):
+        out["metadata_source"] = "gguf"
+        out["architecture"] = gg["architecture"]
+        out["block_count"] = gg["block_count"]
+        out["expert_count"] = gg["expert_count"]
+        out["expert_used_count"] = gg["expert_used_count"]
+        out["head_count_kv"] = gg["head_count_kv"]
+        out["key_length"] = gg["key_length"]
+        out["value_length"] = gg["value_length"]
+        out["embedding_length"] = gg["embedding_length"]
+        out["feed_forward_length"] = gg["feed_forward_length"]
+        out["expert_feed_forward_length"] = gg["expert_feed_forward_length"]
+        out["context_length"] = gg["context_length"]
+        out["is_moe"] = gg["expert_count"] > 1
+        # total/active param counts: prefer the size_label like "30B-A3B"
+        sl = (gg.get("size_label") or "").lower()
+        am = _ACTIVE_RE.search(sl) or _ACTIVE_RE.search(name_lc)
+        if am:
+            try:
+                out["active_params_b"] = int(am.group(1))
+            except Exception:
+                pass
+        for tm in _TOTAL_RE.finditer(sl + " " + name_lc):
+            try:
+                if tm.group(1) and tm.group(2):
+                    v = float(tm.group(1)) * float(tm.group(2))
+                elif tm.group(3):
+                    v = float(tm.group(3))
+                else:
+                    continue
+            except Exception:
+                continue
+            if v > out["total_params_b"]:
+                out["total_params_b"] = int(round(v))
+        return out
+
+    # Filename-only fallback (header parse failed)
+    out["is_moe"] = any(h in name_lc for h in _MOE_FILENAME_HINTS) or bool(_ACTIVE_RE.search(name_lc))
+    m = _ACTIVE_RE.search(name_lc)
+    if m:
+        try:
+            out["active_params_b"] = int(m.group(1))
+        except Exception:
+            pass
+    largest = 0.0
+    for tm in _TOTAL_RE.finditer(name_lc):
+        try:
+            if tm.group(1) and tm.group(2):
+                v = float(tm.group(1)) * float(tm.group(2))
+            elif tm.group(3):
+                v = float(tm.group(3))
+            else:
+                continue
+        except Exception:
+            continue
+        if v > largest:
+            largest = v
+    out["total_params_b"] = int(round(largest)) if largest else 0
+    return out
+
+
+# KV cache dtype byte costs per element (post block-quant overhead).
+# q4_0/q8_0 numbers are real: 0.5 + 1/32 (delta) = ~0.5625; 1 + 1/32 = ~1.0625.
+_KV_DTYPE_BYTES = {"f16": 2.0, "q8_0": 1.0625, "q4_0": 0.5625}
+
+
+def _kv_bytes_per_token(profile: dict, kv_dtype: str) -> int:
+    """Exact KV cache cost per token using GGUF-derived attention config.
+    Formula: 2 (K + V) * n_layer * head_count_kv * key_length * dtype_bytes.
+    Returns 0 when GGUF metadata wasn't readable (caller falls back to bucket).
+    """
+    n_layer = profile.get("block_count", 0) or 0
+    n_kv = profile.get("head_count_kv", 0) or 0
+    head_dim = profile.get("key_length", 0) or 0
+    if not (n_layer and n_kv and head_dim):
+        return 0
+    db = _KV_DTYPE_BYTES.get(kv_dtype, 1.0625)
+    # K and V can have different dims (rare); use the larger to stay safe.
+    v_dim = max(profile.get("value_length", 0) or head_dim, head_dim)
+    return int(n_layer * n_kv * (head_dim + v_dim) * db)
+
+
+def _kv_per_1k_mb(profile: dict, kv_dtype: str, file_size_gb: float) -> float:
+    """Either GGUF-exact or size-bucket fallback. Returned in MB per 1k tokens."""
+    bpt = _kv_bytes_per_token(profile, kv_dtype)
+    if bpt > 0:
+        return (bpt * 1000) / (1024 * 1024)
+    # Fallback: rough bucketed estimate when GGUF header was unreadable.
+    if file_size_gb < 8:
+        base = 30.0
+    elif file_size_gb < 20:
+        base = 60.0
+    elif file_size_gb < 40:
+        base = 100.0
+    else:
+        base = 180.0
+    if kv_dtype == "q4_0":
+        base *= 0.55
+    elif kv_dtype == "f16":
+        base *= 1.9
+    return base
+
+
+def auto_tune(model_path: str, vram_gb: float) -> dict:
+    """Suggest llama-server flags for a (model, VRAM) pair.
+
+    Uses GGUF header metadata (layer count, expert count, GQA config) when
+    available for accurate KV cache + MoE expert offload math. Falls back to
+    size-bucket heuristics when the header is unreadable. Returns the same
+    keys the Settings drawer uses plus `notes` (multi-line reasoning) and
+    `quant_downshift` (banner shown when the model needs heavy offload).
+
+    Leaves ~8% VRAM headroom when GGUF math is exact, ~15% when falling back
+    to filename heuristics. Disables speculative decoding for MoE because
+    independent benchmarks show it's net-negative there.
+    """
+    profile = inspect_model(model_path)
+    notes: list[str] = []
+    size_gb = profile["size_gb"] or 0.0
+    is_moe = profile["is_moe"]
+    n_layer = profile.get("block_count", 0) or 0
+    src = profile.get("metadata_source", "filename")
+    vram = max(float(vram_gb or 0), 0)
+
+    # Default flags everyone gets
+    out = {
+        "num_gpu": 99,                 # all non-MoE layers on GPU
+        "n_cpu_moe": 0,                # MoE-only; auto below
+        "kv_cache_type": "q8_0",       # best balance
+        "num_ctx": 32768,
+        "num_batch": 512,
+        "n_ubatch": 0,                 # auto in spawn
+        "num_thread": 0,               # auto = let llama-server pick
+        "flash_attn": True,
+        "enable_speculative": True,
+        "no_warmup": False,
+        "enable_metrics": False,
+        "quant_downshift": "",          # banner string; "" = no suggestion
+    }
+
+    if vram <= 0:
+        out["notes"] = "no VRAM tier set — using safe defaults. set a tier and Suggest again."
+        return out
+    if size_gb <= 0:
+        out["notes"] = "no model selected — pick a model first, then Suggest."
+        return out
+
+    # Useable VRAM budget. With exact GGUF-derived KV math we can run hot —
+    # ~8% headroom for CUDA workspace + alignment. Filename fallback is fuzzier
+    # so we leave more slack.
+    headroom = 0.92 if src == "gguf" else 0.85
+    budget_mb = vram * headroom * 1024
+    if src == "gguf":
+        moe_tag = ""
+        if is_moe:
+            moe_tag = (f" · MoE {profile['expert_count']} experts, "
+                       f"{profile['expert_used_count']} active/token")
+        notes.append(
+            f"GGUF: {profile['architecture']} · {n_layer} layers · "
+            f"GQA head_kv={profile['head_count_kv']} key_len={profile['key_length']}{moe_tag}"
+        )
+    else:
+        notes.append("GGUF header unreadable — using size-bucket fallback (less accurate).")
+    notes.append(f"VRAM budget: {vram:.1f} GB · usable {budget_mb/1024:.1f} GB ({int(headroom*100)}% of total).")
+
+    # -- KV cache dtype --
+    # q8_0 is the quality/cost sweet spot. Drop to q4_0 only when very tight.
+    if size_gb > vram * 1.2 and vram <= 12:
+        out["kv_cache_type"] = "q4_0"
+        notes.append("KV cache: q4_0 (model >> VRAM; every MB counts).")
+    elif vram >= 24 and size_gb < vram * 0.4:
+        out["kv_cache_type"] = "f16"
+        notes.append("KV cache: f16 (you have headroom).")
+    else:
+        out["kv_cache_type"] = "q8_0"
+        notes.append("KV cache: q8_0 (best quality/size balance).")
+
+    # -- Context window + n_cpu_moe (joint optimization) --
+    # The two settings are coupled: bigger ctx eats more KV cache VRAM, which
+    # forces more expert offload, which slows tokens. We want the LARGEST ctx
+    # whose required offload is still tolerable (here: ≤70% of layers). This
+    # gives the user "biggest context that's still fast" instead of the old
+    # "fixed 45%-of-budget cap that left context on the table".
+    kv_per_1k = _kv_per_1k_mb(profile, out["kv_cache_type"], size_gb)
+    # Compute buffer: ~1 GB for activations, scratch, CUDA workspace,
+    # attention work area. Empirically sufficient for the models we target.
+    compute_buf_mb = 1024.0
+    size_mb = size_gb * 1024
+    # Tier ladder. We deliberately do NOT cap to GGUF-reported trained_max —
+    # many GGUFs report a conservative trained context that the model handles
+    # fine in practice (RoPE/YaRN scaling), and capping there was shrinking
+    # context that previously worked. trained_max is shown in notes for info
+    # but never enforced.
+    trained_max = int(profile.get("context_length", 0) or 0)
+    ctx_tiers = (262144, 131072, 98304, 65536, 49152, 32768, 24576, 16384, 12288, 8192, 4096)
+
+    if is_moe and n_layer > 0:
+        # Dense share: attention + embeddings + router + LM head. Empirically
+        # ~10-15% for big MoEs, more for small ones. Bounded.
+        dense_share = max(0.08, min(0.20, 1.5 / max(profile.get("expert_count", 8), 1) + 0.08))
+        expert_total_mb = size_mb * (1 - dense_share)
+        expert_per_layer_mb = expert_total_mb / n_layer
+        # Offload tolerance: 70% means we're willing to push experts off GPU as
+        # long as the active set + attention + KV cache still fit. Past 70%
+        # the speed cost outweighs the context win.
+        max_offload_layers = int(n_layer * 0.7)
+
+        chosen_ctx = ctx_tiers[-1]  # smallest as fallback
+        chosen_n_cpu_moe = n_layer  # max offload as fallback
+        for tier in ctx_tiers:
+            kv_mb = (tier / 1000.0) * kv_per_1k
+            available_for_model = budget_mb - kv_mb - compute_buf_mb
+            if available_for_model <= 0:
+                continue  # KV alone busts the budget
+            if available_for_model >= size_mb:
+                # Whole model + KV + compute fits. No offload, max speed.
+                chosen_ctx = tier
+                chosen_n_cpu_moe = 0
+                break
+            shortfall = size_mb - available_for_model
+            need_offload = int((shortfall + expert_per_layer_mb - 1) // expert_per_layer_mb)
+            if need_offload <= max_offload_layers:
+                chosen_ctx = tier
+                chosen_n_cpu_moe = need_offload
+                break
+        out["num_ctx"] = chosen_ctx
+        out["n_cpu_moe"] = chosen_n_cpu_moe
+        kv_at_chosen = (chosen_ctx / 1000.0) * kv_per_1k
+        if chosen_n_cpu_moe == 0:
+            notes.append(
+                f"context: {chosen_ctx:,} tokens · n_cpu_moe: 0 "
+                f"(model fits fully in VRAM at this context, KV ≈ {kv_at_chosen:.0f} MB)."
+            )
+        else:
+            notes.append(
+                f"context: {chosen_ctx:,} tokens · n_cpu_moe: {chosen_n_cpu_moe} of {n_layer} "
+                f"(KV ≈ {kv_at_chosen:.0f} MB; offloading {chosen_n_cpu_moe} expert layers to fit + leave room)."
+            )
+        # Quant downshift suggestion: if we're offloading more than half
+        # the layers even at the chosen context, the user is leaving real
+        # throughput on the table by not picking a smaller quant.
+        if chosen_n_cpu_moe > n_layer * 0.5:
+            cur_q = profile.get("quant", "Q4_K_M")
+            suggest_q = "Q3_K_S" if cur_q.upper().startswith("Q4") else "IQ3_XS"
+            out["quant_downshift"] = (
+                f"Offloading {chosen_n_cpu_moe}/{n_layer} layers at {cur_q or 'this quant'}. "
+                f"Grab the {suggest_q} variant for ~3-5x throughput with full context."
+            )
+    elif is_moe:
+        # No layer count from GGUF — fall back to ratio formula + old context calc.
+        ctx_budget_mb = budget_mb * 0.45
+        max_ctx_tokens = int((ctx_budget_mb / kv_per_1k) * 1000) if kv_per_1k > 0 else 8192
+        for tier in ctx_tiers:
+            if max_ctx_tokens >= tier:
+                out["num_ctx"] = tier
+                break
+        shortfall_gb = (size_gb * 1.1) - vram
+        ratio = max(0.0, min(1.0, shortfall_gb / max(size_gb, 1)))
+        out["n_cpu_moe"] = max(0, min(int(round(ratio * 50)), 60))
+        notes.append(f"context: {out['num_ctx']:,} tokens (estimated — no layer count from GGUF).")
+        notes.append(f"n_cpu_moe: {out['n_cpu_moe']} (estimated).")
+    else:
+        # Dense model: max context that fits alongside model weights.
+        for tier in ctx_tiers:
+            kv_mb = (tier / 1000.0) * kv_per_1k
+            if size_mb + kv_mb + compute_buf_mb <= budget_mb:
+                out["num_ctx"] = tier
+                break
+        else:
+            out["num_ctx"] = ctx_tiers[-1]
+        kv_at_chosen = (out["num_ctx"] / 1000.0) * kv_per_1k
+        notes.append(
+            f"context: {out['num_ctx']:,} tokens "
+            f"(KV ≈ {kv_at_chosen:.0f} MB at {out['kv_cache_type']})."
+        )
+    if trained_max:
+        notes.append(f"GGUF reports trained max {trained_max:,} tokens (informational, not enforced).")
+
+    # -- num_gpu (dense partial offload) --
+    if not is_moe and size_gb * 1024 > budget_mb:
+        frac_on_gpu = max(0.2, budget_mb / (size_gb * 1024))
+        if n_layer > 0:
+            out["num_gpu"] = max(8, int(n_layer * frac_on_gpu))
+            notes.append(
+                f"num_gpu: {out['num_gpu']} of {n_layer} layers "
+                f"(dense model too big — partial offload, expect slow tok/s)."
+            )
+            # Quant downshift hint for dense too
+            if frac_on_gpu < 0.6:
+                cur_q = profile.get("quant", "")
+                suggest_q = "Q3_K_M" if cur_q.upper().startswith("Q4") else "Q4_K_S"
+                out["quant_downshift"] = (
+                    f"Only {int(frac_on_gpu*100)}% of layers fit on GPU. "
+                    f"A smaller quant ({suggest_q}) would run much faster."
+                )
+        else:
+            out["num_gpu"] = max(8, int(80 * frac_on_gpu))
+            notes.append(f"num_gpu: {out['num_gpu']} layers (dense partial offload).")
+
+    # -- Speculative decoding --
+    # Independent benchmarks (RTX 3090 + Qwen3.6 35B-A3B post llama.cpp #19493)
+    # show speculative decoding is net-negative on MoE: every drafted token
+    # pulls a fresh expert through the memory hierarchy, even at 100% draft
+    # acceptance. Disable it for MoE; keep it on for dense.
+    if is_moe:
+        out["enable_speculative"] = False
+        notes.append("speculative decoding: OFF (net-negative on MoE per public benchmarks).")
+    else:
+        notes.append("speculative decoding: ON (free win on dense models).")
+
+    # -- batch / ubatch --
+    # When offloading to CPU, bigger batches dramatically improve prompt eval
+    # because the PCIe transfer is amortized over more tokens. Default 512 is
+    # too small for hybrid CPU/GPU.
+    if out["n_cpu_moe"] > 0 or (not is_moe and out["num_gpu"] < 99):
+        out["num_batch"] = 2048
+        out["n_ubatch"] = 2048
+        notes.append("batch/ubatch: 2048 (offloading — bigger batches amortize PCIe).")
+    elif vram >= 24:
+        out["num_batch"] = 2048
+    elif vram >= 16:
+        out["num_batch"] = 1024
+
+    out["notes"] = " ".join(notes)
+    return out
+
+
 def find_llama_bin() -> str:
     """Locate llama-server.exe — settings override > env > PATH > known dirs."""
     s = get_settings()
@@ -5470,17 +6100,26 @@ class LlamaProcess:
         # KV on a 16-attn-head model burns ~16 GiB by itself, leaving nothing
         # for the weights and forcing layer offload to system RAM. 32k is a
         # sane chat default; users who want more can raise it knowing the cost.
+        # Context size. Users can crank this past 65k now that --n-cpu-moe lets
+        # them spill model weights instead of KV cache. Hard ceiling is 1M tokens.
         ctx_raw = int(s.get("num_ctx") or 32768)
-        # 65k is the max we trust for a 16 GB GPU with q8_0 KV cache. Above
-        # that, even a mid-size model starts spilling layers to host RAM.
-        ctx = min(ctx_raw, 65536) if ctx_raw > 0 else 32768
-        n_batch = max(int(s.get("num_batch") or 2048), 512)
-        n_ubatch = min(max(n_batch // 2, 512), 1024)
+        ctx = min(max(ctx_raw, 512), 1_048_576) if ctx_raw > 0 else 32768
+        n_batch = max(int(s.get("num_batch") or 2048), 32)
+        n_ubatch_raw = int(s.get("n_ubatch") or 0)
+        n_ubatch = n_ubatch_raw if n_ubatch_raw > 0 else min(max(n_batch // 2, 512), 1024)
         ngl_setting = int(s.get("num_gpu") or 99)
         ngl = -1 if ngl_setting >= 99 else ngl_setting
+        n_threads = int(s.get("num_thread") or 0)  # 0 = let llama-server pick
+        n_parallel = max(int(s.get("n_parallel") or 1), 1)
+        n_cpu_moe = max(int(s.get("n_cpu_moe") or 0), 0)
         kv_type = (s.get("kv_cache_type") or "q8_0").strip().lower()
         if kv_type not in ("f16", "f32", "q8_0", "q4_0", "q5_0", "q5_1", "q4_1"):
             kv_type = "q8_0"
+        flash_on = bool(s.get("flash_attn", True))
+        spec_on = bool(s.get("enable_speculative", True))
+        no_warmup = bool(s.get("no_warmup", False))
+        enable_metrics = bool(s.get("enable_metrics", False))
+        extra_args_raw = (s.get("llama_extra_args") or "").strip()
 
         # Stop any existing instance first.
         with self._lock:
@@ -5499,7 +6138,7 @@ class LlamaProcess:
             "--host", "127.0.0.1",
             "--port", str(port),
             "--jinja",
-            "--flash-attn", "on",
+            "--flash-attn", "on" if flash_on else "off",
             "--no-context-shift",
             "-ngl", str(ngl),
             "-c", str(ctx),
@@ -5507,13 +6146,36 @@ class LlamaProcess:
             "-ub", str(n_ubatch),
             "--cache-type-k", kv_type,
             "--cache-type-v", kv_type,
-            "--parallel", "1",
-            "--spec-type", "ngram-mod",
-            "--spec-ngram-size-n", "24",
-            "--draft-min", "48",
-            "--draft-max", "64",
+            "--parallel", str(n_parallel),
             "--reasoning-format", "deepseek",
         ]
+        if n_threads > 0:
+            cmd += ["-t", str(n_threads)]
+        if n_cpu_moe > 0:
+            # The flag is --n-cpu-moe in newer llama.cpp builds (alias: -ncmoe).
+            # Keeping `n` MoE expert tensors on CPU lets giant MoE models run on
+            # tiny VRAM by paying a latency tax instead of an OOM error.
+            cmd += ["--n-cpu-moe", str(n_cpu_moe)]
+        if spec_on:
+            cmd += [
+                "--spec-type", "ngram-mod",
+                "--spec-ngram-size-n", "24",
+                "--draft-min", "48",
+                "--draft-max", "64",
+            ]
+        if no_warmup:
+            cmd += ["--no-warmup"]
+        if enable_metrics:
+            cmd += ["--metrics"]
+        if extra_args_raw:
+            # Whitespace split is naive but fine for the typical extras
+            # (--alias foo, --rope-scaling linear, --rope-freq-scale 0.5 etc.).
+            # Anyone passing values with spaces can wrap them in the JSON file.
+            try:
+                import shlex
+                cmd += shlex.split(extra_args_raw, posix=False)
+            except Exception:
+                cmd += extra_args_raw.split()
         try:
             creationflags = 0
             if sys.platform == "win32":

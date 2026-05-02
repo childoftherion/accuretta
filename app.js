@@ -499,6 +499,68 @@
 
     wireEvents();
     subscribeSSE();
+
+    // Background self-correct: re-tune for the currently loaded model on every
+    // boot so saved settings from old/buggy autotune runs heal themselves.
+    // Same "grow only" rule — never shrinks ctx behind the user's back. Silent
+    // on success; logs to console on failure so we don't spam toasts at boot.
+    autoRetuneOnBoot().catch(e => console.warn("boot auto-retune skipped:", e));
+  }
+
+  async function autoRetuneOnBoot() {
+    const s = state.settings || {};
+    const modelPath = s.model_path || "";
+    const tier = Number(s.vram_tier_gb || 0) || 0;
+    if (!modelPath || !tier) return;  // nothing to tune for
+    let r;
+    try {
+      r = await api("/api/llama/auto-tune", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ model_path: modelPath, vram_gb: tier }),
+      });
+    } catch (e) {
+      throw e;  // bubbled to caller's .catch
+    }
+    const sug = r?.suggested || {};
+    const cur = state.settings;
+    // Compare what would change. Only push an update if at least one tuned
+    // value differs AND (for ctx) it's strictly larger than current.
+    const update = {};
+    const sugCtx = Number(sug.num_ctx || 0) || 0;
+    const curCtx = Number(cur.num_ctx || 0) || 0;
+    if (sugCtx > curCtx) update.num_ctx = sugCtx;  // grow only
+    // For non-ctx flags, defer to the suggester since these are speed knobs
+    // and the user explicitly asked for autotune behavior.
+    const speedKeys = ["num_gpu", "num_batch", "n_cpu_moe", "n_ubatch", "kv_cache_type"];
+    for (const k of speedKeys) {
+      if (sug[k] != null && String(sug[k]) !== String(cur[k] ?? "")) {
+        update[k] = sug[k];
+      }
+    }
+    // Booleans: same idea but explicit
+    for (const k of ["flash_attn", "enable_speculative"]) {
+      if (sug[k] != null && !!sug[k] !== !!cur[k]) {
+        update[k] = !!sug[k];
+      }
+    }
+    if (!Object.keys(update).length) return;  // already tuned, nothing to do
+    await saveSettings(update);
+    // If llama-server is already running, restart it so the tuned flags take
+    // effect immediately — otherwise the user would still see stale ctx until
+    // they manually reload. If it's not running, the next /api/models/load
+    // will pick the new values up automatically.
+    if (state.llamaRunning && modelPath) {
+      try {
+        await api("/api/models/load", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ path: modelPath }),
+        });
+        await refreshModels();
+      } catch (e) { console.warn("boot reload failed:", e); }
+    }
+    if (sugCtx > curCtx) {
+      toast(`auto-tune grew context: ${curCtx.toLocaleString()} → ${sugCtx.toLocaleString()}`, "ok", 4000);
+    }
   }
 
   function reflectIdeToggles() {
@@ -1290,6 +1352,30 @@
       if (!state._lastGaugeUpdate || Date.now() - state._lastGaugeUpdate > 500) {
         renderCtxGauge();
         state._lastGaugeUpdate = Date.now();
+      }
+      // Live tok/s in the bubble meta — stash the start time on the agentRow
+      // DOM node (persists across deltas; ctx itself is rebuilt every event).
+      // Token count is approximate (chars/4) until the final stats arrives.
+      if (ctx.row) {
+        if (!ctx.row._streamStart) ctx.row._streamStart = Date.now();
+        const elapsed = (Date.now() - ctx.row._streamStart) / 1000;
+        if (elapsed > 0.5 && (!ctx.row._lastTpsUpdate || Date.now() - ctx.row._lastTpsUpdate > 400)) {
+          ctx.row._lastTpsUpdate = Date.now();
+          const approxTokens = Math.max(1, Math.round(newBuf.length / 4));
+          const liveTps = (approxTokens / elapsed).toFixed(1);
+          const meta = ctx.row.querySelector(".bubble-meta.streaming");
+          if (meta) {
+            const dots = meta.querySelector(".typing");
+            meta.innerHTML = `${esc(state.settings.model)} · ${liveTps} tok/s · streaming`;
+            if (dots) meta.appendChild(dots);
+            else {
+              const d = document.createElement("span");
+              d.className = "typing";
+              d.innerHTML = "<span></span><span></span><span></span>";
+              meta.appendChild(d);
+            }
+          }
+        }
       }
       const { thinking, content } = splitThinking(newBuf);
       if (thinking && ctx.row) {
@@ -2484,6 +2570,139 @@
     await loadModels();
     populateSettingsForm();
     loadSystemContext();
+    loadDetectedVram();
+  }
+
+  // ---------- VRAM auto-tune ----------
+  // Last detected GPU info, kept around so the auto-tune button can quote it
+  // in its notes ("based on detected 12.0 GB RTX 4070...").
+  const _vramState = { detected: null };
+
+  // Best-effort pre-select of the closest tier in the dropdown.
+  function _pickClosestVramTier(gb) {
+    const sel = $("#set-vram-tier");
+    if (!sel) return;
+    const opts = Array.from(sel.options).map(o => Number(o.value)).filter(v => v > 0);
+    if (!opts.length) return;
+    // Pick the largest tier that is <= detected, falling back to the smallest.
+    let pick = opts[0];
+    for (const v of opts) if (v <= gb && v >= pick) pick = v;
+    if (gb >= Math.max(...opts)) pick = Math.max(...opts);
+    sel.value = String(pick);
+  }
+
+  async function loadDetectedVram() {
+    const hint = $("#vram-detected-hint");
+    if (!hint) return;
+    hint.textContent = "detecting GPU...";
+    try {
+      const r = await api("/api/llama/detect-vram");
+      _vramState.detected = r;
+      const gb = Number(r?.gb || 0);
+      if (gb > 0) {
+        const name = r.name ? ` ${r.name}` : "";
+        hint.textContent = `detected: ${gb.toFixed(1)} GB${name} (via ${r.source || "nvidia-smi"})`;
+        // If the user hasn't picked a tier yet (it's still 0 = Manual), nudge to
+        // the closest detected tier so the Suggest button is one click away.
+        const sel = $("#set-vram-tier");
+        if (sel && Number(sel.value) === 0) _pickClosestVramTier(gb);
+      } else {
+        hint.textContent = "no NVIDIA GPU detected — pick a VRAM tier manually if you want a suggestion";
+      }
+    } catch (e) {
+      hint.textContent = `vram detect failed: ${e.message || e}`;
+    }
+  }
+
+  async function runAutoTune() {
+    const btn = $("#btn-autotune");
+    const notes = $("#autotune-notes");
+    const sel = $("#set-vram-tier");
+    const modelPath = ($("#set-model")?.value || "").trim();
+    const tier = Number(sel?.value || 0);
+    if (!modelPath) {
+      toast("pick a model first — auto-tune needs to know its size", "warn", 3000);
+      return;
+    }
+    if (!tier) {
+      toast("pick a VRAM tier (or leave on Manual to skip auto-tune)", "warn", 3000);
+      return;
+    }
+    if (btn) btn.disabled = true;
+    if (notes) notes.textContent = "thinking...";
+    try {
+      const r = await api("/api/llama/auto-tune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_path: modelPath, vram_gb: tier }),
+      });
+      const sug = r?.suggested || {};
+      // RULE: autotune may GROW num_ctx, never shrink it. If the user already
+      // has a larger context working, don't downgrade them.
+      const curCtx = Number($("#set-ctx")?.value || state.settings.num_ctx || 0) || 0;
+      const sugCtx = Number(sug.num_ctx || 0) || 0;
+      if (sugCtx > 0 && sugCtx < curCtx) {
+        sug.num_ctx = curCtx;
+      }
+      // Prefill every field the suggester returns. Only touches fields that
+      // exist in the suggested payload — leaves untouched fields alone so the
+      // user's manual tweaks survive.
+      const setVal = (id, v) => { const el = $(id); if (el != null && v != null) el.value = String(v); };
+      const setSwitch = (id, v) => {
+        const el = $(id);
+        if (!el || v == null) return;
+        el.classList.toggle("on", !!v);
+      };
+      setVal("#set-ctx", sug.num_ctx);
+      setVal("#set-gpu", sug.num_gpu);
+      setVal("#set-batch", sug.num_batch);
+      const kv = $("#set-kv");
+      if (kv && sug.kv_cache_type) kv.value = sug.kv_cache_type;
+      setVal("#set-ncmoe", sug.n_cpu_moe);
+      setVal("#set-ubatch", sug.n_ubatch);
+      setVal("#set-parallel", sug.n_parallel);
+      setSwitch("#sw-flash", sug.flash_attn);
+      setSwitch("#sw-spec", sug.enable_speculative);
+      setSwitch("#sw-nowarmup", sug.no_warmup);
+      setSwitch("#sw-metrics", sug.enable_metrics);
+
+      // Build a short, friendly notes blob from the server reply + model meta.
+      const lines = [];
+      const m = r?.model || {};
+      const head = [];
+      if (m.name) head.push(m.name);
+      if (m.quant) head.push(m.quant);
+      if (m.size_gb) head.push(`${Number(m.size_gb).toFixed(1)} GB on disk`);
+      if (m.is_moe) {
+        const tag = m.active_params_b
+          ? `MoE ${m.total_params_b || "?"}B-A${m.active_params_b}B`
+          : "MoE";
+        head.push(tag);
+      }
+      if (head.length) lines.push(head.join(" · "));
+      const v = `target VRAM: ${Number(r?.vram_gb || tier).toFixed(0)} GB${r?.vram_name ? ` (${r.vram_name})` : ""}`;
+      lines.push(v);
+
+      // Quant-downshift banner: highest-leverage user-facing recommendation.
+      // Rendered with a leading marker so it stands out in the plain-text panel.
+      if (sug.quant_downshift) {
+        lines.push("");
+        lines.push(`>> ${sug.quant_downshift}`);
+        lines.push("");
+      }
+      if (sug.notes) lines.push(sug.notes);
+      lines.push("review the values below, then Save to apply (model will reload).");
+      if (notes) notes.textContent = lines.join("\n");
+      const toastMsg = sug.quant_downshift
+        ? "values filled — but consider the quant suggestion in the notes"
+        : "suggested values filled in — review then Save";
+      toast(toastMsg, sug.quant_downshift ? "warn" : "ok", 4000);
+    } catch (e) {
+      if (notes) notes.textContent = `auto-tune failed: ${e.message || e}`;
+      toast("auto-tune failed: " + (e.message || e), "error", 5000);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   async function loadSystemContext() {
@@ -2650,6 +2869,19 @@
     fill("#set-predict", s.num_predict);
     const kvSel = $("#set-kv");
     if (kvSel) kvSel.value = s.kv_cache_type || "q8_0";
+    // VRAM tier picker (auto-tune persistence — 0 = Manual)
+    const vramSel = $("#set-vram-tier");
+    if (vramSel) vramSel.value = String(s.vram_tier_gb ?? 0);
+    // advanced llama-server flags
+    fill("#set-ncmoe", s.n_cpu_moe ?? 0);
+    fill("#set-ubatch", s.n_ubatch ?? 0);
+    fill("#set-parallel", s.n_parallel ?? 1);
+    $("#sw-flash")?.classList.toggle("on", s.flash_attn !== false);
+    $("#sw-spec")?.classList.toggle("on", s.enable_speculative !== false);
+    $("#sw-nowarmup")?.classList.toggle("on", !!s.no_warmup);
+    $("#sw-metrics")?.classList.toggle("on", !!s.enable_metrics);
+    const xa = $("#set-extra-args");
+    if (xa) xa.value = s.llama_extra_args || "";
     fill("#set-temp", s.temperature);
     fill("#set-topp", s.top_p);
     fill("#set-topk", s.top_k ?? 40);
@@ -2697,7 +2929,11 @@
     } catch {}
   }
   // settings whose changes require relaunching llama-server (load-time flags)
-  const LOAD_TIME_KEYS = ["num_ctx", "num_gpu", "num_batch", "num_thread", "kv_cache_type", "model_path"];
+  const LOAD_TIME_KEYS = [
+    "num_ctx", "num_gpu", "num_batch", "num_thread", "kv_cache_type", "model_path",
+    "n_cpu_moe", "n_ubatch", "n_parallel", "flash_attn",
+    "enable_speculative", "no_warmup", "enable_metrics", "llama_extra_args",
+  ];
 
   async function collectAndSaveSettings() {
     const n = (id) => Number($(id).value);
@@ -2713,6 +2949,15 @@
       num_thread: n("#set-thread"),
       num_predict: n("#set-predict"),
       kv_cache_type: $("#set-kv")?.value || "q8_0",
+      n_cpu_moe: Math.max(0, n("#set-ncmoe") || 0),
+      n_ubatch: Math.max(0, n("#set-ubatch") || 0),
+      n_parallel: Math.max(1, n("#set-parallel") || 1),
+      flash_attn: $("#sw-flash")?.classList.contains("on") !== false,
+      enable_speculative: $("#sw-spec")?.classList.contains("on") !== false,
+      no_warmup: !!$("#sw-nowarmup")?.classList.contains("on"),
+      enable_metrics: !!$("#sw-metrics")?.classList.contains("on"),
+      llama_extra_args: ($("#set-extra-args")?.value || "").trim(),
+      vram_tier_gb: Math.max(0, Number($("#set-vram-tier")?.value || 0)),
       temperature: n("#set-temp"),
       top_p: n("#set-topp"),
       top_k: n("#set-topk"),
@@ -2992,6 +3237,13 @@
     });
     $("#sw-web").addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     $("#sw-thinking")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    // advanced llama-server toggles
+    $("#sw-flash")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    $("#sw-spec")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    $("#sw-nowarmup")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    $("#sw-metrics")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    // Auto-tune (VRAM picker → suggested flags)
+    $("#btn-autotune")?.addEventListener("click", runAutoTune);
     const refreshModels = async () => {
       await loadModels();
       populateSettingsForm();
@@ -3059,14 +3311,93 @@
       const hint = $("#set-model-hint");
       const prev = hint?.textContent;
       sel.disabled = true;
+      // If a VRAM tier is set, auto-tune for THIS model and apply the suggested
+      // flags AT THE SAME TIME as the load — no separate Suggest click required.
+      // Picking a model = "do the right thing for this model on my GPU."
+      const tier = Number($("#set-vram-tier")?.value || 0);
+      let tuned = null;
+      if (tier > 0) {
+        if (hint) hint.textContent = "auto-tuning for this model…";
+        try {
+          const r = await api("/api/llama/auto-tune", {
+            method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ model_path: m, vram_gb: tier }),
+          });
+          tuned = r?.suggested || null;
+          if (tuned) {
+            // RULE (per user): autotune is allowed to GROW num_ctx, never shrink
+            // it. If the suggester's number is smaller than what's already set,
+            // we keep the existing larger value. Same for the persisted payload
+            // below. "longer context if possible, otherwise leave it."
+            const curCtx = Number($("#set-ctx")?.value || state.settings.num_ctx || 0) || 0;
+            const sugCtx = Number(tuned.num_ctx || 0) || 0;
+            if (sugCtx > 0 && sugCtx < curCtx) {
+              tuned.num_ctx = curCtx;  // keep the bigger one
+            }
+            // Mirror tuned values into the form so the user sees what's applied.
+            const setVal = (id, v) => { const el = $(id); if (el != null && v != null) el.value = String(v); };
+            const setSwitch = (id, v) => {
+              const el = $(id);
+              if (!el || v == null) return;
+              el.classList.toggle("on", !!v);
+            };
+            setVal("#set-ctx", tuned.num_ctx);
+            setVal("#set-gpu", tuned.num_gpu);
+            setVal("#set-batch", tuned.num_batch);
+            const kv = $("#set-kv");
+            if (kv && tuned.kv_cache_type) kv.value = tuned.kv_cache_type;
+            setVal("#set-ncmoe", tuned.n_cpu_moe);
+            setVal("#set-ubatch", tuned.n_ubatch);
+            setSwitch("#sw-flash", tuned.flash_attn);
+            setSwitch("#sw-spec", tuned.enable_speculative);
+            const tnotes = $("#autotune-notes");
+            if (tnotes && tuned.notes) {
+              const lines = [];
+              if (tuned.quant_downshift) {
+                lines.push(`>> ${tuned.quant_downshift}`);
+                lines.push("");
+              }
+              lines.push(tuned.notes);
+              tnotes.textContent = lines.join("\n");
+            }
+          }
+        } catch (e) {
+          // Auto-tune failure is non-fatal — fall back to existing settings.
+          console.warn("auto-tune on model change failed:", e);
+        }
+      }
       if (hint) hint.textContent = "loading model into llama-server...";
       try {
+        // Persist tuned flags + new model_path in ONE settings write so the
+        // backend launches llama-server with the right ctx/n_cpu_moe/etc.
+        const persistPayload = {
+          model_path: m,
+          model: m.split(/[\\/]/).pop().replace(/\.gguf$/i, ""),
+        };
+        if (tuned) {
+          if (tuned.num_ctx != null) persistPayload.num_ctx = Number(tuned.num_ctx);
+          if (tuned.num_gpu != null) persistPayload.num_gpu = Number(tuned.num_gpu);
+          if (tuned.num_batch != null) persistPayload.num_batch = Number(tuned.num_batch);
+          if (tuned.kv_cache_type) persistPayload.kv_cache_type = tuned.kv_cache_type;
+          if (tuned.n_cpu_moe != null) persistPayload.n_cpu_moe = Number(tuned.n_cpu_moe);
+          if (tuned.n_ubatch != null) persistPayload.n_ubatch = Number(tuned.n_ubatch);
+          if (tuned.flash_attn != null) persistPayload.flash_attn = !!tuned.flash_attn;
+          if (tuned.enable_speculative != null) persistPayload.enable_speculative = !!tuned.enable_speculative;
+        }
+        await saveSettings(persistPayload);
         await api("/api/models/load", {
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({ path: m }),
         });
         await refreshModels();
-        toast("model loaded", "ok", 2500);
+        if (tuned) {
+          const msg = tuned.quant_downshift
+            ? "model loaded — auto-tuned (see quant suggestion in notes)"
+            : `model loaded — auto-tuned (ctx ${Number(tuned.num_ctx).toLocaleString()}, n_cpu_moe ${tuned.n_cpu_moe ?? 0})`;
+          toast(msg, tuned.quant_downshift ? "warn" : "ok", 4000);
+        } else {
+          toast("model loaded", "ok", 2500);
+        }
       } catch (e) {
         if (hint) hint.textContent = prev || "";
         toast("load failed: " + (e.message || e), "error", 6000);

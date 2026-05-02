@@ -254,6 +254,11 @@
     <div class="faq-q">can i syntax-check a python file?</div>
     <p>yes — click the <svg class="faq-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> checkmark next to any <code>.py</code> file in the workspace tree. the bridge runs <code>compile(code, name, "exec")</code> on it, which builds the AST and validates structure without executing a single line — no imports run, no side effects, no risk. you get a green banner if it parses, or a red one with line + column + message and the offending line highlighted. <i>doesn't catch import errors, type errors, or runtime errors</i> — that would need to actually run the code, which is intentionally out of scope.</p>
 
+    <div class="faq-q">how do i fit a 35B MoE model on a 12 GB GPU?</div>
+    <p>the one-click path: open Settings, pick the model, pick your <b>VRAM budget</b> under <b>Auto-tune</b> (it tries to detect your GPU automatically), click <b>Suggest values for current model</b>. the suggester reads the GGUF header directly — actual layer count, expert count, GQA config — so the math is exact, not eyeballed. it fills in context, GPU layers, KV cache quantization, batch size, and <code>--n-cpu-moe</code> (the killer flag that keeps N expert tensors on system RAM so the rest fits in VRAM). it also disables speculative decoding for MoE models because public benchmarks show it's net-negative there. save and the model reloads.</p>
+    <p>if the suggester sees that the model needs more than half its layers offloaded, it shows a <b>quant downshift</b> banner pointing at a smaller quant from the same repo — usually a 3-5x throughput win. the willbnu/Qwen3-16G repo is a good reference: their 27-30B-A3B at Q3_K_S runs all-GPU on a 16 GB card at 80-130 tok/s, vs. Q4_K_M with offload at 30-50 tok/s. same model, same card.</p>
+    <p>everything is overrideable in the <b>Advanced llama-server</b> section right below the suggester. anything the UI doesn't surface goes in the <b>Extra flags</b> field, e.g. <code>--alias my-model --rope-scaling linear</code>.</p>
+
     <div class="faq-q">what is ACCURETTA.md?</div>
     <p>a scan of your machine (OS, known folders, drives) written to <code>data/ACCURETTA.md</code> on first boot. it's injected into every chat so the model knows where your Desktop, Documents, Screenshots live. edit it freely — it's re-read each turn. rescan from Settings.</p>
 
@@ -363,11 +368,74 @@
     <div class="form-row">
       <label>KV cache quant · kv_cache_type <i class="ph ph-info" title="q4_0 saves ~50% VRAM vs q8_0 with tiny quality loss. f16 is best quality but uses full VRAM. Changing this restarts llama-server."></i></label>
       <select id="set-kv">
-        <option value="q4_0">q4_0 — smallest VRAM</option>
-        <option value="q8_0">q8_0 — balanced</option>
-        <option value="f16">f16 — best quality</option>
+        <option value="q4_0">q4_0 · smallest VRAM</option>
+        <option value="q8_0">q8_0 · balanced</option>
+        <option value="f16">f16 · best quality</option>
       </select>
       <span class="hint">lower = more context window fits in VRAM. saving reloads the model.</span>
+    </div>
+
+    <div class="form-group">Auto-tune <span class="hint" style="font-size:10px;font-weight:normal;text-transform:none;letter-spacing:0;">· pick your VRAM, get sane defaults</span></div>
+    <div class="form-row">
+      <label>VRAM budget <i class="ph ph-info" title="How much GPU memory to plan around. Auto-detected via nvidia-smi when possible. The auto-tuner uses ~85% of this for weights and KV cache and leaves the rest as headroom."></i></label>
+      <select id="set-vram-tier">
+        <option value="0">Manual · don't touch the advanced fields below</option>
+        <option value="6">6 GB · low end laptops, GTX 1660</option>
+        <option value="8">8 GB · RTX 3050 / 3060 8GB / 4060</option>
+        <option value="12">12 GB · RTX 3060 12GB / 4070 / 4070 Ti</option>
+        <option value="16">16 GB · RTX 4060 Ti 16GB / 4070 Ti Super / 5060 Ti</option>
+        <option value="20">20 GB · RTX 4000 Ada / 7900 XT</option>
+        <option value="24">24 GB · RTX 3090 / 4090 / 7900 XTX</option>
+        <option value="32">32 GB · RTX 5090 / W7900</option>
+        <option value="48">48 GB · A6000 / 6000 Ada</option>
+        <option value="64">64 GB · dual GPU rig</option>
+        <option value="80">80+ GB · A100 / H100</option>
+      </select>
+      <span class="hint" id="vram-detected-hint">detecting GPU...</span>
+    </div>
+    <div class="form-row">
+      <button type="button" class="btn sm" id="btn-autotune"><i class="ph ph-magic-wand"></i>Suggest values for current model</button>
+    </div>
+    <div class="form-row">
+      <span class="hint" id="autotune-notes" style="display:block;line-height:1.5;"></span>
+    </div>
+
+    <div class="form-group">Advanced llama-server <span class="hint" style="font-size:10px;font-weight:normal;text-transform:none;letter-spacing:0;">· override the auto-tune · restart required</span></div>
+    <div class="form-row">
+      <label>CPU MoE experts · <code>--n-cpu-moe</code> <i class="ph ph-info" title="Keep N MoE expert tensors on CPU instead of GPU. The killer flag for fitting big MoE models (Qwen3 35B-A3B, GLM 4.7) on small VRAM. 0 = all on GPU. Try 20 to 30 for 35B class on a 12GB card."></i></label>
+      <input type="number" id="set-ncmoe" min="0" step="1">
+      <span class="hint">0 = all experts on GPU. raise it until the model fits VRAM. example: 25 for a 35B-A3B on 12 GB.</span>
+    </div>
+    <div class="form-row">
+      <label>Micro-batch · <code>--ubatch-size</code> <i class="ph ph-info" title="Size of GPU compute chunks during prefill. 0 = auto (half the batch, clamped 512..1024)."></i></label>
+      <input type="number" id="set-ubatch" min="0" step="32">
+      <span class="hint">0 = auto.</span>
+    </div>
+    <div class="form-row">
+      <label>Parallel sequences · <code>--parallel</code> <i class="ph ph-info" title="Number of independent sequences the server can stream. 1 is right for chat. 2+ wastes context."></i></label>
+      <input type="number" id="set-parallel" min="1" step="1">
+      <span class="hint">1 for normal chat use.</span>
+    </div>
+    <div class="form-row inline">
+      <label>Flash attention <i class="ph ph-info" title="--flash-attn on/off. Off only if your GPU or llama.cpp build does not support it."></i></label>
+      <div class="sw" id="sw-flash"></div>
+    </div>
+    <div class="form-row inline">
+      <label>Speculative decoding <i class="ph ph-info" title="ngram-mod speculation. Free speedup on most models. Turn off if it confuses your specific model."></i></label>
+      <div class="sw" id="sw-spec"></div>
+    </div>
+    <div class="form-row inline">
+      <label>Skip warmup <i class="ph ph-info" title="--no-warmup. Saves a few seconds at startup. First reply may be slightly slower."></i></label>
+      <div class="sw" id="sw-nowarmup"></div>
+    </div>
+    <div class="form-row inline">
+      <label>Expose Prometheus metrics <i class="ph ph-info" title="--metrics. Adds a /metrics endpoint on the llama-server port. Off by default."></i></label>
+      <div class="sw" id="sw-metrics"></div>
+    </div>
+    <div class="form-row">
+      <label>Extra flags <i class="ph ph-info" title="Free-form extra arguments appended verbatim to the llama-server command. Whitespace separated. Use for things like --alias my-model, --rope-scaling linear, --rope-freq-scale 0.5."></i></label>
+      <input type="text" id="set-extra-args" placeholder="--alias my-model --rope-scaling linear" style="font-family:ui-monospace,Consolas,monospace;font-size:12px;">
+      <span class="hint">power-user escape hatch. anything llama-server accepts.</span>
     </div>
 
     <div class="form-group">Sampling <span class="hint" style="font-size:10px;font-weight:normal;text-transform:none;letter-spacing:0;">— applied next message</span></div>
