@@ -201,26 +201,38 @@
     "desktop_launch_app", "desktop_focus_window", "desktop_click",
     "desktop_type_text", "desktop_press_keys", "desktop_close_window",
   ]);
-  // Tools whose result is the point — collapsing them defeats the purpose.
-  // web_search renders a chip row of sources that the user clicks through; it
-  // must stay visible after the run finishes, not get folded into the wrench.
-  const ALWAYS_INLINE_TOOLS = new Set(["web_search", "network_snapshot"]);
+  // Tools whose result needs rich rendering in the body (chart, etc).
+  // Everything else just shows as a tool-line. ALL tools — including web_search
+  // and command tools — live in the single per-turn wrench group; nothing
+  // bypasses it anymore. That's what stops the vertical stacking.
+  const RICH_RESULT_TOOLS = new Set(["network_snapshot"]);
   function isCommandTool(name) { return COMMAND_TOOLS.has(name); }
-  function isInlineTool(name) { return COMMAND_TOOLS.has(name) || ALWAYS_INLINE_TOOLS.has(name); }
+
+  // Real SVG wrench (not a phosphor font glyph) — crisper at small sizes and
+  // cleaner with our breathing/spin animation. Used as fallback in the tool
+  // strip when no specific tool is currently running.
+  const WRENCH_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
+
+  // Agent avatar: the user-supplied black-hole glyph (black.png on the repo
+  // root, served via STATIC_WHITELIST). PNG is drawn black-on-transparent;
+  // CSS handles dark-mode inversion so the linework stays visible on any bg.
+  const AGENT_AVATAR_HTML = `<div class="avatar"><img class="avatar-blackhole" src="black.png" alt="" aria-hidden="true" draggable="false"></div>`;
 
   function getOrCreateToolGroup(stack) {
-    let group = stack.querySelector(".tool-group:last-of-type");
-    // start a new group if the previous one already finished (no .running cards)
-    if (group && !group.querySelector(".tool-line.running") && group.dataset.sealed === "1") {
-      group = null;
-    }
+    // ONE group per agent turn, period. The toolStack itself is created fresh
+    // for each new agent row, so this naturally scopes to the turn. No more
+    // sealing-and-recreating between tool calls (the source of the vertical
+    // pill stack the user complained about).
+    let group = stack.querySelector(".tool-group");
     if (group) return { group, body: group.querySelector(".tool-group-body") };
     group = document.createElement("div");
     group.className = "tool-group collapsed";
     group.innerHTML = `
       <div class="tool-group-head">
-        <i class="ph ph-wrench tool-icon spinning"></i>
-        <span class="tool-group-label">working…</span>
+        <span class="tool-group-icon spinning">${WRENCH_SVG}</span>
+        <span class="tool-group-activity">working…</span>
+        <span class="tool-group-chips" hidden></span>
+        <span class="tool-group-summary" hidden></span>
         <i class="ph ph-caret-down chevron"></i>
       </div>
       <div class="tool-group-body"></div>`;
@@ -230,27 +242,130 @@
     return { group, body: group.querySelector(".tool-group-body") };
   }
 
+  // Update the head to reflect the most-recently-started running tool: swap
+  // the icon to that tool's actual SVG and update the activity label. This is
+  // what gives the "tool icon refreshes as the model chains tools" behavior
+  // — no permanent wrench placeholder, the head IS the live tool.
+  function updateToolGroupActivity(group, evt) {
+    if (!group || !evt) return;
+    const activity = group.querySelector(".tool-group-activity");
+    const iconSlot = group.querySelector(".tool-group-icon");
+    if (activity) {
+      activity.classList.add("shimmer");
+      activity.textContent = toolLabel(evt.name, evt.arguments).replace(/…$/, "");
+    }
+    if (iconSlot) {
+      // Swap with a brief fade so chained tools visibly "refresh" rather
+      // than snap-replace.
+      iconSlot.classList.remove("icon-in");
+      iconSlot.classList.add("icon-out");
+      const map = TOOL_ICON_MAP[evt.name];
+      const svg = (map && TOOL_SVG[map.run]) || WRENCH_SVG;
+      setTimeout(() => {
+        iconSlot.innerHTML = svg;
+        iconSlot.classList.remove("icon-out");
+        iconSlot.classList.add("icon-in", "spinning");
+      }, 120);
+    }
+  }
+
+  // Render web-search chips into the head's chip strip. New searches REPLACE
+  // the chip set with a fade-in animation — gives the "rotating sources" feel
+  // the user asked for without stacking.
+  function refreshHeadChips(group, results) {
+    if (!group) return;
+    const slot = group.querySelector(".tool-group-chips");
+    if (!slot) return;
+    if (!results || !results.length) return;
+    const max = 4;
+    const chips = results.slice(0, max).map(r => {
+      let host = "";
+      try { host = new URL(r.url).hostname.replace(/^www\./, ""); } catch {}
+      const label = host || r.url;
+      const fav = host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : "";
+      const favHtml = `<span class="tool-chip-fav">${TOOL_SVG.globe}${fav ? `<img src="${esc(fav)}" alt="" loading="lazy" onerror="this.style.display='none'">` : ""}</span>`;
+      return `<a class="tool-chip" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.title || r.url)}">${favHtml}<span>${esc(label)}</span></a>`;
+    }).join("");
+    const overflow = results.length - Math.min(max, results.length);
+    const more = overflow > 0 ? `<span class="tool-chip tool-chip-more">+${overflow}</span>` : "";
+    slot.hidden = false;
+    // Brief swap animation: fade out → swap → fade in.
+    slot.classList.remove("chips-in");
+    slot.classList.add("chips-out");
+    setTimeout(() => {
+      slot.innerHTML = chips + more;
+      slot.classList.remove("chips-out");
+      slot.classList.add("chips-in");
+    }, 140);
+  }
+
+  // Called when the agent turn fully ends (chat_end, stream done, or stop).
+  // Moves the tool group from its top-of-column position to AFTER the answer
+  // bubble and adds the .done-pill class so the strip looks faded/detached
+  // rather than like part of the answer. Per user request: "should be under
+  // the models final response, faded, not look like part of the answer bubble."
+  function finalizeToolGroup(row) {
+    if (!row) return;
+    const stack = row.querySelector(".tool-stack");
+    const bubble = row.querySelector(".bubble");
+    if (!stack || !bubble) return;
+    const group = stack.querySelector(".tool-group");
+    if (!group) {
+      // No tools ran — clean the empty stack out so it doesn't leave a gap.
+      stack.remove();
+      return;
+    }
+    // Make sure summary is computed (running flag is now false).
+    updateToolGroupHead(stack);
+    group.classList.add("done-pill");
+    // Reset the head icon back to the wrench — in finalized state the strip
+    // represents "tools the model used" generically, not a specific live tool.
+    const iconSlot = group.querySelector(".tool-group-icon");
+    if (iconSlot) {
+      iconSlot.classList.remove("spinning", "icon-out", "icon-in");
+      iconSlot.innerHTML = WRENCH_SVG;
+    }
+    // Move strip after the bubble in the bubble-col.
+    const col = bubble.parentNode;
+    if (col && bubble.nextSibling !== group) {
+      col.insertBefore(group, bubble.nextSibling);
+    }
+    // Empty stack node can go now.
+    if (!stack.children.length) stack.remove();
+  }
+
   function updateToolGroupHead(stack) {
-    const groups = stack.querySelectorAll(".tool-group");
-    for (const g of groups) {
-      const cards = g.querySelectorAll(".tool-line");
-      const running = g.querySelectorAll(".tool-line.running").length;
-      const done = g.querySelectorAll(".tool-line.done").length;
-      const err = g.querySelectorAll(".tool-line.err").length;
-      const total = cards.length;
-      const icon = g.querySelector(".tool-icon");
-      const label = g.querySelector(".tool-group-label");
-      if (running > 0) {
-        icon?.classList.add("spinning");
-        if (label) label.textContent = `working…`;
-      } else {
-        icon?.classList.remove("spinning");
-        g.dataset.sealed = "1";
-        const summary = err > 0
-          ? `${done} step${done === 1 ? "" : "s"} · ${err} failed`
-          : `${done} step${done === 1 ? "" : "s"}`;
-        if (label) label.textContent = summary;
-      }
+    const group = stack.querySelector(".tool-group");
+    if (!group) return;
+    const cards = group.querySelectorAll(".tool-line");
+    const running = group.querySelectorAll(".tool-line.running");
+    const done = group.querySelectorAll(".tool-line.done").length;
+    const err = group.querySelectorAll(".tool-line.err").length;
+    const icon = group.querySelector(".tool-group-icon");
+    const activity = group.querySelector(".tool-group-activity");
+    const summary = group.querySelector(".tool-group-summary");
+    if (running.length > 0) {
+      icon?.classList.add("spinning");
+      // Activity stays as set by updateToolGroupActivity (the most recent
+      // tool_start label). Don't overwrite mid-run.
+      activity.hidden = false;
+      summary.hidden = true;
+    } else {
+      icon?.classList.remove("spinning");
+      activity.hidden = true;
+      summary.hidden = false;
+      // Count commands separately from other tools so the summary reads as
+      // "X tools · Y commands" — the user's exact ask.
+      let cmd = 0, tools = 0;
+      cards.forEach(c => {
+        if (isCommandTool(c.dataset.name)) cmd++;
+        else tools++;
+      });
+      const parts = [];
+      if (tools > 0) parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
+      if (cmd > 0) parts.push(`${cmd} command${cmd === 1 ? "" : "s"}`);
+      if (err > 0) parts.push(`${err} failed`);
+      summary.textContent = parts.length ? parts.join(" · ") : `${done} step${done === 1 ? "" : "s"}`;
     }
   }
 
@@ -857,7 +972,7 @@
     if (!state.messages.length) {
       inner.innerHTML = `
         <div class="bubble-row">
-          <div class="avatar"><i class="ph-bold ph-sparkle" style="font-size:12px"></i></div>
+          ${AGENT_AVATAR_HTML}
           <div class="bubble-col">
             <div class="bubble agent">Welcome to Accuretta. What would you like to do today?</div>
           </div>
@@ -877,7 +992,7 @@
     row.className = "bubble-row " + (m.role === "user" ? "user" : "");
     const avatar = m.role === "user"
       ? `<div class="avatar user">me</div>`
-      : `<div class="avatar"><i class="ph-bold ph-sparkle" style="font-size:12px"></i></div>`;
+      : AGENT_AVATAR_HTML;
 
     let visible = m.content || "";
     let thoughtChip = "";
@@ -897,22 +1012,38 @@
         <div class="bubble ${m.role === "user" ? "user" : "agent"}">${renderMarkdown(visible)}</div>
         <div class="bubble-meta"${tokTip}>${m.role === "user" ? "you" : (state.settings.model || "agent")} · ${relTime(m.t)}</div>
       </div>`;
-    // copy button for every bubble
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-msg";
-    copyBtn.type = "button";
-    copyBtn.innerHTML = '<i class="ph ph-copy"></i>';
-    copyBtn.title = "Copy message";
-    copyBtn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(m.content || "");
-        copyBtn.innerHTML = '<i class="ph ph-check"></i>';
-        setTimeout(() => (copyBtn.innerHTML = '<i class="ph ph-copy"></i>'), 1200);
-      } catch {
-        toast("Clipboard blocked", "warn", 2000);
-      }
-    });
-    row.querySelector(".bubble-col").appendChild(copyBtn);
+    // Single copy action under every bubble. Same .bubble-actions row used
+    // for the assistant's regenerate strip — keeps placement consistent
+    // (under the bubble, on whichever edge the bubble-col flexes to). The
+    // last assistant bubble's actions get rebuilt by renderRegenerateChip
+    // with both regen + copy, so we skip adding here for that one to avoid
+    // the duplicate; non-last assistants and all user bubbles keep this row.
+    const isLastAssistant = m.role === "assistant" &&
+      state.messages.length > 0 &&
+      state.messages[state.messages.length - 1] === m;
+    if (!isLastAssistant) {
+      const actions = document.createElement("div");
+      actions.className = "bubble-actions";
+      actions.innerHTML = `<button type="button" class="bubble-action" data-act="copy" title="Copy"><i class="ph ph-copy"></i></button>`;
+      const copyBtn = actions.querySelector('[data-act="copy"]');
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(m.content || "");
+          const icon = copyBtn.querySelector("i");
+          copyBtn.classList.add("copied");
+          icon.classList.remove("ph-copy");
+          icon.classList.add("ph-check");
+          setTimeout(() => {
+            copyBtn.classList.remove("copied");
+            icon.classList.remove("ph-check");
+            icon.classList.add("ph-copy");
+          }, 1200);
+        } catch {
+          toast("Clipboard blocked", "warn", 2000);
+        }
+      });
+      row.querySelector(".bubble-col").appendChild(actions);
+    }
     enhanceCodeBlocks(row);
     return row;
   }
@@ -963,7 +1094,7 @@
     const agentRow = document.createElement("div");
     agentRow.className = "bubble-row";
     agentRow.innerHTML = `
-      <div class="avatar"><i class="ph-bold ph-sparkle" style="font-size:12px"></i></div>
+      ${AGENT_AVATAR_HTML}
       <div class="bubble-col">
         <div class="think-line" data-label="Thinking"><i class="ph ph-brain"></i><span class="shimmer">Regenerating…</span></div>
         <div class="tool-stack" id="tool-stack"></div>
@@ -989,9 +1120,13 @@
   }
 
   // show an action row (regenerate + copy) under the last assistant bubble.
+  // Each non-last bubble already carries its own copy-only .bubble-actions
+  // row from renderBubble, so we only need to (a) remove any prior REGEN
+  // chip (identified by the regen button — not just any .bubble-actions, or
+  // we'd nuke the per-bubble copy rows), (b) drop the last assistant's own
+  // copy-only row if present, and (c) install the regen+copy chip there.
   function renderRegenerateChip() {
-    const existing = document.querySelector(".bubble-actions");
-    if (existing) existing.remove();
+    document.querySelectorAll('.bubble-actions:has([data-act="regen"])').forEach(el => el.remove());
     const rows = [...document.querySelectorAll("#chat-inner .bubble-row")];
     const lastAssistant = rows.reverse().find(r => r.querySelector(".bubble.agent"));
     if (!lastAssistant) return;
@@ -999,6 +1134,9 @@
     if (!col) return;
     const meta = col.querySelector(".bubble-meta");
     if (!meta) return;
+    // strip any existing copy-only row on this bubble so we don't end up
+    // with two action rows stacked under the last assistant message.
+    col.querySelectorAll(".bubble-actions").forEach(el => el.remove());
     const bubble = col.querySelector(".bubble.agent");
     const actions = document.createElement("div");
     actions.className = "bubble-actions";
@@ -1112,7 +1250,7 @@
     const agentRow = document.createElement("div");
     agentRow.className = "bubble-row";
     agentRow.innerHTML = `
-      <div class="avatar"><i class="ph-bold ph-sparkle" style="font-size:12px"></i></div>
+      ${AGENT_AVATAR_HTML}
       <div class="bubble-col">
         <div class="think-line" data-label="Thinking"><i class="ph ph-brain"></i><span class="shimmer">Thinking…</span></div>
         <div class="tool-stack" id="tool-stack"></div>
@@ -1256,6 +1394,9 @@
           meta.classList.remove("streaming");
           meta.querySelectorAll(".typing").forEach(d => d.remove());
         }
+        // Move tool strip below the bubble + apply faded "done-pill" styling
+        // so it looks like a footnote, not part of the answer.
+        finalizeToolGroup(agentRow);
       }
       // safety net: if the model ran tools or thought for a while but ended
       // without a visible answer, surface what we have so the user isn't
@@ -1334,10 +1475,23 @@
     if (!line) return;
     const span = line.querySelector("span");
     const icon = line.querySelector("i");
+    // Stamp the start time on first running call so we can report "Thought
+    // for Xs" when it finishes. Stash on the DOM element — survives across
+    // the per-event ctx rebuild.
+    if (running && !line._thinkStart) {
+      line._thinkStart = Date.now();
+    }
     if (!running) {
       line.classList.add("done");
       span.classList.remove("shimmer");
-      span.textContent = label || "Thought for a moment";
+      const elapsed = line._thinkStart ? Math.max(1, Math.round((Date.now() - line._thinkStart) / 1000)) : 0;
+      const fmt = elapsed >= 60
+        ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+        : `${elapsed}s`;
+      const finalLabel = elapsed > 0
+        ? `Thought for ${fmt}`
+        : (label || "Thought for a moment");
+      span.textContent = finalLabel;
       icon.className = "ph ph-check";
       return;
     }
@@ -1391,21 +1545,19 @@
       }
       scrollToBottom();
     } else if (evt.type === "tool_start") {
+      const { group, body } = getOrCreateToolGroup(toolStack);
       const card = document.createElement("div");
       card.className = "tool-line running";
       const customIcon = toolIconHtml(evt.name, "run");
       const iconHtml = customIcon || `<i class="ph ph-circle-notch"></i>`;
       card.innerHTML = `${iconHtml}<span class="shimmer">${esc(toolLabel(evt.name, evt.arguments))}</span>`;
       card.dataset.name = evt.name || "";
-      // Inline tools (commands + web_search) render directly in the chat so
-      // their paths/commands/result-chips stay visible. Everything else folds
-      // into a collapsible wrench group so reads/listings don't wall-of-text.
-      if (isInlineTool(evt.name)) {
-        toolStack.appendChild(card);
-      } else {
-        getOrCreateToolGroup(toolStack).body.appendChild(card);
-        updateToolGroupHead(toolStack);
-      }
+      body.appendChild(card);
+      // Reflect the new tool in the head's activity slot, then refresh head
+      // counts. The head stays expanded-on-click only; collapsed visually but
+      // the live activity line is always visible at the top.
+      updateToolGroupActivity(group, evt);
+      updateToolGroupHead(toolStack);
       scrollToBottom();
     } else if (evt.type === "tool_stream") {
       const cards = Array.from(toolStack.querySelectorAll(".tool-line.running"));
@@ -1434,27 +1586,22 @@
         const iconHtml = customIcon || `<i class="ph ${isErr ? "ph-x-circle" : "ph-check"}"></i>`;
         const label = toolResultLabel(evt.name, evt.result);
         card.innerHTML = `${iconHtml}<span>${esc(label)}</span>`;
-        // web_search: append link-chip row beneath the line so the user can click straight through.
+        // web_search: refresh the head's chip strip so sources show inline
+        // without stacking. Each new search REPLACES the chip set with a quick
+        // fade — that's the "rotating sources" behavior the user asked for.
         if (!isErr && evt.name === "web_search") {
+          const group = toolStack.querySelector(".tool-group");
+          refreshHeadChips(group, evt.result && evt.result.results);
+          // Also append the full chip list inside the body for when the user
+          // expands the group — useful when many sources came back.
           const chips = renderWebSearchChips(evt.result && evt.result.results);
-          if (chips) {
-            const wrap = document.createElement("div");
-            wrap.className = "web-results-wrap";
-            wrap.appendChild(card.cloneNode(true));
-            wrap.insertAdjacentHTML("beforeend", chips);
-            card.replaceWith(wrap);
-          }
+          if (chips) card.insertAdjacentHTML("afterend", chips);
         }
-        // network_snapshot: render bar-chart card so the user sees what was captured.
+        // network_snapshot: rich bar-chart card goes in the body (no head
+        // treatment — it's too detailed for an inline strip).
         if (!isErr && evt.name === "network_snapshot") {
           const chart = renderNetworkChart(evt.result);
-          if (chart) {
-            const wrap = document.createElement("div");
-            wrap.className = "web-results-wrap";
-            wrap.appendChild(card.cloneNode(true));
-            wrap.insertAdjacentHTML("beforeend", chart);
-            card.replaceWith(wrap);
-          }
+          if (chart) card.insertAdjacentHTML("afterend", chart);
         }
         updateToolGroupHead(toolStack);
       }

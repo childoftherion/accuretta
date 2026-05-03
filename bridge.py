@@ -4574,7 +4574,7 @@ MIME = {
     ".ico": "image/x-icon",
 }
 
-STATIC_WHITELIST = {"index.html", "app.js", "app.css", "colors_and_type.css", "logo-mark.png"}
+STATIC_WHITELIST = {"index.html", "app.js", "app.css", "colors_and_type.css", "logo-mark.png", "black.png"}
 
 
 class Handler(BaseHTTPRequestHandler):
