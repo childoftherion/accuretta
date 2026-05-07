@@ -109,6 +109,14 @@
     downloading_file: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11C3 11.9319 3 12.3978 3.15224 12.7654C3.35523 13.2554 3.74458 13.6448 4.23463 13.8478C4.60218 14 5.06812 14 6 14H6.67544C7.25646 14 7.54696 14 7.77888 14.1338C7.83745 14.1675 7.89245 14.2072 7.94303 14.2521C8.14326 14.4298 8.23513 14.7054 8.41886 15.2566L8.54415 15.6325C8.76416 16.2925 8.87416 16.6225 9.13605 16.8112C9.39794 17 9.7458 17 10.4415 17H13.5585C14.2542 17 14.6021 17 14.864 16.8112C15.1258 16.6225 15.2358 16.2925 15.4558 15.6325L15.5811 15.2566C15.7649 14.7054 15.8567 14.4298 16.057 14.2521C16.1075 14.2072 16.1625 14.1675 16.2211 14.1338C16.453 14 16.7435 14 17.3246 14H18C18.9319 14 19.3978 14 19.7654 13.8478C20.2554 13.6448 20.6448 13.2554 20.8478 12.7654C21 12.3978 21 11.9319 21 11"/><path d="M8 9L12 12M12 12L16 9M12 12L12 2"/><path d="M16 5H17C18.8856 5 19.8284 5 20.4142 5.58579C21 6.17157 21 7.11438 21 9V17C21 18.8856 21 19.8284 20.4142 20.4142C19.8284 21 18.8856 21 17 21H7C5.11438 21 4.17157 21 3.58579 20.4142C3 19.8284 3 18.8856 3 17V9C3 7.11438 3 6.17157 3.58579 5.58579C4.17157 5 5.11438 5 7 5H8"/></svg>',
     multiple_tasks_complete: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.00009 13L12.2278 16.3821C12.6557 16.7245 13.2794 16.6586 13.6264 16.2345L22.0001 6"/><path d="M9.6434 11.5995L14.5356 5.6201"/><path d="M2.36 13.52L4.87309 16.9049C5.559 17.4193 6.52849 17.3016 7.07142 16.638L8.03225 15.4637"/></svg>',
     globe: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+    // YARA: shield-with-magnifier. The shield is the rule set, the lens is
+    // matching — together it reads "scanning for known-bad patterns".
+    yara_scanning: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 5v6c0 4.5 3.2 8.5 8 10 1.4-.45 2.7-1.1 3.8-1.95"/><circle cx="16.5" cy="14.5" r="3.2"/><path d="m18.9 16.9 2.6 2.6"/></svg>',
+    yara_failed: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 5v6c0 4.5 3.2 8.5 8 10 4.8-1.5 8-5.5 8-10V5z"/><path d="m9 9 6 6M15 9l-6 6"/></svg>',
+    // binary_inspect: microchip with pin legs. Reads as "looking inside a
+    // compiled artifact" without leaning on a generic file glyph.
+    chip_inspecting: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/><rect x="9.5" y="9.5" width="5" height="5" rx="0.6"/><path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/></svg>',
+    chip_failed: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="m9.5 9.5 5 5M14.5 9.5l-5 5"/><path d="M9 3v3M12 3v3M15 3v3M9 18v3M12 18v3M15 18v3M3 9h3M3 12h3M3 15h3M18 9h3M18 12h3M18 15h3"/></svg>',
   };
   const TOOL_ICON_MAP = {
     list_directory:  { run: "searching_computer", err: "computer_search_failed" },
@@ -123,6 +131,8 @@
     web_fetch:       { run: "downloading_file",   err: "command_failed" },
     web_search:      { run: "globe",              err: "computer_search_failed" },
     network_snapshot:{ run: "globe",              err: "computer_search_failed" },
+    yara_scan:       { run: "yara_scanning",      err: "yara_failed" },
+    binary_inspect:  { run: "chip_inspecting",    err: "chip_failed" },
   };
   function renderWebSearchChips(results) {
     if (!results || !results.length) return "";
@@ -151,17 +161,26 @@
     const dns = (res.recent_dns || []).length;
     const procs = (res.top_processes || []).slice(0, 6);
     const remotes = (res.top_remotes || []).slice(0, 6);
-    const procMax = procs.reduce((m, p) => Math.max(m, p.connections || 0), 1);
-    const remMax = remotes.reduce((m, r) => Math.max(m, r.count || 0), 1);
+    // Force max to be at least 1 so we never divide by zero, and clamp the
+    // resulting width to [4, 100]. The chart is purely data-driven — same
+    // input always produces the same bars, regardless of which model called
+    // the tool. (Previously the absolute-positioned fill resolved its
+    // percentage width against the wrong containing block in some layouts,
+    // making bars look like they shrank progressively per row.)
+    const procMax = Math.max(1, ...procs.map(p => p.connections || 0));
+    const remMax  = Math.max(1, ...remotes.map(r => r.count || 0));
+    const pct = (val, max) => Math.max(4, Math.min(100, Math.round((val / max) * 100)));
     const stat = (label, n, cls) => `<div class="net-stat ${cls}"><div class="net-stat-num">${n}</div><div class="net-stat-lbl">${label}</div></div>`;
     const procRow = (p) => {
-      const w = Math.max(4, Math.round(((p.connections || 0) / procMax) * 100));
-      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(p.process || "?")}">${esc(p.process || "?")}</span><span class="net-bar-track"><span class="net-bar-fill net-bar-proc" style="width:${w}%"></span></span><span class="net-bar-num">${p.connections || 0}</span></div>`;
+      const v = p.connections || 0;
+      const w = pct(v, procMax);
+      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(p.process || "?")}">${esc(p.process || "?")}</span><span class="net-bar-track" data-v="${v}" data-max="${procMax}"><span class="net-bar-fill net-bar-proc" style="width:${w}%"></span></span><span class="net-bar-num">${v}</span></div>`;
     };
     const remRow = (r) => {
-      const w = Math.max(4, Math.round(((r.count || 0) / remMax) * 100));
+      const v = r.count || 0;
+      const w = pct(v, remMax);
       const lbl = `${r.address || "?"}${r.port ? ":" + r.port : ""}`;
-      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(lbl)}">${esc(lbl)}</span><span class="net-bar-track"><span class="net-bar-fill net-bar-rem" style="width:${w}%"></span></span><span class="net-bar-num">${r.count || 0}</span></div>`;
+      return `<div class="net-bar-row"><span class="net-bar-lbl" title="${esc(lbl)}">${esc(lbl)}</span><span class="net-bar-track" data-v="${v}" data-max="${remMax}"><span class="net-bar-fill net-bar-rem" style="width:${w}%"></span></span><span class="net-bar-num">${v}</span></div>`;
     };
     const procBlock = procs.length
       ? `<div class="net-block"><div class="net-block-title">Top processes</div>${procs.map(procRow).join("")}</div>`
@@ -381,6 +400,11 @@
       case "open_program":   return `Opening ${args.name || args.path || "program"}…`;
       case "web_fetch":      return `Fetching ${args.url || "the web"}…`;
       case "network_snapshot": return `Scanning network…`;
+      case "scan_apk":         return `Scanning APK${args.path ? " " + shortPath(args.path) : ""}…`;
+      case "decompile_apk":    return `Decompiling APK${args.path ? " " + shortPath(args.path) : ""}…`;
+      case "ghidra_analyze":   return `Analyzing with Ghidra${args.path ? " · " + shortPath(args.path) : ""}…`;
+      case "binary_inspect":   return `Inspecting binary${args.path ? " · " + shortPath(args.path) : ""}…`;
+      case "yara_scan":        return `Scanning with YARA${args.path ? " · " + shortPath(args.path) : ""}…`;
       default:               return `Running ${name || "tool"}…`;
     }
   }
@@ -408,6 +432,36 @@
         const u = res.udp_count || 0;
         const d = (res.recent_dns || []).length;
         return `Scan: ${t} TCP · ${u} UDP · ${d} DNS entries`;
+      }
+      case "scan_apk": {
+        const findings = (res.secret_findings || []).length;
+        const perms = (res.dangerous_permissions || []).length;
+        return `APK scanned · ${findings} secret hit${findings === 1 ? "" : "s"} · ${perms} dangerous perm${perms === 1 ? "" : "s"}`;
+      }
+      case "decompile_apk": {
+        const j = res.output_summary && res.output_summary.java_count;
+        return `Decompiled${j != null ? ` · ${j} class${j === 1 ? "" : "es"}` : ""}`;
+      }
+      case "ghidra_analyze": {
+        const fc = res.function_count || 0;
+        const ic = res.import_count || 0;
+        const rs = (res.risk_summary || []).length;
+        return `Ghidra · ${fc} func · ${ic} import${ic === 1 ? "" : "s"}${rs ? ` · ${rs} risk hit${rs === 1 ? "" : "s"}` : ""}`;
+      }
+      case "binary_inspect": {
+        const det = res.details || {};
+        const fmt = res.format || "?";
+        const arch = det.arch ? ` ${det.arch}` : "";
+        const imp = det.import_total != null ? det.import_total : (det.import_count || 0);
+        const signed = (fmt === "PE" && det.signed === true) ? " · signed" : (fmt === "PE" && det.signed === false ? " · unsigned" : "");
+        const risks = (res.risk_summary || []).length;
+        return `${fmt}${arch} · ${imp} import${imp === 1 ? "" : "s"}${signed}${risks ? ` · ${risks} risk hit${risks === 1 ? "" : "s"}` : ""}`;
+      }
+      case "yara_scan": {
+        const hits = res.files_with_matches || 0;
+        const rules = (res.rules_fired || []).length;
+        const scanned = res.files_scanned || 0;
+        return `YARA · ${hits}/${scanned} file${scanned === 1 ? "" : "s"} hit · ${rules} rule${rules === 1 ? "" : "s"}`;
       }
       default:               return `${name} complete`;
     }
@@ -470,6 +524,21 @@
         return `\x00S${scratchpads.length - 1}\x00`;
       }
     );
+
+    // Strip bare inline HTML emitted by chatty models (Gemma in particular
+    // sprinkles <b>, <i>, <br>, <p> between sentences from web-trained habit).
+    // We render via markdown-lite + esc(), so an unescaped tag would show up
+    // as literal "<b>" text. Code fences are already extracted to placeholders
+    // above, so this can't touch any real <b> the user pasted into a code
+    // block. Keep the list narrow — only zero-arg formatting tags whose
+    // semantics map to "do nothing" in chat. Tags with attributes or any
+    // other HTML are left alone (esc() will turn them into visible literals,
+    // which is the safer default for unexpected input).
+    text = text.replace(/<\/?(?:b|i|u|em|strong|small|big|sub|sup|mark|ins|del|s|strike)\s*>/gi, "");
+    text = text.replace(/<br\s*\/?\s*>/gi, "\n");
+    text = text.replace(/<\/?p\s*>/gi, "\n\n");
+    // collapse any extra blank lines those replacements introduced
+    text = text.replace(/\n{3,}/g, "\n\n").trim();
 
     let escaped = esc(text);
 
@@ -562,6 +631,13 @@
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
       .replace(/`([^`]+)`/g, "<code>$1</code>");
 
+    // Autolink URLs into clickable chips with hover preview. Runs BEFORE
+    // fence restoration so URLs that the model embedded inside ``` blocks
+    // stay as plain text. Inline `<code>` spans are left alone too — we
+    // skip any URL that's inside an existing tag attribute or `<a>` /
+    // `<code>` element.
+    out = autolinkChatHtml(out);
+
     out = out.replace(/\x00F(\d+)\x00/g, (_, i) => {
       const { lang, code } = fences[+i];
       return `<pre data-lang="${esc(lang)}"><code>${esc(code)}</code></pre>`;
@@ -576,6 +652,233 @@
     });
     return out;
   }
+
+  // ---------- chat link autolinker + hover preview ----------
+  // Trailing punctuation we strip from auto-detected URLs so `Visit https://
+  // example.com.` doesn't lasso the period into the link. Only strip if there
+  // are no balanced wrappers — `https://en.wikipedia.org/wiki/Foo_(bar)` keeps
+  // its closing paren when the opener is also part of the URL.
+  const URL_TRAIL_PUNCT = /[)\]\}>"',.;:!?]+$/;
+  function trimTrailingPunct(url) {
+    let u = url;
+    while (URL_TRAIL_PUNCT.test(u)) {
+      const last = u.slice(-1);
+      // keep one paren if it has a matching opener inside the URL
+      if (last === ")" && (u.match(/\(/g) || []).length > (u.match(/\)/g) || []).length - 0) break;
+      if (last === "]" && (u.match(/\[/g) || []).length > (u.match(/\]/g) || []).length - 0) break;
+      u = u.slice(0, -1);
+      if (!u) break;
+    }
+    return u;
+  }
+  function buildLinkAnchor(rawUrl, label) {
+    const url = trimTrailingPunct(rawUrl);
+    let host = "";
+    try { host = new URL(url).hostname.replace(/^www\./, ""); } catch {}
+    const fav = host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : "";
+    const text = label != null ? label : (host || url);
+    const safeUrl = url.replace(/"/g, "&quot;");
+    const safeHost = (host || "").replace(/"/g, "&quot;");
+    const safeText = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const favHtml = fav
+      ? `<img class="chat-link-fav" src="${fav.replace(/"/g, "&quot;")}" alt="" loading="lazy" onerror="this.style.display='none'">`
+      : "";
+    // data-link-url drives the hover-preview lazy fetch. We DO NOT inline the
+    // OG title/description in the HTML — that would balloon the bubble; the
+    // popover fetches on first hover and caches both server-side and JS-side.
+    return `<a class="chat-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer" data-link-url="${safeUrl}" data-link-host="${safeHost}">${favHtml}<span class="chat-link-text">${safeText}</span></a>`;
+  }
+  function autolinkChatHtml(html) {
+    if (!html) return html;
+    // Step 1: markdown links [text](url) — only when the url looks http/https
+    // or a bare protocol-less www.* domain (we'll prefix https://).
+    html = html.replace(
+      /\[([^\]\n]+)\]\(((?:https?:\/\/|www\.)[^\s)]+)\)/g,
+      (_m, label, url) => {
+        if (url.startsWith("www.")) url = "https://" + url;
+        return buildLinkAnchor(url, label);
+      }
+    );
+    // Step 2: bare URLs — split on existing tags so we never touch URL chars
+    // sitting inside attribute values, <code>, <pre>, or already-built <a>.
+    // The HTML coming in here is *escaped* user text mixed with our own
+    // structural tags, so we can use a tag-tokenizer split safely.
+    const parts = html.split(/(<[^>]+>)/g);
+    const inSkip = []; // stack of tag names we shouldn't autolink inside
+    const SKIP_TAGS = new Set(["a", "code", "pre", "kbd", "samp", "script", "style"]);
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      if (!seg) continue;
+      if (seg.startsWith("<")) {
+        const m = /^<\s*(\/?)\s*([a-zA-Z][\w-]*)/.exec(seg);
+        if (m) {
+          const closing = m[1] === "/";
+          const tag = m[2].toLowerCase();
+          if (SKIP_TAGS.has(tag)) {
+            if (closing) {
+              const idx = inSkip.lastIndexOf(tag);
+              if (idx >= 0) inSkip.splice(idx, 1);
+            } else if (!/\/\s*>$/.test(seg)) {
+              // not self-closing — push onto skip stack
+              inSkip.push(tag);
+            }
+          }
+        }
+        continue;
+      }
+      if (inSkip.length) continue;
+      // bare URL pass: http(s)://… and www.x.y…
+      parts[i] = seg.replace(
+        /\b((?:https?:\/\/|www\.)[^\s<>()\[\]"']+)/g,
+        (_m, raw) => {
+          let url = raw;
+          if (url.startsWith("www.")) url = "https://" + url;
+          return buildLinkAnchor(url, raw);
+        }
+      );
+    }
+    return parts.join("");
+  }
+
+  // ---- hover popover -----------------------------------------------------
+  // Single shared popover element, lazy-created. Lives at body level so it
+  // can escape any overflow:hidden bubble parent and float over the message.
+  const _linkPreviewCache = new Map(); // url -> {title, description, image, host} or {error}
+  const _linkPreviewInflight = new Map(); // url -> Promise
+  let _linkPopoverEl = null;
+  let _linkPopoverHideTimer = null;
+  let _linkPopoverActiveAnchor = null;
+  function ensureLinkPopover() {
+    if (_linkPopoverEl) return _linkPopoverEl;
+    const el = document.createElement("div");
+    el.className = "chat-link-popover";
+    el.setAttribute("hidden", "");
+    el.innerHTML = `
+      <div class="chat-link-popover-inner">
+        <div class="chat-link-popover-img" hidden></div>
+        <div class="chat-link-popover-body">
+          <div class="chat-link-popover-site"><img class="chat-link-popover-fav" alt=""><span class="chat-link-popover-host"></span></div>
+          <div class="chat-link-popover-title">Loading preview…</div>
+          <div class="chat-link-popover-desc"></div>
+          <div class="chat-link-popover-url"></div>
+        </div>
+      </div>`;
+    // Keep the popover open while the cursor is over IT (so the user can read
+    // long descriptions without losing the card to a flicker).
+    el.addEventListener("mouseenter", () => {
+      if (_linkPopoverHideTimer) { clearTimeout(_linkPopoverHideTimer); _linkPopoverHideTimer = null; }
+    });
+    el.addEventListener("mouseleave", scheduleHideLinkPopover);
+    document.body.appendChild(el);
+    _linkPopoverEl = el;
+    return el;
+  }
+  function fetchLinkPreview(url) {
+    if (_linkPreviewCache.has(url)) return Promise.resolve(_linkPreviewCache.get(url));
+    if (_linkPreviewInflight.has(url)) return _linkPreviewInflight.get(url);
+    const p = fetch(`/api/link_preview?url=${encodeURIComponent(url)}`)
+      .then(r => r.json())
+      .then(j => { _linkPreviewCache.set(url, j); _linkPreviewInflight.delete(url); return j; })
+      .catch(e => { const j = { error: String(e) }; _linkPreviewCache.set(url, j); _linkPreviewInflight.delete(url); return j; });
+    _linkPreviewInflight.set(url, p);
+    return p;
+  }
+  function positionLinkPopover(anchor) {
+    if (!_linkPopoverEl) return;
+    const r = anchor.getBoundingClientRect();
+    // Measure the popover itself so we can flip if it would clip the viewport.
+    const pw = _linkPopoverEl.offsetWidth || 320;
+    const ph = _linkPopoverEl.offsetHeight || 120;
+    let top = r.bottom + 8;
+    if (top + ph > window.innerHeight - 8) {
+      top = Math.max(8, r.top - ph - 8); // place above
+    }
+    let left = r.left;
+    if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+    if (left < 8) left = 8;
+    _linkPopoverEl.style.top = top + "px";
+    _linkPopoverEl.style.left = left + "px";
+  }
+  function renderLinkPopover(data) {
+    if (!_linkPopoverEl) return;
+    const titleEl = _linkPopoverEl.querySelector(".chat-link-popover-title");
+    const descEl = _linkPopoverEl.querySelector(".chat-link-popover-desc");
+    const urlEl = _linkPopoverEl.querySelector(".chat-link-popover-url");
+    const hostEl = _linkPopoverEl.querySelector(".chat-link-popover-host");
+    const favEl = _linkPopoverEl.querySelector(".chat-link-popover-fav");
+    const imgWrap = _linkPopoverEl.querySelector(".chat-link-popover-img");
+    if (data.error) {
+      titleEl.textContent = data.url || "(link)";
+      descEl.textContent = "Couldn't load preview: " + (data.error || "unknown error");
+      urlEl.textContent = "";
+      hostEl.textContent = "";
+      favEl.removeAttribute("src");
+      imgWrap.setAttribute("hidden", "");
+      imgWrap.style.backgroundImage = "";
+      return;
+    }
+    const host = data.host || "";
+    titleEl.textContent = data.title || data.url || "(no title)";
+    descEl.textContent = data.description || "";
+    descEl.style.display = data.description ? "" : "none";
+    urlEl.textContent = data.url || "";
+    hostEl.textContent = data.site_name || host || "";
+    if (host) favEl.src = `https://icons.duckduckgo.com/ip3/${host}.ico`;
+    else favEl.removeAttribute("src");
+    if (data.image) {
+      imgWrap.style.backgroundImage = `url("${data.image.replace(/"/g, '\\"')}")`;
+      imgWrap.removeAttribute("hidden");
+    } else {
+      imgWrap.setAttribute("hidden", "");
+      imgWrap.style.backgroundImage = "";
+    }
+  }
+  function showLinkPopover(anchor) {
+    const url = anchor.getAttribute("data-link-url");
+    if (!url) return;
+    const el = ensureLinkPopover();
+    if (_linkPopoverHideTimer) { clearTimeout(_linkPopoverHideTimer); _linkPopoverHideTimer = null; }
+    _linkPopoverActiveAnchor = anchor;
+    // Initial render: optimistic skeleton so the card pops instantly.
+    renderLinkPopover({ url, host: anchor.getAttribute("data-link-host") || "", title: "Loading preview…", description: "", image: "" });
+    el.removeAttribute("hidden");
+    requestAnimationFrame(() => {
+      el.classList.add("visible");
+      positionLinkPopover(anchor);
+    });
+    fetchLinkPreview(url).then(data => {
+      // Only render if the user hasn't moved on to a different anchor.
+      if (_linkPopoverActiveAnchor !== anchor) return;
+      renderLinkPopover(data);
+      positionLinkPopover(anchor);
+    });
+  }
+  function scheduleHideLinkPopover() {
+    if (_linkPopoverHideTimer) clearTimeout(_linkPopoverHideTimer);
+    _linkPopoverHideTimer = setTimeout(() => {
+      if (_linkPopoverEl) {
+        _linkPopoverEl.classList.remove("visible");
+        _linkPopoverEl.setAttribute("hidden", "");
+      }
+      _linkPopoverActiveAnchor = null;
+      _linkPopoverHideTimer = null;
+    }, 220);
+  }
+  // Global delegated hover — works for chat-links inserted at any time.
+  document.addEventListener("mouseover", (ev) => {
+    const a = ev.target && ev.target.closest && ev.target.closest("a.chat-link");
+    if (!a) return;
+    showLinkPopover(a);
+  });
+  document.addEventListener("mouseout", (ev) => {
+    const a = ev.target && ev.target.closest && ev.target.closest("a.chat-link");
+    if (!a) return;
+    // ignore moves into descendants of the same anchor
+    if (a.contains(ev.relatedTarget)) return;
+    // ignore moves into the popover itself (its own mouseleave handles hiding)
+    if (_linkPopoverEl && _linkPopoverEl.contains(ev.relatedTarget)) return;
+    scheduleHideLinkPopover();
+  });
 
   // very small HTML syntax highlighter for code view
   function highlightHTML(src) {
@@ -1597,11 +1900,21 @@
           const chips = renderWebSearchChips(evt.result && evt.result.results);
           if (chips) card.insertAdjacentHTML("afterend", chips);
         }
-        // network_snapshot: rich bar-chart card goes in the body (no head
-        // treatment — it's too detailed for an inline strip).
+        // network_snapshot: rich bar-chart card. Mount it OUTSIDE the
+        // tool-group so it stays visible even when the group is collapsed
+        // (the group is collapsed by default — putting the chart inside the
+        // body meant the bars were invisible until the user clicked the pill,
+        // which is why the model's own markdown table was filling the gap).
         if (!isErr && evt.name === "network_snapshot") {
           const chart = renderNetworkChart(evt.result);
-          if (chart) card.insertAdjacentHTML("afterend", chart);
+          if (chart) {
+            const group = toolStack.querySelector(".tool-group");
+            if (group && group.parentElement) {
+              group.insertAdjacentHTML("afterend", chart);
+            } else {
+              card.insertAdjacentHTML("afterend", chart);
+            }
+          }
         }
         updateToolGroupHead(toolStack);
       }

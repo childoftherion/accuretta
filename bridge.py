@@ -84,6 +84,70 @@ except Exception:
     _capstone = None  # type: ignore
     _HAVE_CAPSTONE = False
 
+# ---- APK static analysis (optional) --------------------------------------
+# androguard handles the binary AndroidManifest.xml, dex parsing, certs, and
+# permission lookups without external tools. Pure-Python. If absent, the
+# scan_apk tool falls back to ZIP-only mode (manifest dump becomes a "raw
+# bytes" notice) and tells the user to `pip install androguard`.
+try:
+    from androguard.core.apk import APK as _AndroidAPK  # type: ignore
+    _HAVE_ANDROGUARD = True
+except Exception:
+    try:
+        # androguard <= 3.x kept APK at a different import path
+        from androguard.core.bytecodes.apk import APK as _AndroidAPK  # type: ignore
+        _HAVE_ANDROGUARD = True
+    except Exception:
+        _AndroidAPK = None  # type: ignore
+        _HAVE_ANDROGUARD = False
+
+# ---- YARA pattern matching (optional) ------------------------------------
+# yara-python compiles + matches against files. We bundle a small default
+# rule set that flags very common malware indicators (suspicious APIs in
+# combination, mimikatz strings, base64-encoded MZ headers, packers, etc).
+# Users can pass rules='path/to/file.yar' or an inline source string to
+# override. Pure-Python wrapper around the libyara C library.
+try:
+    import yara as _yara  # type: ignore
+    _HAVE_YARA = True
+except Exception:
+    _yara = None  # type: ignore
+    _HAVE_YARA = False
+
+# ---- PE/ELF fast triage (optional) ---------------------------------------
+# pefile is a pure-Python parser for PE32/PE32+ binaries. ~100ms on a
+# typical .exe vs Ghidra's 30s — model uses this for triage and only
+# escalates to ghidra_analyze when needed. ELF parsing uses pyelftools if
+# available, otherwise falls back to header-only stdlib parsing.
+try:
+    import pefile as _pefile  # type: ignore
+    _HAVE_PEFILE = True
+except Exception:
+    _pefile = None  # type: ignore
+    _HAVE_PEFILE = False
+try:
+    from elftools.elf.elffile import ELFFile as _ELFFile  # type: ignore
+    _HAVE_PYELFTOOLS = True
+except Exception:
+    _ELFFile = None  # type: ignore
+    _HAVE_PYELFTOOLS = False
+
+# ---- Native binary analysis via Ghidra (optional) ------------------------
+# pyghidra runs Ghidra in-process via JPype. Heavy: ~600MB resident once
+# started, ~10s to boot the JVM the first call. After that, each tool call
+# reuses the running Ghidra so calls 2..N are seconds. We import lazily —
+# the import itself is cheap, but pyghidra.start() loads the JVM, so we only
+# call start() inside tool_ghidra_analyze on first use. Requires JDK 21+ and
+# a Ghidra install (path via settings.ghidra_path or $GHIDRA_INSTALL_DIR).
+try:
+    import pyghidra as _pyghidra  # type: ignore
+    _HAVE_PYGHIDRA = True
+except Exception:
+    _pyghidra = None  # type: ignore
+    _HAVE_PYGHIDRA = False
+_PYGHIDRA_STARTED = False
+_PYGHIDRA_START_LOCK = threading.Lock()
+
 # Kill switch: when set, every desktop action tool refuses immediately.
 # The frontend panic button and the user deny-action both flip this via
 # `/api/desktop/panic`. Cleared by /api/desktop/resume or a new chat turn.
@@ -294,6 +358,11 @@ DEFAULT_SETTINGS = {
                                     # Power-user escape hatch. Whitespace-split. Use with care.
     # Auto-tune helper (UI persistence only — does not get sent to llama-server directly).
     "vram_tier_gb": 0,              # 0 = auto-detect via nvidia-smi. Otherwise a fixed VRAM budget the suggester targets.
+    # APK analysis (Phase 2 decompile_apk tool — Phase 1 scan_apk needs no config).
+    "jadx_path": "",                # Full path to jadx.bat / jadx. Blank = auto-detect via PATH + common install dirs.
+    # Native-binary analysis via Ghidra (in-process through pyghidra).
+    "ghidra_path": "",              # Ghidra install root, e.g. C:\Program Files\ghidra_12.0.4_PUBLIC.
+                                    # Blank = use $GHIDRA_INSTALL_DIR. Requires JDK 21+ + `pip install pyghidra`.
 }
 
 
@@ -1521,6 +1590,152 @@ def _select_memories_for_prompt() -> list[dict]:
         reverse=True,
     )
     return memories[:MEMORIES_MAX_INJECT]
+
+
+# ---- Link preview (for clickable links in chat bubbles) ------------------
+# In-process cache so repeat hovers don't re-fetch. Keyed by URL, value is the
+# preview dict. Bounded by LRU-style trim to keep memory tiny — link previews
+# are small (a few KB each) but a chatty session might generate hundreds.
+_LINK_PREVIEW_CACHE: dict[str, dict] = {}
+_LINK_PREVIEW_CACHE_LOCK = threading.Lock()
+_LINK_PREVIEW_CACHE_MAX = 512
+
+
+def _link_preview_extract(html: str) -> dict:
+    """Pull a small set of meta tags out of HTML. Order of preference for each
+    field: og:* > twitter:* > stdlib equivalents. We don't run a real parser —
+    a couple of regexes are accurate enough for 99% of pages and don't bring in
+    a dependency."""
+    def _meta(prop_re: str) -> str:
+        # match <meta property/name="X" content="Y"> in either order.
+        m = re.search(
+            r'<meta[^>]+(?:property|name)\s*=\s*["\']' + prop_re + r'["\'][^>]*content\s*=\s*["\']([^"\']*)["\']',
+            html, flags=re.IGNORECASE,
+        )
+        if m:
+            return m.group(1)
+        m = re.search(
+            r'<meta[^>]+content\s*=\s*["\']([^"\']*)["\'][^>]*(?:property|name)\s*=\s*["\']' + prop_re + r'["\']',
+            html, flags=re.IGNORECASE,
+        )
+        return m.group(1) if m else ""
+
+    title = (
+        _meta(r"og:title")
+        or _meta(r"twitter:title")
+        or ""
+    )
+    if not title:
+        m = re.search(r"<title[^>]*>([\s\S]*?)</title>", html, flags=re.IGNORECASE)
+        if m:
+            title = re.sub(r"\s+", " ", m.group(1)).strip()
+
+    desc = (
+        _meta(r"og:description")
+        or _meta(r"twitter:description")
+        or _meta(r"description")
+        or ""
+    )
+    image = (
+        _meta(r"og:image(?::secure_url)?")
+        or _meta(r"twitter:image(?::src)?")
+        or ""
+    )
+    site = (
+        _meta(r"og:site_name")
+        or ""
+    )
+
+    # Decode HTML entities the cheap way — these meta values are usually
+    # short and safe to feed through html.unescape.
+    import html as _htmllib
+    return {
+        "title": _htmllib.unescape(title)[:300],
+        "description": _htmllib.unescape(desc)[:600],
+        "image": image[:600],
+        "site_name": _htmllib.unescape(site)[:120],
+    }
+
+
+def fetch_link_preview(url: str) -> dict:
+    """Fetch a URL, extract Open Graph / standard meta tags, return a small
+    dict the frontend can render in a hover card. Cached per-process so a
+    user mousing across the same link 10 times only hits the network once."""
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"error": "url must start with http:// or https://"}
+    with _LINK_PREVIEW_CACHE_LOCK:
+        cached = _LINK_PREVIEW_CACHE.get(url)
+        if cached is not None:
+            return cached
+
+    try:
+        req = urllib.request.Request(url, headers={
+            # Mimic a real browser — some servers (medium, x.com) return 403
+            # for plain "Python-urllib" UAs. Accept text/* so we don't waste
+            # bandwidth on huge images/binaries.
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) accuretta/1.0",
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+            "Accept-Language": "en-US,en;q=0.7",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            # Only parse text/html. For images / pdfs we return a minimal
+            # preview with hostname + content-type so the hover still says
+            # *something* useful.
+            if "text/html" not in ctype and "application/xhtml" not in ctype:
+                try:
+                    pu = urllib.parse.urlparse(url)
+                    host = pu.netloc
+                except Exception:
+                    host = ""
+                out = {
+                    "url": url,
+                    "host": host,
+                    "title": (url.rsplit("/", 1)[-1] or host),
+                    "description": ctype.split(";", 1)[0].strip() or "",
+                    "image": "",
+                    "site_name": host,
+                    "content_type": ctype,
+                }
+                with _LINK_PREVIEW_CACHE_LOCK:
+                    _LINK_PREVIEW_CACHE[url] = out
+                return out
+            raw = resp.read(256 * 1024)
+        # Decode best-effort. Many pages declare utf-8 even when they aren't,
+        # which is fine since errors='replace' keeps the regexes happy.
+        text = raw.decode("utf-8", errors="replace")
+    except Exception as e:
+        out = {"error": f"{type(e).__name__}: {e}", "url": url}
+        # Cache failures briefly too so a dead host doesn't get hammered.
+        with _LINK_PREVIEW_CACHE_LOCK:
+            _LINK_PREVIEW_CACHE[url] = out
+        return out
+
+    meta = _link_preview_extract(text)
+    try:
+        pu = urllib.parse.urlparse(url)
+        host = pu.netloc
+        # Resolve relative og:image against the page URL.
+        if meta.get("image") and not meta["image"].startswith(("http://", "https://", "data:")):
+            meta["image"] = urllib.parse.urljoin(url, meta["image"])
+    except Exception:
+        host = ""
+    out = {
+        "url": url,
+        "host": host,
+        "title": meta.get("title") or host or url,
+        "description": meta.get("description") or "",
+        "image": meta.get("image") or "",
+        "site_name": meta.get("site_name") or host,
+    }
+    with _LINK_PREVIEW_CACHE_LOCK:
+        # Trim oldest if the cache has grown unbounded. dict preserves
+        # insertion order so popping items removes the earliest inserts.
+        if len(_LINK_PREVIEW_CACHE) >= _LINK_PREVIEW_CACHE_MAX:
+            for k in list(_LINK_PREVIEW_CACHE.keys())[: _LINK_PREVIEW_CACHE_MAX // 4]:
+                _LINK_PREVIEW_CACHE.pop(k, None)
+        _LINK_PREVIEW_CACHE[url] = out
+    return out
 
 
 def tool_web_fetch(args: dict) -> dict:
@@ -2802,6 +3017,1494 @@ def tool_disasm_at(args: dict) -> dict:
         return {"error": str(e)}
 
 
+# ---- APK static analysis -------------------------------------------------
+# Two complementary tools:
+#
+#   scan_apk(path)     — pure-Python triage. Parses AndroidManifest, lists
+#                        permissions/components/cert info, mines DEX + .so
+#                        for printable strings, and runs a regex pass for
+#                        common secret/leak patterns (AWS/GCP/Firebase keys,
+#                        JWTs, hardcoded URLs, etc). Returns ONE structured
+#                        JSON report the model can reason over without
+#                        re-fetching individual files.
+#
+#   decompile_apk(...) — shells out to JADX (Java decompiler) and writes
+#                        decompiled .java sources into the workspace. The
+#                        model then uses read_file / grep_files on the
+#                        output dir. Requires java + jadx on the host;
+#                        path can be set via settings.jadx_path.
+#
+# Both refuse paths outside the workspace via _fw_check_path. decompile_apk
+# is destructive (writes a folder) and gated by request_approval. scan_apk
+# is read-only.
+
+# Regex patterns for the secret/leak hunt. Conservative — false-positive
+# rate matters more than recall for an LLM workflow (the model wastes a
+# lot of context chasing red herrings). Each entry:
+#   (label, compiled_regex, min_match_length_for_positive)
+_APK_SECRET_RE: list[tuple[str, "re.Pattern[bytes]", int]] = [
+    ("aws_access_key_id",        re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),                                 20),
+    ("aws_secret_access_key",    re.compile(rb"(?i)aws(.{0,20})?(secret|sk)[^a-z0-9]{0,5}([A-Za-z0-9/+=]{40})"),  40),
+    ("google_api_key",           re.compile(rb"\bAIza[0-9A-Za-z_\-]{35}\b"),                                     39),
+    ("firebase_db_url",          re.compile(rb"https?://[a-z0-9\-]+\.firebaseio\.com\b"),                        20),
+    ("firebase_app_url",         re.compile(rb"https?://[a-z0-9\-]+\.firebaseapp\.com\b"),                       20),
+    ("gcp_service_account",      re.compile(rb"\"type\"\s*:\s*\"service_account\""),                             20),
+    ("jwt",                      re.compile(rb"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), 60),
+    ("github_pat",               re.compile(rb"\bghp_[A-Za-z0-9]{36}\b"),                                         40),
+    ("github_app_token",         re.compile(rb"\b(?:ghs|ghu|gho|ghr)_[A-Za-z0-9]{36}\b"),                         40),
+    ("slack_token",              re.compile(rb"\bxox[abpr]-[A-Za-z0-9\-]{10,}\b"),                                15),
+    ("stripe_secret",            re.compile(rb"\bsk_(?:live|test)_[0-9a-zA-Z]{24,}\b"),                           28),
+    ("stripe_publishable",       re.compile(rb"\bpk_(?:live|test)_[0-9a-zA-Z]{24,}\b"),                           28),
+    ("private_key_pem",          re.compile(rb"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----"), 30),
+    ("twilio_sid",               re.compile(rb"\bAC[a-f0-9]{32}\b"),                                              34),
+    ("sendgrid_api_key",         re.compile(rb"\bSG\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43}\b"),                  60),
+    ("mailgun_api_key",          re.compile(rb"\bkey-[a-z0-9]{32}\b"),                                            36),
+    ("generic_secret_assignment",re.compile(rb"(?i)(?:api[_-]?key|secret|password|passwd|pwd|token|bearer)[\s:=\"']{1,5}[A-Za-z0-9_\-/+=]{16,}"), 25),
+    ("hardcoded_http_endpoint",  re.compile(rb"https?://[a-zA-Z0-9.\-]+(?::\d+)?(?:/[^\s\"'<>]*)?"),              10),
+    ("ipv4_literal",             re.compile(rb"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\b"), 7),
+]
+
+# Permissions Android marks as "dangerous" or otherwise interesting. We use
+# a static list rather than querying androguard at runtime — covers the bulk
+# of real-world risk surface without a 1000-entry dump.
+_APK_DANGEROUS_PERMS = {
+    "android.permission.READ_CONTACTS",
+    "android.permission.WRITE_CONTACTS",
+    "android.permission.READ_CALENDAR",
+    "android.permission.WRITE_CALENDAR",
+    "android.permission.CAMERA",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.ACCESS_BACKGROUND_LOCATION",
+    "android.permission.READ_PHONE_STATE",
+    "android.permission.READ_PHONE_NUMBERS",
+    "android.permission.READ_CALL_LOG",
+    "android.permission.WRITE_CALL_LOG",
+    "android.permission.PROCESS_OUTGOING_CALLS",
+    "android.permission.READ_SMS",
+    "android.permission.SEND_SMS",
+    "android.permission.RECEIVE_SMS",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.SYSTEM_ALERT_WINDOW",
+    "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.PACKAGE_USAGE_STATS",
+    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.QUERY_ALL_PACKAGES",
+    "android.permission.READ_LOGS",
+    "android.permission.GET_ACCOUNTS",
+    "android.permission.AUTHENTICATE_ACCOUNTS",
+    "android.permission.USE_CREDENTIALS",
+    "android.permission.MANAGE_ACCOUNTS",
+    "android.permission.WRITE_SETTINGS",
+    "android.permission.WRITE_SECURE_SETTINGS",
+    "android.permission.MOUNT_UNMOUNT_FILESYSTEMS",
+    "android.permission.INSTALL_PACKAGES",
+    "android.permission.DELETE_PACKAGES",
+    "android.permission.CLEAR_APP_USER_DATA",
+    "android.permission.RECEIVE_BOOT_COMPLETED",
+    "android.permission.WAKE_LOCK",
+    "android.permission.DISABLE_KEYGUARD",
+    "android.permission.SYSTEM_OVERLAY_WINDOW",
+}
+
+
+def _apk_string_runs(data: bytes, min_len: int = 6) -> list[bytes]:
+    """Pull printable ASCII runs of length >= min_len from a binary blob.
+    Used to feed the secret regex pass. Caps total output to keep memory sane
+    on huge .so files (some games ship 200 MB native libs)."""
+    return re.findall(rb"[\x20-\x7e]{%d,}" % min_len, data)
+
+
+def _apk_hunt_secrets(label: str, data: bytes, max_per_pattern: int = 25) -> list[dict]:
+    """Run all _APK_SECRET_RE patterns over a blob and return findings.
+    Each finding includes a redacted preview so the model sees enough context
+    to judge severity without us echoing every hardcoded token verbatim."""
+    out: list[dict] = []
+    for kind, rx, min_hit_len in _APK_SECRET_RE:
+        seen: set[bytes] = set()
+        n = 0
+        for m in rx.finditer(data):
+            hit = m.group(0)
+            if len(hit) < min_hit_len:
+                continue
+            if hit in seen:
+                continue
+            seen.add(hit)
+            try:
+                preview = hit.decode("utf-8", errors="replace")
+            except Exception:
+                preview = repr(hit)
+            # Redact the middle of long literals — keep first 8 + last 4.
+            if len(preview) > 24 and kind not in {"hardcoded_http_endpoint", "ipv4_literal", "firebase_db_url", "firebase_app_url"}:
+                preview = preview[:8] + "…[redacted]…" + preview[-4:]
+            out.append({"source": label, "kind": kind, "match": preview[:200]})
+            n += 1
+            if n >= max_per_pattern:
+                break
+    return out
+
+
+def tool_scan_apk(args: dict) -> dict:
+    """Phase-1 APK static scan. Returns a structured report covering:
+    package metadata, signing certs, requested permissions (flagged for
+    'dangerous' ones), exported components, dex/native lib inventory,
+    and a secret-pattern hunt over DEX + .so + raw resource files. Pure
+    Python — uses androguard if available, falls back to zipfile-only mode
+    for basic file inventory if not."""
+    import zipfile as _zip
+
+    path, err = _fw_check_path(args.get("path") or "")
+    if err:
+        return err
+    if not os.path.isfile(path):
+        return {"error": f"not a file: {path}"}
+
+    max_secret_findings = max(10, min(int(args.get("max_secret_findings") or 200), 2000))
+    max_string_bytes = max(64 * 1024, min(int(args.get("max_string_bytes") or 8 * 1024 * 1024),
+                                          64 * 1024 * 1024))
+    deep = bool(args.get("deep"))  # if true, scan every file in the APK, not just dex/so
+
+    out: dict = {
+        "path": path,
+        "size": os.path.getsize(path),
+        "androguard_available": _HAVE_ANDROGUARD,
+        "manifest": {},
+        "signing": {},
+        "permissions": {"all": [], "dangerous": []},
+        "components": {"activities": [], "services": [], "receivers": [], "providers": []},
+        "exported_components": [],
+        "dex_files": [],
+        "native_libs": [],
+        "assets": [],
+        "secret_findings": [],
+        "warnings": [],
+        "notes": [],
+    }
+
+    # --- step 1: ZIP inventory (always works, no androguard needed) -----
+    try:
+        with _zip.ZipFile(path) as z:
+            names = z.namelist()
+    except _zip.BadZipFile:
+        return {"error": "not a valid APK (bad ZIP signature)"}
+
+    out["dex_files"] = [n for n in names if n.endswith(".dex")]
+    out["native_libs"] = [n for n in names if n.startswith("lib/") and n.endswith(".so")]
+    out["assets"] = [n for n in names if n.startswith("assets/")][:200]
+    out["file_count"] = len(names)
+
+    # --- step 2: manifest + signing via androguard ----------------------
+    if _HAVE_ANDROGUARD:
+        try:
+            apk = _AndroidAPK(path)
+            out["manifest"] = {
+                "package": apk.get_package(),
+                "version_name": apk.get_androidversion_name(),
+                "version_code": apk.get_androidversion_code(),
+                "min_sdk": apk.get_min_sdk_version(),
+                "target_sdk": apk.get_target_sdk_version(),
+                "main_activity": apk.get_main_activity(),
+                "app_name": apk.get_app_name(),
+                "is_debuggable": bool(apk.get_element("application", "debuggable") == "true"),
+                "allows_backup": (apk.get_element("application", "allowBackup") != "false"),
+                "uses_cleartext_traffic": (apk.get_element("application", "usesCleartextTraffic") == "true"),
+            }
+            perms = list(apk.get_permissions() or [])
+            out["permissions"]["all"] = sorted(perms)
+            out["permissions"]["dangerous"] = sorted(p for p in perms if p in _APK_DANGEROUS_PERMS)
+            out["components"]["activities"] = list(apk.get_activities() or [])[:200]
+            out["components"]["services"] = list(apk.get_services() or [])[:200]
+            out["components"]["receivers"] = list(apk.get_receivers() or [])[:200]
+            out["components"]["providers"] = list(apk.get_providers() or [])[:200]
+            try:
+                # Each kind has an exported flag we can pull via androguard's
+                # get_element. Compile a flat exported list with kind tags.
+                exported: list[dict] = []
+                for kind, items in (
+                    ("activity", apk.get_activities() or []),
+                    ("service", apk.get_services() or []),
+                    ("receiver", apk.get_receivers() or []),
+                    ("provider", apk.get_providers() or []),
+                ):
+                    for name in items:
+                        is_exp = apk.get_element(kind, "exported", name=name) == "true"
+                        if is_exp:
+                            exported.append({"kind": kind, "name": name})
+                out["exported_components"] = exported
+            except Exception as e:
+                out["warnings"].append(f"exported-component scan failed: {e}")
+            # Signing certs — list issuers + sha256 fingerprints, no key bytes.
+            try:
+                certs = apk.get_certificates() or []
+                sig_v1 = apk.get_signature_names() or []
+                out["signing"] = {
+                    "v1_signature_files": list(sig_v1)[:10],
+                    "is_signed_v1": apk.is_signed_v1() if hasattr(apk, "is_signed_v1") else None,
+                    "is_signed_v2": apk.is_signed_v2() if hasattr(apk, "is_signed_v2") else None,
+                    "is_signed_v3": apk.is_signed_v3() if hasattr(apk, "is_signed_v3") else None,
+                    "certificates": [
+                        {
+                            "subject": str(getattr(c, "subject", "")),
+                            "issuer": str(getattr(c, "issuer", "")),
+                            "sha256": (getattr(c, "sha256_fingerprint", "") or "").lower(),
+                        }
+                        for c in certs[:5]
+                    ],
+                }
+            except Exception as e:
+                out["warnings"].append(f"signing parse failed: {e}")
+        except Exception as e:
+            out["warnings"].append(f"androguard manifest parse failed: {e}")
+    else:
+        out["notes"].append(
+            "androguard not installed — manifest/permissions/components skipped. "
+            "Run `pip install androguard` to enable full scan."
+        )
+
+    # --- step 3: secret hunt over DEX + .so + (optionally) everything ---
+    targets = list(out["dex_files"]) + list(out["native_libs"])
+    if deep:
+        # everything text-ish or unidentified — skip giant pngs/jpgs/webps/mp4/zip-in-zip
+        skip_ext = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mkv", ".webm", ".ogg", ".mp3", ".wav"}
+        for n in names:
+            if n in targets:
+                continue
+            ext = Path(n).suffix.lower()
+            if ext in skip_ext:
+                continue
+            targets.append(n)
+
+    bytes_scanned = 0
+    findings: list[dict] = []
+    try:
+        with _zip.ZipFile(path) as z:
+            for n in targets:
+                try:
+                    with z.open(n) as f:
+                        chunk = f.read(max_string_bytes - bytes_scanned if max_string_bytes > bytes_scanned else 0)
+                except KeyError:
+                    continue
+                if not chunk:
+                    continue
+                bytes_scanned += len(chunk)
+                # Hunt over the raw blob first (catches embedded JSON, manifest fragments)
+                hits = _apk_hunt_secrets(n, chunk)
+                if hits:
+                    findings.extend(hits)
+                if len(findings) >= max_secret_findings or bytes_scanned >= max_string_bytes:
+                    break
+    except Exception as e:
+        out["warnings"].append(f"secret hunt failed: {e}")
+
+    # Dedupe (source, kind, match) tuples — same string in two dex files is noise
+    seen_keys: set[tuple] = set()
+    deduped: list[dict] = []
+    for f in findings:
+        key = (f["kind"], f["match"])  # source-agnostic dedupe; first source wins
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(f)
+    out["secret_findings"] = deduped[:max_secret_findings]
+    out["secret_findings_total"] = len(findings)
+    out["bytes_scanned"] = bytes_scanned
+    out["scan_truncated"] = bytes_scanned >= max_string_bytes
+
+    # --- step 4: surface a quick risk summary the model can lead with ---
+    risk: list[str] = []
+    m = out["manifest"]
+    if m.get("is_debuggable"):
+        risk.append("debuggable=true (production APKs should never ship this)")
+    if m.get("allows_backup"):
+        risk.append("allowBackup not disabled (data extractable via adb backup)")
+    if m.get("uses_cleartext_traffic"):
+        risk.append("usesCleartextTraffic=true (HTTP plaintext permitted)")
+    if out["permissions"]["dangerous"]:
+        risk.append(f"{len(out['permissions']['dangerous'])} dangerous permissions requested")
+    if out["exported_components"]:
+        risk.append(f"{len(out['exported_components'])} exported components (check intent filters)")
+    secret_kinds = {f["kind"] for f in out["secret_findings"]
+                    if f["kind"] not in {"hardcoded_http_endpoint", "ipv4_literal"}}
+    if secret_kinds:
+        risk.append(f"possible secrets: {', '.join(sorted(secret_kinds))}")
+    out["risk_summary"] = risk
+
+    return out
+
+
+def _resolve_jadx_bin() -> str | None:
+    """Find a jadx executable. Settings override > PATH > common install dirs."""
+    s = get_settings()
+    custom = (s.get("jadx_path") or "").strip()
+    if custom and os.path.isfile(custom):
+        return custom
+    # PATH lookup
+    for cand in ("jadx", "jadx.bat", "jadx.cmd"):
+        p = shutil.which(cand)
+        if p:
+            return p
+    # Common Windows install locations
+    for guess in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "jadx" / "bin" / "jadx.bat",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "jadx" / "bin" / "jadx.bat",
+        Path.home() / "jadx" / "bin" / "jadx.bat",
+    ):
+        try:
+            if guess.is_file():
+                return str(guess)
+        except Exception:
+            continue
+    return None
+
+
+def tool_decompile_apk(args: dict) -> dict:
+    """Phase-2 APK decompile. Shells out to JADX and writes Java sources +
+    resources into a sandbox subdirectory next to the APK. The model can
+    then read/grep the output dir using existing tools. Destructive (writes
+    files) — gated by approval. Java 11+ and JADX must be installed; set
+    settings.jadx_path if jadx is not on PATH."""
+    path, err = _fw_check_path(args.get("path") or "")
+    if err:
+        return err
+    if not os.path.isfile(path):
+        return {"error": f"not a file: {path}"}
+    src = Path(path)
+    if src.suffix.lower() not in {".apk", ".xapk", ".aab"}:
+        return {"error": f"not an APK/AAB: {src.name}"}
+
+    dest_name = (args.get("dest_name") or f"{src.stem}_jadx").strip()
+    if "/" in dest_name or "\\" in dest_name or ".." in dest_name:
+        return {"error": "dest_name must be a single folder name (no slashes)"}
+    dest = src.parent / dest_name
+    overwrite = bool(args.get("overwrite"))
+    if dest.exists() and not overwrite:
+        return {"error": f"destination exists: {dest}. Pass overwrite:true or pick a new dest_name."}
+
+    jadx = _resolve_jadx_bin()
+    if not jadx:
+        return {
+            "error": (
+                "jadx not found. Install from https://github.com/skylot/jadx/releases "
+                "(needs Java 11+), then either add it to PATH or set settings.jadx_path "
+                "to the full path of jadx.bat."
+            )
+        }
+
+    timeout = max(30, min(int(args.get("timeout") or 600), 3600))
+    deobf = bool(args.get("deobf", True))
+    show_bad_code = bool(args.get("show_bad_code", True))
+    no_res = bool(args.get("no_res"))
+    no_src = bool(args.get("no_src"))
+    classes = (args.get("classes") or "").strip()  # passed to --classes-only-glob if present
+
+    cmd: list[str] = [jadx, "-d", str(dest)]
+    if deobf:
+        cmd.append("--deobf")
+    if show_bad_code:
+        cmd.append("--show-bad-code")
+    if no_res:
+        cmd.append("--no-res")
+    if no_src:
+        cmd.append("--no-src")
+    if classes:
+        # JADX 1.5+ supports --class-list to scope decompilation. Older versions
+        # ignore unknown flags; the call still works, just decompiles everything.
+        cmd += ["--include-classes", classes]
+    cmd.append(str(src))
+
+    approval = request_approval(
+        title="Decompile APK with JADX",
+        command=f'jadx -d "{dest.name}" "{src.name}"' + (f' (filter: {classes})' if classes else ""),
+        details={
+            "kind": "decompile_apk",
+            "source": str(src),
+            "dest": str(dest),
+            "jadx": jadx,
+            "timeout_s": timeout,
+            "command": cmd,
+        },
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied decompile ({approval.get('status')})"}
+
+    if dest.exists() and overwrite:
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"jadx timed out after {timeout}s. Try --no-res, narrower --classes filter, or a longer timeout."}
+    except FileNotFoundError:
+        return {"error": f"jadx binary not executable: {jadx}"}
+    except Exception as e:
+        return {"error": f"jadx invocation failed: {e}"}
+
+    elapsed = round(time.time() - t0, 2)
+    # Walk the output and produce a compact summary the model can navigate.
+    java_files: list[str] = []
+    res_files: list[str] = []
+    other: list[str] = []
+    total_bytes = 0
+    for root, _dirs, files in os.walk(dest):
+        for fn in files:
+            p = os.path.join(root, fn)
+            try:
+                total_bytes += os.path.getsize(p)
+            except OSError:
+                pass
+            rel = os.path.relpath(p, dest).replace("\\", "/")
+            ext = fn.rsplit(".", 1)[-1].lower()
+            if ext == "java":
+                java_files.append(rel)
+            elif ext in {"xml", "png", "jpg", "jpeg", "webp", "json", "ttf", "otf", "html"}:
+                res_files.append(rel)
+            else:
+                other.append(rel)
+
+    return {
+        "ok": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "elapsed_s": elapsed,
+        "jadx": jadx,
+        "command": " ".join(f'"{c}"' if " " in c else c for c in cmd),
+        "source": str(src),
+        "dest": str(dest),
+        "stdout_tail": (proc.stdout or "")[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+        "output_summary": {
+            "total_bytes": total_bytes,
+            "java_count": len(java_files),
+            "resource_count": len(res_files),
+            "other_count": len(other),
+            # cap the file lists so a 30k-class APK doesn't nuke the model context
+            "java_sample": java_files[:200],
+            "resources_sample": res_files[:100],
+        },
+        "next_steps": [
+            f"grep_files path:'{dest}' pattern:'<your regex>' to hunt across decompiled sources",
+            f"read_file path:'{dest}/<file>.java' for individual class inspection",
+        ],
+    }
+
+
+# ---- Ghidra (native binary) analysis -------------------------------------
+# Common dangerous symbols to flag in import lists. Not exhaustive — just the
+# usual suspects for memory corruption / privilege issues / dynamic loading.
+# String-match against the basename of the imported symbol (handles `@@GLIBC`
+# version suffixes by splitting on '@').
+_GHIDRA_DANGER_IMPORTS = {
+    "strcpy", "strcat", "sprintf", "vsprintf", "gets", "scanf",
+    "memcpy", "memmove", "strncpy", "strncat",
+    "system", "popen", "exec", "execl", "execlp", "execle", "execv", "execvp", "execve",
+    "fork", "vfork", "setuid", "setgid", "seteuid", "setegid",
+    "dlopen", "dlsym", "LoadLibraryA", "LoadLibraryW", "GetProcAddress",
+    "mprotect", "VirtualAlloc", "VirtualProtect", "WriteProcessMemory",
+    "ptrace", "syscall",
+}
+
+
+def _resolve_ghidra_install_dir() -> str | None:
+    """Find a Ghidra install root. Settings override > $GHIDRA_INSTALL_DIR > common locations."""
+    s = get_settings()
+    custom = (s.get("ghidra_path") or "").strip()
+    if custom and os.path.isdir(custom):
+        return custom
+    env = os.environ.get("GHIDRA_INSTALL_DIR", "").strip()
+    if env and os.path.isdir(env):
+        return env
+    # Common Windows install patterns. Match anything starting with `ghidra_`.
+    pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    try:
+        for child in pf.iterdir():
+            if child.is_dir() and child.name.lower().startswith("ghidra_"):
+                # sanity-check: the install root contains a `support` dir
+                if (child / "support").is_dir():
+                    return str(child)
+    except OSError:
+        pass
+    return None
+
+
+def _ensure_pyghidra_started() -> dict | None:
+    """Boot the JVM for pyghidra if not yet running. Returns None on success,
+    or an error dict on failure. Idempotent and thread-safe — only the first
+    caller pays the ~10s JVM cold start. Subsequent callers return immediately."""
+    global _PYGHIDRA_STARTED
+    if not _HAVE_PYGHIDRA:
+        return {"error": "pyghidra not installed. Run: pip install pyghidra"}
+    if _PYGHIDRA_STARTED:
+        return None
+    with _PYGHIDRA_START_LOCK:
+        if _PYGHIDRA_STARTED:
+            return None
+        install_dir = _resolve_ghidra_install_dir()
+        try:
+            if install_dir:
+                _pyghidra.start(install_dir=install_dir)
+            else:
+                # Let pyghidra try its own auto-detect (env vars, etc).
+                _pyghidra.start()
+            _PYGHIDRA_STARTED = True
+            return None
+        except Exception as e:
+            return {
+                "error": (
+                    f"pyghidra.start() failed: {type(e).__name__}: {e}. "
+                    f"Set settings.ghidra_path to your Ghidra install root "
+                    f"(e.g. C:\\Program Files\\ghidra_12.0.4_PUBLIC) and ensure "
+                    f"JDK 21+ is on PATH."
+                )
+            }
+
+
+def tool_ghidra_analyze(args: dict) -> dict:
+    """Static analysis of a native binary using Ghidra (in-process via pyghidra).
+    Loads the file, runs auto-analysis, and returns format/imports/exports/
+    strings/functions plus an optional decompilation of a named function.
+    Long-running on first call (~30s for analysis) and on first invocation
+    overall (~10s JVM boot). Subsequent calls reuse the running Ghidra."""
+    path, err = _fw_check_path(args.get("path") or "")
+    if err:
+        return err
+    if not os.path.isfile(path):
+        return {"error": f"not a file: {path}"}
+
+    function_name = (args.get("function") or "").strip()
+    decompile = bool(args.get("decompile"))
+    max_strings = max(10, min(int(args.get("max_strings") or 200), 2000))
+    max_functions = max(10, min(int(args.get("max_functions") or 200), 5000))
+    timeout = max(30, min(int(args.get("timeout") or 240), 1800))
+
+    # Approval gate — Ghidra runs auto-analysis which can be heavy on RAM/CPU
+    # for huge binaries, plus the JVM persists in memory after first call.
+    approval = request_approval(
+        title="Analyze with Ghidra",
+        command=f'ghidra_analyze "{Path(path).name}"' + (
+            f" decompile {function_name}" if (function_name and decompile) else ""
+        ),
+        details={
+            "kind": "ghidra_analyze",
+            "source": path,
+            "function": function_name,
+            "decompile": decompile,
+            "timeout_s": timeout,
+        },
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied ghidra analysis ({approval.get('status')})"}
+
+    boot_err = _ensure_pyghidra_started()
+    if boot_err:
+        return boot_err
+
+    t0 = time.time()
+    try:
+        # Heavy lifting goes inside a worker so we can enforce a hard timeout.
+        # Auto-analysis + decompilation can hang on pathological binaries; the
+        # alternative (just calling synchronously) would block the bridge.
+        result_box: dict[str, object] = {}
+        exc_box: dict[str, object] = {}
+
+        def _worker():
+            try:
+                with _pyghidra.open_program(path, analyze=True) as flat_api:  # type: ignore[attr-defined]
+                    program = flat_api.getCurrentProgram()
+                    result_box["data"] = _ghidra_collect(
+                        program, function_name, decompile,
+                        max_strings, max_functions,
+                    )
+            except Exception as e:  # pragma: no cover (Java exceptions cross JPype)
+                exc_box["err"] = f"{type(e).__name__}: {e}"
+
+        worker = threading.Thread(target=_worker, name="ghidra-worker", daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            return {
+                "error": (
+                    f"ghidra analysis timed out after {timeout}s. Try a larger "
+                    f"timeout, or skip decompile=true and run a smaller follow-up."
+                ),
+            }
+        if "err" in exc_box:
+            return {"error": f"ghidra analysis failed: {exc_box['err']}"}
+        out = result_box.get("data") or {}
+        if not isinstance(out, dict):
+            return {"error": "ghidra analysis returned unexpected payload"}
+        out["elapsed_s"] = round(time.time() - t0, 2)
+        out["source"] = path
+        return out
+    except Exception as e:
+        return {"error": f"ghidra analysis crashed: {type(e).__name__}: {e}"}
+
+
+def _ghidra_collect(
+    program,
+    function_name: str,
+    decompile: bool,
+    max_strings: int,
+    max_functions: int,
+) -> dict:
+    """Walk a loaded Ghidra Program and extract a JSON-friendly summary.
+    Kept separate from tool_ghidra_analyze so the worker thread is small and
+    the timeout/error handling stays clean."""
+    # Format / language metadata
+    addr_space = program.getAddressFactory().getDefaultAddressSpace()
+    fmt_info = {
+        "format": str(program.getExecutableFormat()),
+        "language": str(program.getLanguageID()),
+        "compiler": str(program.getCompilerSpec().getCompilerSpecID()),
+        "address_size_bits": int(addr_space.getSize()),
+        "image_base": str(program.getImageBase()),
+        "memory_size": int(program.getMemory().getSize()),
+        "executable_md5": str(program.getExecutableMD5() or ""),
+        "executable_sha256": str(program.getExecutableSHA256() or ""),
+    }
+
+    # Imports (external symbols) and exports (entry points)
+    sym_tab = program.getSymbolTable()
+    imports: list[str] = []
+    seen_imports: set[str] = set()
+    try:
+        for sym in sym_tab.getExternalSymbols():
+            n = str(sym.getName())
+            if n and n not in seen_imports:
+                seen_imports.add(n)
+                imports.append(n)
+            if len(imports) >= 1000:
+                break
+    except Exception:
+        pass
+    imports.sort()
+
+    exports: list[dict] = []
+    try:
+        for sym in sym_tab.getSymbolIterator():
+            try:
+                if sym.isExternalEntryPoint():
+                    exports.append({
+                        "name": str(sym.getName()),
+                        "addr": str(sym.getAddress()),
+                    })
+                    if len(exports) >= 500:
+                        break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Functions — enumerate with a hard cap
+    fm = program.getFunctionManager()
+    functions: list[dict] = []
+    target_func = None
+    try:
+        for f in fm.getFunctions(True):
+            entry = {
+                "name": str(f.getName()),
+                "addr": str(f.getEntryPoint()),
+                "size": int(f.getBody().getNumAddresses()),
+                "external": bool(f.isExternal()),
+            }
+            functions.append(entry)
+            if function_name and target_func is None and entry["name"] == function_name:
+                target_func = f
+            if len(functions) >= max_functions and (target_func or not function_name):
+                break
+    except Exception:
+        pass
+    function_total = int(fm.getFunctionCount())
+
+    # Defined strings
+    strings: list[dict] = []
+    try:
+        listing = program.getListing()
+        for d in listing.getDefinedData(True):
+            try:
+                if d.hasStringValue():
+                    s_val = d.getValue()
+                    if s_val is None:
+                        continue
+                    s_str = str(s_val)
+                    if len(s_str) >= 4:
+                        strings.append({"addr": str(d.getAddress()), "s": s_str[:240]})
+                        if len(strings) >= max_strings:
+                            break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Optional decompilation
+    decompiled = None
+    if function_name and decompile:
+        if target_func is None:
+            # Fall back to a slower scan in case the early loop bailed before
+            # we found the named function.
+            try:
+                for f in fm.getFunctions(True):
+                    if str(f.getName()) == function_name:
+                        target_func = f
+                        break
+            except Exception:
+                pass
+        if target_func is None:
+            decompiled = f"(function not found: {function_name})"
+        else:
+            try:
+                from ghidra.app.decompiler import DecompInterface  # type: ignore
+                from ghidra.util.task import ConsoleTaskMonitor    # type: ignore
+                dec = DecompInterface()
+                try:
+                    dec.openProgram(program)
+                    res = dec.decompileFunction(target_func, 60, ConsoleTaskMonitor())
+                    if res.decompileCompleted():
+                        decompiled = str(res.getDecompiledFunction().getC())
+                    else:
+                        decompiled = f"(decompile failed: {res.getErrorMessage()})"
+                finally:
+                    dec.dispose()
+            except Exception as e:
+                decompiled = f"(decompile crashed: {type(e).__name__}: {e})"
+
+    # Risk surface — flag dangerous imports
+    risk: list[dict] = []
+    for imp in imports:
+        # GLIBC versioning: "memcpy@@GLIBC_2.14" → "memcpy"
+        base = imp.split("@", 1)[0]
+        if base in _GHIDRA_DANGER_IMPORTS:
+            risk.append({"kind": "dangerous_import", "name": imp, "base": base})
+
+    return {
+        "ok": True,
+        **fmt_info,
+        "function_count": function_total,
+        "function_sample": functions[:max_functions],
+        "import_count": len(imports),
+        "imports": imports[:300],
+        "export_count": len(exports),
+        "exports": exports[:200],
+        "string_count": len(strings),
+        "strings": strings,
+        "decompiled": decompiled,
+        "risk_summary": risk,
+    }
+
+
+# ---- Binary triage (PE/ELF/Mach-O) + YARA scanning -----------------------
+# Lightweight pure-Python triage. binary_inspect runs in tens of milliseconds
+# on a typical 5 MB exe, vs Ghidra's ~30s analysis. The model uses this to
+# decide whether a binary is interesting enough to escalate to ghidra_analyze.
+# yara_scan ships with a small bundled rule set — most users don't have rules
+# of their own and the defaults flag the common malware tells we see in
+# router firmware, .so libs, and pirated installers.
+
+
+def _shannon_entropy(data: bytes) -> float:
+    """Standard Shannon entropy in bits/byte (0-8). High entropy (>7.0) on
+    a PE section is a strong hint that it's packed or encrypted."""
+    if not data:
+        return 0.0
+    from collections import Counter
+    import math
+    counts = Counter(data)
+    total = len(data)
+    ent = 0.0
+    for c in counts.values():
+        p = c / total
+        ent -= p * math.log2(p)
+    return round(ent, 3)
+
+
+def _detect_format(head: bytes) -> str:
+    """Magic-byte sniff. Returns one of: PE, ELF, MACHO, MACHO_FAT, UNKNOWN."""
+    if len(head) < 4:
+        return "UNKNOWN"
+    if head[:2] == b"MZ":
+        return "PE"
+    if head[:4] == b"\x7fELF":
+        return "ELF"
+    # Mach-O 32/64 little + big endian, plus FAT (universal).
+    macho = {
+        b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+    }
+    if head[:4] in macho:
+        return "MACHO"
+    if head[:4] in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+        # Note: Java .class also uses CAFEBABE — but at offset 0 with magic,
+        # it's followed by a u2 minor version; Mach-O FAT has nfat_arch. We
+        # don't disambiguate further here; the caller will fall through to
+        # unknown format if neither pefile nor pyelftools accepts the file.
+        return "MACHO_FAT"
+    return "UNKNOWN"
+
+
+# PE machine type → architecture name. Limited to the values pefile actually
+# emits. Anything missing falls through to a hex string so the user still gets
+# a useful answer instead of "unknown".
+_PE_MACHINE = {
+    0x014c: "i386",
+    0x0200: "ia64",
+    0x8664: "x86_64",
+    0x01c0: "ARM",
+    0x01c4: "ARMv7-Thumb",
+    0xaa64: "ARM64",
+    0x0ebc: "EFI byte code",
+    0x0162: "MIPS R3000",
+    0x0166: "MIPS R4000",
+    0x01f0: "PowerPC",
+    0x01f1: "PowerPC FP",
+    0x0266: "MIPS16",
+    0x0366: "MIPS-FPU",
+    0x0466: "MIPS16-FPU",
+    0x5032: "RISCV32",
+    0x5064: "RISCV64",
+}
+
+# Section-name fingerprints for popular packers. Match prefix because most
+# packers append numbers/hex (".upx0", ".upx1", ".vmp0", ".themida0", ...).
+_PACKER_SECTION_HINTS = (
+    (".upx", "UPX"),
+    ("upx", "UPX"),
+    (".vmp", "VMProtect"),
+    (".themida", "Themida"),
+    (".enigma", "Enigma Protector"),
+    (".aspack", "ASPack"),
+    (".adata", "ASPack"),
+    (".pec", "PECompact"),
+    (".petite", "Petite"),
+    (".mpress", "MPRESS"),
+    (".nsp", "NsPack"),
+    (".y0da", "yoda"),
+    (".taz", "PESpin"),
+)
+
+
+def _inspect_pe(path: str) -> dict:
+    """pefile-based triage. Architecture, sections (with entropy + R/W/X),
+    imports per DLL, exports, Authenticode signature presence, imphash, and a
+    packer hint based on section names."""
+    if not _HAVE_PEFILE:
+        return {"error": "pefile not installed. Run: pip install pefile"}
+    try:
+        pe = _pefile.PE(path, fast_load=False)
+    except Exception as e:
+        return {"error": f"pefile parse failed: {type(e).__name__}: {e}"}
+
+    fh = pe.FILE_HEADER
+    machine = getattr(fh, "Machine", 0)
+    arch = _PE_MACHINE.get(machine, f"0x{machine:04x}")
+    is_dll = bool(getattr(fh, "Characteristics", 0) & 0x2000)
+
+    ts = int(getattr(fh, "TimeDateStamp", 0) or 0)
+    try:
+        from datetime import datetime, timezone
+        ts_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+    except Exception:
+        ts_iso = None
+
+    sections = []
+    packers = set()
+    for s in pe.sections:
+        try:
+            name = s.Name.rstrip(b"\x00").decode("utf-8", "replace")
+        except Exception:
+            name = repr(s.Name)
+        ch = int(getattr(s, "Characteristics", 0) or 0)
+        flags = ""
+        flags += "R" if ch & 0x40000000 else "-"
+        flags += "W" if ch & 0x80000000 else "-"
+        flags += "X" if ch & 0x20000000 else "-"
+        try:
+            ent = round(float(s.get_entropy()), 3)
+        except Exception:
+            ent = 0.0
+        sections.append({
+            "name": name,
+            "vsize": int(getattr(s, "Misc_VirtualSize", 0) or 0),
+            "rsize": int(getattr(s, "SizeOfRawData", 0) or 0),
+            "vaddr": f"0x{int(getattr(s, 'VirtualAddress', 0) or 0):08x}",
+            "flags": flags,
+            "entropy": ent,
+        })
+        low = name.lower()
+        for pfx, label in _PACKER_SECTION_HINTS:
+            if low.startswith(pfx):
+                packers.add(label)
+                break
+
+    imports: dict[str, list[str]] = {}
+    danger_hits: list[str] = []
+    if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+        for entry in pe.DIRECTORY_ENTRY_IMPORT:
+            try:
+                dll = entry.dll.decode("utf-8", "replace")
+            except Exception:
+                dll = repr(entry.dll)
+            sym_list: list[str] = []
+            for imp in entry.imports:
+                if not imp.name:
+                    if imp.ordinal is not None:
+                        sym_list.append(f"#{imp.ordinal}")
+                    continue
+                try:
+                    sym = imp.name.decode("utf-8", "replace")
+                except Exception:
+                    sym = repr(imp.name)
+                sym_list.append(sym)
+                base = sym.split("@", 1)[0]
+                if base in _GHIDRA_DANGER_IMPORTS:
+                    danger_hits.append(f"{dll}:{sym}")
+            imports[dll] = sym_list
+
+    exports: list[str] = []
+    if hasattr(pe, "DIRECTORY_ENTRY_EXPORT"):
+        for sym in pe.DIRECTORY_ENTRY_EXPORT.symbols:
+            if sym.name:
+                try:
+                    exports.append(sym.name.decode("utf-8", "replace"))
+                except Exception:
+                    exports.append(repr(sym.name))
+            elif sym.ordinal is not None:
+                exports.append(f"#{sym.ordinal}")
+
+    # Authenticode signature lives in DATA_DIRECTORY[4] (IMAGE_DIRECTORY_ENTRY_SECURITY).
+    sig_size = 0
+    sig_present = False
+    try:
+        sec_dir = pe.OPTIONAL_HEADER.DATA_DIRECTORY[4]
+        sig_size = int(getattr(sec_dir, "Size", 0) or 0)
+        sig_present = sig_size > 0
+    except Exception:
+        pass
+
+    try:
+        imphash = pe.get_imphash() or ""
+    except Exception:
+        imphash = ""
+
+    out = {
+        "format": "PE32+" if machine == 0x8664 else "PE32",
+        "arch": arch,
+        "is_dll": is_dll,
+        "compile_timestamp": ts,
+        "compile_time_iso": ts_iso,
+        "section_count": len(sections),
+        "sections": sections,
+        "import_dll_count": len(imports),
+        "import_total": sum(len(v) for v in imports.values()),
+        "imports": {k: v[:200] for k, v in list(imports.items())[:50]},
+        "export_count": len(exports),
+        "exports": exports[:200],
+        "signed": sig_present,
+        "signature_size": sig_size,
+        "imphash": imphash,
+        "packer_hints": sorted(packers),
+        "dangerous_imports": sorted(set(danger_hits))[:50],
+    }
+    try:
+        pe.close()
+    except Exception:
+        pass
+    return out
+
+
+_ELF_MACHINE = {
+    0x03: "i386", 0x3E: "x86_64", 0x28: "ARM", 0xB7: "AArch64",
+    0x08: "MIPS", 0x14: "PowerPC", 0x15: "PowerPC64",
+    0xF3: "RISC-V", 0x16: "S390", 0x32: "IA-64",
+}
+
+
+def _inspect_elf(path: str) -> dict:
+    """pyelftools-based triage. Falls back to a minimal stdlib header parse if
+    pyelftools isn't installed, so the user still gets *something* useful."""
+    if _HAVE_PYELFTOOLS:
+        try:
+            with open(path, "rb") as f:
+                ef = _ELFFile(f)
+                hdr = ef.header
+                ei_class = int(hdr["e_ident"]["EI_CLASS"])  # 1=32, 2=64
+                ei_data = str(hdr["e_ident"]["EI_DATA"])
+                emach = int(hdr["e_machine"]) if isinstance(hdr["e_machine"], int) else 0
+                arch = _ELF_MACHINE.get(emach, str(hdr["e_machine"]))
+                etype = str(hdr["e_type"])
+
+                sections = []
+                for s in ef.iter_sections():
+                    try:
+                        flags = int(s["sh_flags"])
+                    except Exception:
+                        flags = 0
+                    sf = ""
+                    sf += "A" if flags & 0x2 else "-"
+                    sf += "W" if flags & 0x1 else "-"
+                    sf += "X" if flags & 0x4 else "-"
+                    sections.append({
+                        "name": s.name,
+                        "size": int(s["sh_size"]),
+                        "addr": f"0x{int(s['sh_addr']):08x}",
+                        "flags": sf,
+                    })
+
+                needed: list[str] = []
+                imports: list[str] = []
+                danger_hits: list[str] = []
+                dyn = ef.get_section_by_name(".dynamic")
+                if dyn is not None:
+                    try:
+                        for tag in dyn.iter_tags():
+                            if getattr(tag, "entry", None) and tag.entry.d_tag == "DT_NEEDED":
+                                needed.append(tag.needed)
+                    except Exception:
+                        pass
+                dynsym = ef.get_section_by_name(".dynsym")
+                if dynsym is not None:
+                    try:
+                        for sym in dynsym.iter_symbols():
+                            if not sym.name:
+                                continue
+                            # imports are SHN_UNDEF entries (referenced, not defined).
+                            try:
+                                if sym["st_shndx"] == "SHN_UNDEF":
+                                    imports.append(sym.name)
+                                    base = sym.name.split("@", 1)[0]
+                                    if base in _GHIDRA_DANGER_IMPORTS:
+                                        danger_hits.append(sym.name)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                return {
+                    "format": "ELF64" if ei_class == 2 else "ELF32",
+                    "arch": arch,
+                    "endian": "little" if "LSB" in ei_data else "big",
+                    "type": etype,
+                    "section_count": len(sections),
+                    "sections": sections[:80],
+                    "needed": needed[:80],
+                    "import_count": len(imports),
+                    "imports": imports[:300],
+                    "dangerous_imports": sorted(set(danger_hits))[:50],
+                }
+        except Exception as e:
+            return {"error": f"pyelftools parse failed: {type(e).__name__}: {e}"}
+
+    # Fallback: parse just the ELF header by hand. No imports/sections, but at
+    # least format/arch are useful.
+    try:
+        import struct
+        with open(path, "rb") as f:
+            ident = f.read(16)
+            rest = f.read(20)
+        if ident[:4] != b"\x7fELF":
+            return {"error": "not an ELF file"}
+        ei_class = ident[4]
+        ei_data = ident[5]
+        endian = "<" if ei_data == 1 else ">"
+        e_type, e_machine = struct.unpack(endian + "HH", rest[:4])
+        return {
+            "format": "ELF64" if ei_class == 2 else "ELF32",
+            "arch": _ELF_MACHINE.get(e_machine, f"0x{e_machine:04x}"),
+            "endian": "little" if ei_data == 1 else "big",
+            "type": f"0x{e_type:04x}",
+            "note": "pyelftools not installed; install with: pip install pyelftools",
+        }
+    except Exception as e:
+        return {"error": f"ELF header parse failed: {type(e).__name__}: {e}"}
+
+
+def tool_binary_inspect(args: dict) -> dict:
+    """Fast triage for native binaries. Returns format/arch/sections/imports/
+    exports/entropy + packer + signing hints. Use this BEFORE ghidra_analyze
+    to decide whether a deeper look is worth ~30s of analysis time."""
+    path, err = _fw_check_path(args.get("path") or "")
+    if err:
+        return err
+    if not os.path.isfile(path):
+        return {"error": f"not a file: {path}"}
+
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        return {"error": f"stat failed: {e}"}
+
+    # Cap on the bytes used for whole-file entropy + magic detection. Header
+    # sniff only needs the first 4; entropy is best run against the entire
+    # file but on huge installers we'd rather sample. 16 MiB is plenty.
+    SAMPLE_CAP = 16 * 1024 * 1024
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+            f.seek(0)
+            if size <= SAMPLE_CAP:
+                whole = f.read()
+            else:
+                # Sample head + middle + tail so packed-section gradients don't
+                # average out to a flat number.
+                third = SAMPLE_CAP // 3
+                a = f.read(third)
+                f.seek(size // 2)
+                b = f.read(third)
+                f.seek(max(0, size - third))
+                c = f.read(third)
+                whole = a + b + c
+    except OSError as e:
+        return {"error": f"read failed: {e}"}
+
+    fmt = _detect_format(head)
+    file_ent = _shannon_entropy(whole)
+
+    import hashlib
+    md5 = hashlib.md5(whole).hexdigest() if size <= SAMPLE_CAP else None
+    sha1 = hashlib.sha1(whole).hexdigest() if size <= SAMPLE_CAP else None
+    sha256 = hashlib.sha256(whole).hexdigest() if size <= SAMPLE_CAP else None
+
+    base: dict = {
+        "path": path,
+        "size": size,
+        "format": fmt,
+        "file_entropy": file_ent,
+        "md5": md5,
+        "sha1": sha1,
+        "sha256": sha256,
+        "sampled": size > SAMPLE_CAP,
+    }
+
+    if fmt == "PE":
+        base["details"] = _inspect_pe(path)
+    elif fmt == "ELF":
+        base["details"] = _inspect_elf(path)
+    elif fmt in ("MACHO", "MACHO_FAT"):
+        base["details"] = {
+            "note": "Mach-O detailed parsing not implemented yet; format detected via magic bytes.",
+        }
+    else:
+        base["details"] = {"note": "unrecognized format (no MZ/ELF/Mach-O magic)."}
+
+    # Risk summary the model can render directly.
+    risks: list[str] = []
+    det = base.get("details") or {}
+    if isinstance(det, dict):
+        if det.get("dangerous_imports"):
+            risks.append(f"dangerous imports: {', '.join(det['dangerous_imports'][:8])}")
+        if det.get("packer_hints"):
+            risks.append(f"packer hint: {', '.join(det['packer_hints'])}")
+        if fmt == "PE" and det.get("signed") is False:
+            risks.append("unsigned PE")
+        for s in (det.get("sections") or [])[:20]:
+            if isinstance(s, dict) and s.get("entropy", 0) >= 7.0 and s.get("name"):
+                risks.append(f"high-entropy section {s['name']} ({s['entropy']})")
+    if file_ent >= 7.5:
+        risks.append(f"whole-file entropy {file_ent} (likely packed/encrypted)")
+    base["risk_summary"] = risks
+    return base
+
+
+# --- YARA -----------------------------------------------------------------
+# A small bundled rule set. Keep these intentionally narrow — false positives
+# train models to ignore the tool. Each rule uses `condition: <N> of them`
+# with N small enough to fire on real samples but big enough that a benign
+# binary with one match doesn't trigger.
+_DEFAULT_YARA_RULES = r"""
+rule SuspiciousURL
+{
+    meta:
+        description = "URL referencing pastebin/discord/tempfile hosts often used by stagers"
+        author = "accuretta"
+    strings:
+        $u1 = "pastebin.com/raw/" nocase ascii wide
+        $u2 = "hastebin.com/raw/" nocase ascii wide
+        $u3 = "ghostbin.com/paste/" nocase ascii wide
+        $u4 = "discordapp.com/api/webhooks/" nocase ascii wide
+        $u5 = "transfer.sh/" nocase ascii wide
+        $u6 = "anonfile.com/" nocase ascii wide
+        $u7 = "ngrok.io/" nocase ascii wide
+        $u8 = "duckdns.org" nocase ascii wide
+        $u9 = "bit.ly/" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule HardcodedIPv4
+{
+    meta:
+        description = "Possible hardcoded IPv4 (loose; many false positives in version strings)"
+    strings:
+        $ip = /[^0-9.]([1-9][0-9]{0,2}\.){3}[1-9][0-9]{0,2}[^0-9.]/ ascii wide
+    condition:
+        #ip > 3
+}
+
+rule WindowsRegistryAutorun
+{
+    meta:
+        description = "Strings referencing Windows Run/RunOnce autorun keys"
+    strings:
+        $r1 = "Software\\Microsoft\\Windows\\CurrentVersion\\Run" nocase ascii wide
+        $r2 = "Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce" nocase ascii wide
+        $r3 = "Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" nocase ascii wide
+        $r4 = "Software\\Microsoft\\Active Setup\\Installed Components" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule SuspiciousAPIs
+{
+    meta:
+        description = "Combination of process-injection / persistence APIs"
+    strings:
+        $a1 = "VirtualAllocEx" ascii wide
+        $a2 = "WriteProcessMemory" ascii wide
+        $a3 = "CreateRemoteThread" ascii wide
+        $a4 = "NtUnmapViewOfSection" ascii wide
+        $a5 = "SetWindowsHookExA" ascii wide
+        $a6 = "SetWindowsHookExW" ascii wide
+        $a7 = "QueueUserAPC" ascii wide
+        $a8 = "RtlCreateUserThread" ascii wide
+    condition:
+        3 of them
+}
+
+rule PowerShellEncoded
+{
+    meta:
+        description = "powershell -enc / -encodedcommand invocation"
+    strings:
+        $p1 = "powershell" nocase ascii wide
+        $p2 = " -enc " nocase ascii wide
+        $p3 = " -encodedcommand" nocase ascii wide
+        $p4 = "-NoProfile -ExecutionPolicy Bypass" nocase ascii wide
+    condition:
+        $p1 and any of ($p2, $p3, $p4)
+}
+
+rule Base64ExecutableHeader
+{
+    meta:
+        description = "Base64-encoded PE (MZ) header — common dropper pattern"
+    strings:
+        // 'MZ' followed by the standard PE preamble (\x90\x00\x03), b64-encoded
+        $b1 = "TVqQAAMAAAAEAAAA" ascii wide
+        $b2 = "TVoAAAAAAAAAAAAA" ascii wide
+        // 'MZ\x00\x00' / common DOS stub variants
+        $b3 = "TVoAAAAA" ascii wide
+    condition:
+        any of them
+}
+
+rule MimikatzStrings
+{
+    meta:
+        description = "Strings characteristic of mimikatz"
+    strings:
+        $m1 = "sekurlsa::logonpasswords" nocase ascii wide
+        $m2 = "kerberos::list" nocase ascii wide
+        $m3 = "lsadump::sam" nocase ascii wide
+        $m4 = "mimikatz" nocase ascii wide
+        $m5 = "gentilkiwi" nocase ascii wide
+    condition:
+        2 of them
+}
+"""
+
+
+def _yara_compile(rules_arg: str) -> tuple[Any, dict | None]:
+    """Compile YARA rules from one of: (a) absolute path to a .yar/.yara file,
+    (b) inline source string, or (c) empty/missing -> bundled defaults.
+    Returns (rules_object, error_or_None)."""
+    if not _HAVE_YARA:
+        return None, {"error": "yara-python not installed. Run: pip install yara-python"}
+    src = (rules_arg or "").strip()
+    try:
+        if src and os.path.isfile(src):
+            return _yara.compile(filepath=src), None
+        if src:
+            return _yara.compile(source=src), None
+        return _yara.compile(source=_DEFAULT_YARA_RULES), None
+    except Exception as e:
+        return None, {"error": f"yara compile failed: {type(e).__name__}: {e}"}
+
+
+def _yara_string_to_dict(item) -> dict:
+    """Adapt to both new (yara-python >=4.3 StringMatch object) and old (tuple)
+    match string formats so the tool keeps working across versions."""
+    # New API: StringMatch(identifier, instances=[StringMatchInstance(offset, matched_data, ...)])
+    try:
+        ident = getattr(item, "identifier", None)
+        if ident is not None:
+            instances = []
+            for inst in getattr(item, "instances", []) or []:
+                try:
+                    matched = getattr(inst, "matched_data", b"") or b""
+                    if isinstance(matched, bytes):
+                        try:
+                            mtxt = matched.decode("utf-8", "replace")
+                        except Exception:
+                            mtxt = matched.hex()
+                    else:
+                        mtxt = str(matched)
+                    instances.append({
+                        "offset": int(getattr(inst, "offset", 0) or 0),
+                        "match": mtxt[:200],
+                    })
+                except Exception:
+                    continue
+            return {"identifier": ident, "instances": instances[:10]}
+    except Exception:
+        pass
+    # Old tuple API: (offset, identifier, matched_bytes)
+    try:
+        off, ident, matched = item
+        if isinstance(matched, bytes):
+            try:
+                mtxt = matched.decode("utf-8", "replace")
+            except Exception:
+                mtxt = matched.hex()
+        else:
+            mtxt = str(matched)
+        return {"identifier": ident, "instances": [{"offset": int(off), "match": mtxt[:200]}]}
+    except Exception:
+        return {"identifier": str(item), "instances": []}
+
+
+def tool_yara_scan(args: dict) -> dict:
+    """Scan a file or directory with YARA. By default uses a bundled rule set;
+    pass rules='C:\\path\\to\\my.yar' to point at a custom file or rules='rule X
+    {...}' to compile inline source. Returns matches grouped per file."""
+    if not _HAVE_YARA:
+        return {"error": "yara-python not installed. Run: pip install yara-python"}
+
+    target_arg = args.get("path") or ""
+    if not target_arg:
+        return {"error": "missing path"}
+
+    path, err = _fw_check_path(target_arg)
+    if err:
+        return err
+
+    rules_arg = (args.get("rules") or "").strip()
+    # If `rules` looks like a filesystem path inside the workspace, sandbox it.
+    if rules_arg and ("\\" in rules_arg or "/" in rules_arg or rules_arg.lower().endswith((".yar", ".yara"))):
+        rp, rerr = _fw_check_path(rules_arg, must_exist=True)
+        if rerr:
+            return rerr
+        rules_arg = rp
+
+    rules, cerr = _yara_compile(rules_arg)
+    if cerr:
+        return cerr
+
+    recursive = bool(args.get("recursive", False))
+    max_files = int(args.get("max_files") or 200)
+    if max_files < 1:
+        max_files = 1
+    if max_files > 5000:
+        max_files = 5000
+    timeout = int(args.get("timeout") or 60)
+    if timeout < 1:
+        timeout = 1
+    if timeout > 600:
+        timeout = 600
+    max_size = int(args.get("max_size") or 200 * 1024 * 1024)  # 200 MiB
+    if max_size < 1024:
+        max_size = 1024
+
+    targets: list[str] = []
+    if os.path.isfile(path):
+        targets.append(path)
+    elif os.path.isdir(path):
+        if recursive:
+            for root, _dirs, files in os.walk(path):
+                for n in files:
+                    targets.append(os.path.join(root, n))
+                    if len(targets) >= max_files:
+                        break
+                if len(targets) >= max_files:
+                    break
+        else:
+            try:
+                for n in os.listdir(path):
+                    fp = os.path.join(path, n)
+                    if os.path.isfile(fp):
+                        targets.append(fp)
+                    if len(targets) >= max_files:
+                        break
+            except OSError as e:
+                return {"error": f"listdir failed: {e}"}
+    else:
+        return {"error": f"not a file or directory: {path}"}
+
+    results: list[dict] = []
+    rules_fired: set[str] = set()
+    files_with_hits = 0
+    skipped = 0
+    for fp in targets:
+        try:
+            sz = os.path.getsize(fp)
+        except OSError:
+            skipped += 1
+            continue
+        if sz > max_size:
+            skipped += 1
+            continue
+        try:
+            matches = rules.match(fp, timeout=timeout)
+        except Exception as e:
+            results.append({"path": fp, "error": f"{type(e).__name__}: {e}"})
+            continue
+        if not matches:
+            continue
+        files_with_hits += 1
+        ms_out = []
+        for m in matches:
+            try:
+                tags = list(getattr(m, "tags", []) or [])
+                meta = dict(getattr(m, "meta", {}) or {})
+                ns = getattr(m, "namespace", "")
+                strings = []
+                for s in getattr(m, "strings", []) or []:
+                    strings.append(_yara_string_to_dict(s))
+                rules_fired.add(m.rule)
+                ms_out.append({
+                    "rule": m.rule,
+                    "namespace": ns,
+                    "tags": tags,
+                    "meta": meta,
+                    "strings": strings[:20],
+                })
+            except Exception:
+                continue
+        results.append({"path": fp, "matches": ms_out})
+
+    return {
+        "target": path,
+        "rules_source": (
+            "custom_file" if (rules_arg and os.path.isfile(rules_arg))
+            else ("inline" if rules_arg else "bundled_defaults")
+        ),
+        "files_scanned": len(targets) - skipped,
+        "files_skipped": skipped,
+        "files_with_matches": files_with_hits,
+        "rules_fired": sorted(rules_fired),
+        "matches": results,
+    }
+
+
 TOOLS: dict[str, dict] = {
     "list_directory": {
         "description": "List files and folders at a path. Use to explore.",
@@ -3230,6 +4933,123 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_disasm_at,
     },
+    "scan_apk": {
+        "description": (
+            "Static APK security scan. Pure-Python, no approval needed. Returns ONE "
+            "structured report: package metadata, signing certs, permissions (with "
+            "dangerous ones flagged), exported components, dex/native lib inventory, "
+            "and a regex-driven secret hunt over DEX + .so files (AWS/GCP/Firebase "
+            "keys, JWTs, GitHub PATs, Stripe keys, hardcoded URLs, etc). Lead any "
+            "APK investigation with this tool — the risk_summary field surfaces the "
+            "highlights. Use decompile_apk afterward for class-level reading."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to .apk in the workspace"},
+                "deep": {"type": "boolean", "description": "Scan every file, not just dex/so. Slower; useful for hunting secrets in assets."},
+                "max_secret_findings": {"type": "integer", "description": "default 200, max 2000"},
+                "max_string_bytes": {"type": "integer", "description": "byte cap for the secret hunt across all files combined. default 8MB, max 64MB"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_scan_apk,
+    },
+    "ghidra_analyze": {
+        "description": (
+            "Static analysis of a native binary (ELF/PE/Mach-O/.so/.dll/.exe) "
+            "using Ghidra in-process via pyghidra. Returns format, imports, "
+            "exports, defined strings, function listing, and a risk_summary "
+            "flagging dangerous imports (strcpy/system/dlopen/etc). Pass "
+            "function='name' + decompile=true to get C-like pseudocode for "
+            "one function. Requires JDK 21+, pyghidra, and a Ghidra install "
+            "(settings.ghidra_path or $GHIDRA_INSTALL_DIR). Pairs well with "
+            "scan_apk + decompile_apk: use this on .so files inside APKs that "
+            "JADX can't decompile."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the binary in the workspace"},
+                "function": {"type": "string", "description": "Optional function name to target. Required for decompile=true."},
+                "decompile": {"type": "boolean", "description": "Decompile the named function to C-like pseudocode. Default false."},
+                "max_strings": {"type": "integer", "description": "Cap on defined strings returned. default 200, max 2000"},
+                "max_functions": {"type": "integer", "description": "Cap on function listing entries. default 200, max 5000"},
+                "timeout": {"type": "integer", "description": "Hard timeout in seconds. default 240, max 1800"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_ghidra_analyze,
+    },
+    "decompile_apk": {
+        "description": (
+            "Decompile an APK to readable Java sources using JADX (external tool). "
+            "Writes output into a sandbox subdirectory next to the APK. Requires "
+            "Java 11+ and JADX installed; set settings.jadx_path if jadx is not "
+            "on PATH. Destructive — gated by approval. After decompile, navigate "
+            "with read_file / grep_files. Pass classes='com.target.foo.*' to "
+            "scope output and finish faster on large APKs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to .apk in the workspace"},
+                "dest_name": {"type": "string", "description": "Single folder name (no slashes). Default: <apk_stem>_jadx"},
+                "overwrite": {"type": "boolean", "description": "Replace dest if it exists. Default false."},
+                "classes": {"type": "string", "description": "Optional jadx --include-classes glob, e.g. 'com.target.auth.*'"},
+                "deobf": {"type": "boolean", "description": "Run jadx --deobf to rename obfuscated symbols. Default true."},
+                "show_bad_code": {"type": "boolean", "description": "Keep classes that partially failed to decompile. Default true."},
+                "no_res": {"type": "boolean", "description": "Skip resources, source-only. Faster on huge APKs."},
+                "no_src": {"type": "boolean", "description": "Skip source, resources-only."},
+                "timeout": {"type": "integer", "description": "Hard timeout in seconds. default 600, max 3600"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_decompile_apk,
+    },
+    "binary_inspect": {
+        "description": (
+            "Fast PE/ELF/Mach-O triage. Returns format, arch, sections (with "
+            "entropy + R/W/X flags), imports per DLL, exports, packer hints, "
+            "Authenticode signature presence, hashes, and a risk_summary that "
+            "flags dangerous imports + high-entropy sections. Pure-Python, no "
+            "approval, ~50ms on a typical exe. Lead native-binary investigations "
+            "with this — only escalate to ghidra_analyze if the triage looks "
+            "interesting (unsigned + dangerous imports + packed section)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the binary in the workspace"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_binary_inspect,
+    },
+    "yara_scan": {
+        "description": (
+            "Scan a file or directory with YARA pattern rules. Defaults to a "
+            "bundled rule set covering common malware tells (suspicious URLs, "
+            "registry autorun keys, process-injection API combos, mimikatz, "
+            "base64-encoded MZ headers, encoded PowerShell). Pass rules='/abs/"
+            "path/to/my.yar' to use a custom rule file, or rules='rule X {...}' "
+            "for inline source. Pure-Python (libyara), no approval. Pair with "
+            "binary_inspect for triage."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File or directory to scan, in the workspace"},
+                "rules": {"type": "string", "description": "Optional .yar/.yara file path or inline rule source. Empty = bundled defaults."},
+                "recursive": {"type": "boolean", "description": "Walk subdirectories. Default false."},
+                "max_files": {"type": "integer", "description": "Cap files scanned. default 200, max 5000"},
+                "max_size": {"type": "integer", "description": "Skip files larger than this many bytes. default 200 MiB."},
+                "timeout": {"type": "integer", "description": "Per-file YARA timeout in seconds. default 60, max 600"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_yara_scan,
+    },
 }
 
 
@@ -3246,6 +5066,8 @@ _ANALYSIS_TOOL_NAMES = {
     "strings_dump", "grep_files", "disasm_at",
     "binwalk_scan", "find_files", "file_inspect", "read_bytes",
     "network_snapshot",
+    "scan_apk", "decompile_apk", "ghidra_analyze",
+    "binary_inspect", "yara_scan",
 }
 # Per-tool result caps for the model context. Tools not listed here use the
 # defaults in _tool_result_cap() below (16K for analysis tools, 4K otherwise).
@@ -3253,8 +5075,23 @@ _ANALYSIS_TOOL_NAMES = {
 # entries + UDP listeners + top remotes/processes + DNS); 16K chops it
 # mid-JSON and leaves the model with garbage, which is why it spirals into
 # random run_powershell calls trying to recover.
+# scan_apk on a real-world APK with deep:true and 200 findings + a few
+# hundred exported components routinely lands in the 30-40 KB range.
 _TOOL_RESULT_CAPS = {
     "network_snapshot": 32000,
+    "scan_apk": 48000,
+    "decompile_apk": 24000,
+    # ghidra_analyze: imports + exports + 200 strings + decompiled function
+    # is comfortably under 32K on real-world .so files. Bump to 40K so a
+    # decompile of a chunky function isn't truncated mid-statement.
+    "ghidra_analyze": 40000,
+    # binary_inspect: header + sections + imports easily lands at 20-30 KB on
+    # a real-world dll with hundreds of imports. Bump to 32K so the model
+    # actually sees the full import table instead of a chopped sample.
+    "binary_inspect": 32000,
+    # yara_scan: matches across a directory can balloon. 32K is enough room
+    # for a full report on ~50 hit files without trampling the rest of context.
+    "yara_scan": 32000,
 }
 
 def _tool_result_cap(name: str) -> int:
@@ -3342,6 +5179,45 @@ TOOL_ALIASES = {
     "inspect_network": "network_snapshot",
     "list_connections": "network_snapshot",
     "sniff_network": "network_snapshot",
+    # APK analysis aliases — models naturally reach for these synonyms.
+    "apk_scan": "scan_apk",
+    "analyze_apk": "scan_apk",
+    "apk_analyze": "scan_apk",
+    "android_scan": "scan_apk",
+    "apk_security_scan": "scan_apk",
+    "apk_decompile": "decompile_apk",
+    "jadx": "decompile_apk",
+    "jadx_decompile": "decompile_apk",
+    "decompile": "decompile_apk",
+    # Ghidra aliases — models reach for "ghidra" as a verb regularly.
+    "ghidra": "ghidra_analyze",
+    "pyghidra": "ghidra_analyze",
+    "analyze_native": "ghidra_analyze",
+    "analyze_binary": "ghidra_analyze",
+    "decompile_native": "ghidra_analyze",
+    "disasm_binary": "ghidra_analyze",
+    "static_analyze": "ghidra_analyze",
+    # binary_inspect aliases — models reach for these synonyms when triaging
+    # native binaries before deciding whether to call ghidra_analyze.
+    "pe_info": "binary_inspect",
+    "pe_inspect": "binary_inspect",
+    "elf_info": "binary_inspect",
+    "elf_inspect": "binary_inspect",
+    "binary_info": "binary_inspect",
+    "exe_inspect": "binary_inspect",
+    "inspect_binary": "binary_inspect",
+    "inspect_pe": "binary_inspect",
+    "inspect_elf": "binary_inspect",
+    "file_format": "binary_inspect",
+    "binary_triage": "binary_inspect",
+    "triage_binary": "binary_inspect",
+    # yara_scan aliases.
+    "yara": "yara_scan",
+    "scan_yara": "yara_scan",
+    "yara_match": "yara_scan",
+    "malware_scan": "yara_scan",
+    "ioc_scan": "yara_scan",
+    "ioc_match": "yara_scan",
 }
 
 
@@ -4726,6 +6602,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, get_settings())
         if p == "/api/workspace":
             return self._send_json(200, get_workspace())
+        if p == "/api/link_preview":
+            # Hover-preview support for clickable links inside chat bubbles.
+            # Lightweight: fetches the page, pulls Open Graph + <title>, caches
+            # in-process. Frontend lazy-loads on first hover, so the cost is
+            # paid only when the user actually wants the preview.
+            qs = urllib.parse.parse_qs(parsed.query)
+            url = (qs.get("url", [""])[0] or "").strip()
+            if not url:
+                return self._send_json(400, {"error": "url required"})
+            return self._send_json(200, fetch_link_preview(url))
         if p == "/api/ctx-stats":
             s = get_settings()
             cap = int(s.get("num_ctx") or 32768)

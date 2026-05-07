@@ -96,6 +96,66 @@ Picking a model in Settings (with a VRAM tier set) automatically runs a tuner th
 
 > **\*Caveat — bigger context is not always better.** Some models will happily autoload very large contexts (200K+ tokens) when their GGUF reports it as supported. The math says it fits in VRAM, but attention itself slows down as the context window grows even before the conversation fills it. If you care more about tokens-per-second than maximum context, **lower the context window manually in Settings** for that specific use case. On a 16 GB card with a small MoE, **32K-65K is usually the sweet spot for sustained 30+ tok/s**. Bigger ctx = more headroom for long documents and conversations; smaller ctx = faster generation. Pick the one that matches what you are actually doing.
 
+## APK static analysis
+
+Drop an `.apk` into a workspace folder and the model can audit it directly through two tools the bridge ships with.
+
+* **`scan_apk(path)`** — pure-Python triage. No external tools, no approval needed. Returns one structured report: package metadata, signing certs (subject/issuer/sha256, no key bytes), all requested permissions with the dangerous ones flagged, exported components, dex / native-lib / asset inventory, and a regex-driven secret hunt over DEX + `.so` files. The hunt covers AWS access keys, Google API keys, Firebase URLs, JWTs, GitHub PATs, Stripe keys, PEM private key blocks, hardcoded HTTP endpoints, IPv4 literals, and a generic `(api[_-]?key|secret|password|token)=…` assignment pattern. Findings are deduped and long literals are redacted in the middle so you see enough context to judge severity without echoing live tokens. A `risk_summary` field at the top surfaces the headlines (debuggable=true, allowBackup, cleartext traffic, dangerous permission count, exported component count, possible secret kinds) so the model can lead with what matters.
+* **`decompile_apk(path, classes?)`** — shells out to [JADX](https://github.com/skylot/jadx). Writes Java sources + resources into a sandbox subdirectory next to the APK. Destructive (writes a folder), gated by an approval card. After it finishes, the model navigates the output with the existing `read_file` and `grep_files` tools. Pass `classes='com.target.foo.*'` to scope the decompile and finish faster on big APKs.
+
+**Optional dependencies** (the tools degrade gracefully when these aren't installed):
+
+```
+pip install androguard            # full manifest / permissions / signing parse for scan_apk
+# JADX 1.5+              -> https://github.com/skylot/jadx/releases (needs Java 11+)
+```
+
+If JADX isn't on `PATH`, set `jadx_path` in `data/settings.json` to the full path of `jadx.bat` (Windows) or `jadx` (Linux/macOS). Without androguard, `scan_apk` falls back to ZIP-only mode — file inventory and the secret hunt still run, but manifest/permissions are skipped and the report's `notes` field tells you what to install.
+
+> **\*Real-world caveat.** Modern APKs ship R8-obfuscated. Decompiled output looks like `a.a.b.c` until you let JADX deobf-rename. Native libraries are increasingly where the interesting logic hides (auth, DRM) and static analysis only goes so far without dynamic instrumentation. `scan_apk` is the right first move every time — it gives the model a structured findings report to reason over instead of a raw ZIP. `decompile_apk` is for when you've narrowed down which class actually matters.
+
+## Native binary analysis (Ghidra)
+
+For the parts of an APK that JADX can't help with — the `.so` files in `lib/` — the bridge ships a `ghidra_analyze` tool that runs Ghidra in-process via [pyghidra](https://pypi.org/project/pyghidra/). Same idea as `scan_apk`: the model gets a structured JSON report (format, imports, exports, defined strings, function listing, dangerous-import flags) plus optional C-like decompilation of one named function. Works on any native binary, not just `.so` — also `.exe`, `.dll`, ELF, Mach-O, raw firmware.
+
+* **`ghidra_analyze(path, function?, decompile?)`** — gated by approval, returns the report. With `function='SSL_verify'` and `decompile=true`, you get pseudocode for that one function. With no `function`, you get the metadata + risk summary so the model can pick where to dig.
+
+**Setup:**
+
+```
+pip install pyghidra
+# Ghidra (CLI bundle)  -> https://github.com/NationalSecurityAgency/ghidra/releases
+# JDK 21+ (Temurin)    -> https://adoptium.net
+```
+
+Then point the bridge at your Ghidra install root in `data/settings.json`:
+
+```json
+"ghidra_path": "C:\\Program Files\\ghidra_12.0.4_PUBLIC"
+```
+
+(Or set `$GHIDRA_INSTALL_DIR`. Auto-detects common Windows install patterns if neither is set.)
+
+**Performance.** First call boots the JVM (~10s) and then runs Ghidra auto-analysis (~30s on a typical `.so`). The JVM stays loaded for the lifetime of the bridge process, so calls 2..N reuse it — analysis on a small file usually finishes in under 5 seconds. Memory cost: ~600 MB resident once started, regardless of how many binaries you've analyzed. If you don't plan to use it, leave `pyghidra` uninstalled and the import is a no-op.
+
+> **\*Why Ghidra.** Ghidra has the best free decompiler (the one that ships with IDA Pro costs a four-figure license) and Python automation through pyghidra means we don't need a custom Ghidra script per query. The risk surface (`strcpy`, `system`, `dlopen`, `mprotect`, `ptrace`, etc.) is flagged automatically, so the model can lead with "this binary loads code at runtime" or "this binary disables write-protection on memory pages" without having to enumerate imports manually.
+
+## Fast triage (binary_inspect) and pattern matching (yara_scan)
+
+Ghidra is the right tool for "show me the pseudocode of this function" — it's the wrong tool for "is this exe worth looking at." Two lighter tools cover that gap and run in milliseconds instead of half a minute, so the model can use them as a default starting point and only escalate when the triage looks interesting.
+
+* **`binary_inspect(path)`** — pure-Python PE/ELF/Mach-O triage via [pefile](https://pypi.org/project/pefile/) and [pyelftools](https://pypi.org/project/pyelftools/). Returns format, architecture, sections (with R/W/X flags and per-section Shannon entropy), the full import table grouped by DLL, exports, Authenticode signature presence, imphash, and packer hints (`.upx`, `.vmp`, `.themida`, `.aspack`, etc.) — plus a `risk_summary` that combines dangerous imports + high-entropy sections + unsigned-PE into a single short list. Approval-free, ~50 ms on a typical exe. The model uses this to decide whether `ghidra_analyze` is worth ~30 s.
+
+* **`yara_scan(path, rules?, recursive?)`** — pattern matching over a file or directory using [yara-python](https://pypi.org/project/yara-python/). Ships with a small bundled rule set covering common malware tells (autorun registry keys, process-injection API combos, `mimikatz` strings, base64-encoded MZ headers, encoded PowerShell, suspicious paste/discord/ngrok URLs). Pass `rules='C:\\path\\to\\my.yar'` to point at a custom rule file, or pass an inline rule source string for ad-hoc queries. Approval-free, single-file scans land in tens of milliseconds.
+
+**Setup:**
+
+```
+pip install pefile pyelftools yara-python
+```
+
+All three are pure-Python wheels with prebuilt binaries on PyPI — no compiler dance, no JDK, no extra config. If any of them is missing the tool returns a friendly "install with: pip install …" message instead of crashing the bridge.
+
 ## Who this is for
 
 * People who want a Cursor or Antigravity style experience without the subscription
