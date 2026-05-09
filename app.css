@@ -235,17 +235,65 @@ button { font-family: inherit; }
 .status-pill.off .dot { background: var(--fg-faint); animation: none; }
 @keyframes pulse { 50% { opacity: 0.4; } }
 
+/* Context gauge — sidebar lower-left.
+   Compact card with a small label "context", the live percentage, and the
+   ring sitting on the right. The card itself uses the raised surface and
+   a 1px border so it reads as a deliberate widget rather than a floating
+   pill. Color shifts to warning/danger via --accent-fg + token swap. */
 .ctx-gauge {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 4px 10px 4px 4px; border-radius: 999px;
-  background: var(--bg-inset); color: var(--fg-muted);
-  font-size: 10px; font-weight: 500; letter-spacing: 0.04em;
-  width: fit-content;
-  transition: color 0.2s;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  width: 100%;
+  transition: color 0.2s, border-color 0.2s;
 }
-.ctx-gauge svg { display: block; }
-.ctx-gauge.warn { color: #d6a851; }
-.ctx-gauge.crit { color: #d66a5a; }
+.ctx-gauge::before {
+  content: "context";
+  grid-column: 1;
+  grid-row: 1;
+  font-family: var(--font-sans);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  font-weight: 500;
+}
+.ctx-gauge .ctx-gauge-label {
+  grid-column: 1;
+  grid-row: 2;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  line-height: 1;
+}
+.ctx-gauge svg {
+  display: block;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--accent);
+  width: 28px; height: 28px;
+}
+.ctx-gauge.warn {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+}
+.ctx-gauge.warn svg { color: var(--warning); }
+.ctx-gauge.warn .ctx-gauge-label { color: var(--warning); }
+.ctx-gauge.crit {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+.ctx-gauge.crit svg { color: var(--danger); }
+.ctx-gauge.crit .ctx-gauge-label { color: var(--danger); }
 #ctx-gauge-arc { transition: stroke-dashoffset 0.4s ease-out; }
 
 /* FAQ modal (reuses drawer semantics but centered) */
@@ -432,6 +480,155 @@ button { font-family: inherit; }
   box-shadow: var(--shadow-inset);
 }
 .bubble pre code { background: transparent; padding: 0; }
+
+/* ============================================================
+   Chat code card — fenced blocks render as a single flush card
+   with a line-number gutter and floating Copy / Preview buttons
+   in the top-right. No header bar — the action cluster IS the
+   header. Pair with .bubble-code-only on the parent agent bubble
+   to drop the outer padding/background so the card becomes the
+   message surface (matches the seamless "code is the bubble"
+   look). For mixed-content replies the bubble keeps its chrome.
+   ============================================================ */
+.bubble pre.code-card {
+  position: relative;
+  padding: 0;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: none;
+  margin: 10px 0;
+}
+
+/* Body — line-numbered grid via CSS counters.
+   Gutter is a fixed-width column on the left, body grows. */
+.code-card-body {
+  display: block;
+  /* Top padding reserves vertical space for the floating action cluster
+     (~28px tall). Without this, line 1 collides with the Copy/Preview
+     buttons in the top-right corner. */
+  padding: 36px 12px 12px 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg);
+  background: transparent;
+  counter-reset: code-line;
+}
+.code-card-body .code-line {
+  display: block;
+  position: relative;
+  padding-left: 52px;
+  counter-increment: code-line;
+  white-space: pre;
+}
+.code-card-body .code-line::before {
+  content: counter(code-line);
+  position: absolute;
+  left: 0;
+  width: 40px;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* Action cluster — floats top-right, padding so it doesn't crowd line 1. */
+.code-card-actions {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 2;
+}
+.cc-act {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  /* Solid surface so the button never bleeds into the code beneath it
+     (line 1 used to read through). Matches the card surface so it still
+     looks "floating" without a hard chip outline. */
+  background: var(--bg-sunken);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out);
+}
+.cc-act i { font-size: 13px; }
+.bubble pre.code-card:hover .cc-act { opacity: 1; }
+.cc-act:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bg-inset) 80%, transparent);
+  border-color: var(--border);
+}
+.cc-act.copied {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 50%, transparent);
+  opacity: 1;
+}
+
+/* Code-only bubble: when the agent reply is essentially a single code
+   card, peel away the bubble chrome so the card extends to the edge.
+   The rounded corners now belong to the card, not the bubble. */
+.bubble.agent.bubble-code-only {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  border-top-left-radius: 0;
+}
+.bubble.agent.bubble-code-only > pre.code-card {
+  margin: 0;
+}
+
+/* User bubble: keep the lilac wash, but darken the inner card slightly so
+   the gutter still reads. */
+.bubble.user pre.code-card {
+  background: rgba(20,20,18,0.10) !important;
+  border-color: rgba(20,20,18,0.16);
+}
+.bubble.user .code-card-body { color: var(--off-black) !important; }
+.bubble.user .code-card-body .code-line::before { color: rgba(20,20,18,0.40); }
+.bubble.user .cc-act { color: rgba(20,20,18,0.60); }
+.bubble.user .cc-act:hover { color: var(--off-black); background: rgba(20,20,18,0.08); border-color: rgba(20,20,18,0.18); }
+
+/* ---- syntax tokens ----
+   Light mode = warmer earth-tone palette (matches ember accent).
+   Dark mode  = cooler set tuned against the navy backdrop. */
+.tok-keyword  { color: #B45A2F; font-weight: 600; }
+.tok-string   { color: #6A8A3B; }
+.tok-number   { color: #8E72D1; }
+.tok-comment  { color: var(--fg-faint); font-style: italic; }
+.tok-fn       { color: #2C7CB0; }
+.tok-tag      { color: #B45A2F; font-weight: 600; }
+.tok-attr     { color: #C5611C; }
+.tok-var      { color: #8E72D1; }
+.tok-decorator{ color: #C5611C; }
+.tok-punct    { color: var(--fg-muted); }
+
+[data-theme="dark"] .tok-keyword  { color: #C8A8FF; }
+[data-theme="dark"] .tok-string   { color: #B5E29B; }
+[data-theme="dark"] .tok-number   { color: #F4A261; }
+[data-theme="dark"] .tok-comment  { color: var(--fg-faint); }
+[data-theme="dark"] .tok-fn       { color: #7CC0FF; }
+[data-theme="dark"] .tok-tag      { color: #C8A8FF; }
+[data-theme="dark"] .tok-attr     { color: #F4B57A; }
+[data-theme="dark"] .tok-var      { color: #F4A261; }
+[data-theme="dark"] .tok-decorator{ color: #F4B57A; }
+[data-theme="dark"] .tok-punct    { color: var(--fg-muted); }
 .bubble-meta {
   font-size: 11px;
   letter-spacing: 0;
@@ -1019,18 +1216,62 @@ button { font-family: inherit; }
   cursor: pointer;
 }
 .chip:hover { color: var(--fg); border-color: var(--border-strong); }
-.chip.on { background: var(--accent-subtle); color: #5A3A1E; border-color: var(--safety-2); }
+.chip.on {
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
 [data-theme="dark"] .chip.on,
 [data-theme="dark"] .toolbar-overflow-menu .chip.on,
-[data-theme="dark"] .preview-overflow-menu .chip.on { color: #ffd9b5; }
+[data-theme="dark"] .preview-overflow-menu .chip.on {
+  color: var(--accent-hover);
+}
 .composer-spacer { flex: 1; }
 .model-pill {
-  font-size: 10px; padding: 3px 8px;
-  background: var(--off-black); color: var(--off-white);
-  border-radius: 3px; letter-spacing: 0.04em;
-  border: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px; font-weight: 500;
+  padding: 4px 10px 4px 8px;
+  background: var(--bg-inset);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  letter-spacing: 0.01em;
+  cursor: pointer;
   max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
+.model-pill::before {
+  content: "";
+  width: 6px; height: 6px; border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  flex-shrink: 0;
+}
+.model-pill:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border-strong));
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent-subtle) 60%, var(--bg-inset));
+}
+/* "vision capable" eye chip — appended to the model pill when llama-server
+   was booted with --mmproj. Tinted with the success/mint hue so it reads as
+   an additive capability rather than a warning. */
+.model-pill .model-pill-vision {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  margin-left: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mint-3) 18%, transparent);
+  color: var(--mint-3);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .model-pill .model-pill-vision,
+.dark .model-pill .model-pill-vision {
+  background: color-mix(in srgb, var(--mint-3) 22%, transparent);
+  color: var(--mint);
+}
+.model-pill .model-pill-vision i { line-height: 1; }
 .composer-input {
   width: 100%; background: transparent; border: none;
   padding: 6px 4px;
@@ -1052,7 +1293,7 @@ button { font-family: inherit; }
 }
 .btn:hover { border-color: var(--border-strong); }
 .btn:active { transform: scale(0.98); }
-.btn.accent { background: var(--accent); color: #fff; border-color: transparent; }
+.btn.accent { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 .btn.accent:hover { background: var(--accent-hover); }
 .btn.ghost { background: transparent; }
 .btn.danger { color: var(--danger); border-color: var(--border); }
@@ -1112,9 +1353,11 @@ button { font-family: inherit; }
 .preview-overflow-menu .mm-item i { font-size: 14px; color: var(--fg-muted); flex-shrink: 0; }
 .preview-head .title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; }
 .preview-head .title i { color: var(--fg-muted); }
+/* URL pill above the preview: hidden — the version chips below + the
+   preview-foot meta line already convey what's loaded. JS still updates
+   its textContent (harmless when display:none). */
 .preview-head .url-pill {
-  font-size: 10px; padding: 2px 8px;
-  background: var(--bg-inset); border-radius: 3px; color: var(--fg-muted);
+  display: none;
 }
 .preview-head .grow { flex: 1; }
 
@@ -1151,7 +1394,11 @@ button { font-family: inherit; }
   white-space: nowrap;
 }
 .version-chip:hover { border-color: var(--border-strong); color: var(--fg); }
-.version-chip.active { background: var(--accent-subtle); border-color: var(--safety-2); color: #5A3A1E; }
+.version-chip.active {
+  background: var(--accent-subtle);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: var(--accent-hover);
+}
 .version-chip .n { font-weight: 600; }
 .version-bar .spacer { flex: 1; }
 
@@ -1294,35 +1541,262 @@ button { font-family: inherit; }
 .sw.on::after { left: 18px; }
 
 /* ============================================================
-   Approval modal
+   Approval card (rebuilt: header / details / preview / info / actions)
    ============================================================ */
-.approval-stack { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 10px; z-index: var(--z-toast); max-width: 440px; }
+.approval-stack {
+  position: fixed; right: 20px; bottom: 20px;
+  display: flex; flex-direction: column; gap: 10px;
+  z-index: var(--z-toast);
+  max-width: 460px;
+}
 .approval {
   background: var(--bg-raised);
-  border: 1px solid var(--safety-2);
-  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
   box-shadow: var(--shadow-lg);
-  padding: 12px 14px;
-  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 16px 12px;
+  display: flex; flex-direction: column;
+  gap: 10px;
   animation: slide-in var(--dur-base) var(--ease-out);
+  font-family: var(--font-sans);
+  color: var(--fg);
 }
 @keyframes slide-in { from { transform: translateY(20px); opacity: 0; } }
-.approval .head { display: flex; align-items: center; gap: 8px; }
-.approval .head i { color: var(--safety-2); }
-.approval .head .t { font-family: var(--font-display); font-size: 13px; letter-spacing: -0.01em; flex: 1; }
-.approval .head .tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-muted); background: var(--bg-inset); padding: 2px 6px; border-radius: 3px; }
-.approval .cmd {
-  background: var(--off-black);
-  color: var(--off-white);
-  font-family: var(--font-sans); font-size: 11px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  max-height: 200px; overflow: auto;
-  white-space: pre-wrap; word-break: break-all;
-  box-shadow: var(--shadow-inset);
+
+/* ---- header ---- */
+.approval .appr-head {
+  display: flex; align-items: center; gap: 10px;
 }
-.approval .actions { display: flex; gap: 6px; }
-.approval .actions .btn { flex: 1; justify-content: center; }
+.approval .appr-head-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.approval .appr-head-icon svg { width: 18px; height: 18px; display: block; }
+.approval.kind-destructive .appr-head-icon {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+.approval .appr-head-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+}
+.approval .appr-head-tag {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+/* ---- subtitle ---- */
+.approval .appr-sub {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin: -4px 0 0;
+}
+
+/* ---- section labels ---- */
+.approval .appr-section-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin-top: 4px;
+}
+
+/* ---- details rows ---- */
+.approval .appr-details {
+  display: flex; flex-direction: column;
+  gap: 0;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px 0;
+}
+.approval .appr-detail-row {
+  display: grid;
+  grid-template-columns: 28px 90px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.approval .appr-detail-row:last-child { border-bottom: 0; }
+.approval .appr-detail-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.approval .appr-detail-icon svg { width: 16px; height: 16px; display: block; }
+.approval.kind-destructive .appr-detail-icon { color: var(--danger); }
+.approval .appr-detail-key {
+  color: var(--fg);
+  font-weight: 500;
+}
+.approval .appr-detail-val {
+  color: var(--fg-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* ---- command preview (syntax-tinted) ---- */
+.approval .appr-cmd {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg);
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval .appr-cmd code { background: transparent; padding: 0; font-family: inherit; font-size: inherit; color: inherit; }
+.approval .appr-cmd-fn   { color: var(--accent); font-weight: 600; }
+.approval .appr-cmd-arg  { color: var(--fg); }
+.approval .appr-cmd-val  { color: var(--accent); }
+.approval .appr-cmd-shell { color: var(--fg); white-space: pre-wrap; }
+
+/* ---- info bubble ---- */
+.approval .appr-info {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--accent-subtle);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 10px;
+  align-items: flex-start;
+}
+.approval .appr-info-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.approval .appr-info-icon svg { width: 16px; height: 16px; display: block; }
+.approval .appr-info-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.approval .appr-info-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.approval .appr-info-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+
+/* ---- actions ---- */
+.approval .appr-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+.approval .appr-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px;
+  padding: 10px 14px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color      var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform   var(--dur-fast) var(--ease-out);
+}
+.approval .appr-btn svg { width: 15px; height: 15px; display: block; }
+.approval .appr-btn:active { transform: translateY(1px); }
+.approval .appr-btn-deny {
+  background: var(--bg-raised);
+  color: var(--danger);
+  border-color: var(--border-strong);
+}
+.approval .appr-btn-deny:hover {
+  background: var(--danger-subtle);
+  border-color: var(--danger);
+}
+.approval .appr-btn-approve {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+.approval .appr-btn-approve:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ---- advanced details disclosure ---- */
+.approval .appr-advanced {
+  margin-top: 2px;
+}
+.approval .appr-advanced summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  user-select: none;
+  padding: 4px 0;
+}
+.approval .appr-advanced summary::-webkit-details-marker { display: none; }
+.approval .appr-advanced summary:hover { color: var(--fg); }
+.approval .appr-advanced-chevron {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: currentColor;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.approval .appr-advanced-chevron svg { width: 14px; height: 14px; display: block; }
+.approval .appr-advanced[open] .appr-advanced-chevron { transform: rotate(180deg); }
+.approval .appr-advanced-body {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow: auto;
+}
+
+/* ---- inline-in-chat row avatar tint ---- */
+.approval-avatar {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.approval-avatar svg { width: 18px; height: 18px; display: block; }
 
 /* ============================================================
    Mobile
@@ -1582,13 +2056,13 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
 
 /* ---- cumulative token readout ---- */
 .tok-total {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 10px;
-  color: var(--fg-faint);
-  padding-left: 8px;
-  margin-left: 4px;
-  border-left: 1px solid var(--border-subtle);
-  letter-spacing: 0.02em;
+  color: var(--fg-muted);
+  padding: 0 4px;
+  letter-spacing: 0.04em;
+  align-self: flex-end;
+  margin-top: -2px;
 }
 
 /* ---- viewport presets in preview toolbar ---- */
@@ -1680,22 +2154,26 @@ pre.code-block,
 .markdown pre { position: relative; }
 .copy-code {
   position: absolute;
-  top: 6px; right: 6px;
+  top: 4px; right: 6px;
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 7px;
   font-size: 10px; font-family: var(--font-mono);
   color: var(--fg-muted);
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-subtle);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 5px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
 pre.code-block:hover .copy-code,
 .markdown pre:hover .copy-code { opacity: 1; }
-.copy-code:hover { color: var(--fg); border-color: var(--border); }
-.copy-code.copied { color: var(--ok, #2f9e44); border-color: var(--ok, #2f9e44); opacity: 1; }
+.copy-code:hover {
+  color: var(--fg);
+  border-color: var(--border);
+  background: var(--bg-sunken);
+}
+.copy-code.copied { color: var(--success); border-color: var(--success); opacity: 1; }
 
 /* ---- icon-only action row under the last assistant bubble ---- */
 .bubble-actions {
@@ -1854,62 +2332,6 @@ pre.code-block:hover .copy-code,
 }
 .mem-empty code { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
 
-/* ---- approval preview (dry-run rows) ---- */
-.approval .pv {
-  display: flex; flex-direction: column; gap: 3px;
-  margin: 6px 0 8px;
-  padding: 6px 8px;
-  background: var(--bg-sunken);
-  border-left: 2px solid var(--accent);
-  border-radius: 0 5px 5px 0;
-}
-.approval .pv-row {
-  display: flex; align-items: baseline; gap: 8px;
-  font-size: 11.5px;
-}
-.approval .pv-k {
-  flex: none; width: 72px;
-  font-family: var(--font-sans);
-  font-size: 10px;
-  color: var(--fg-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.approval .pv-v {
-  flex: 1;
-  font-family: var(--font-sans);
-  color: var(--fg);
-  word-break: break-word;
-  white-space: pre-wrap;
-}
-.approval.kind-destructive .pv { border-left-color: var(--danger, #c6392f); }
-.approval.kind-desktop .pv { border-left-color: var(--warn, #c08b16); }
-.approval .cmd-details { margin-top: 6px; font-size: 11.5px; }
-.approval .cmd-details summary {
-  cursor: pointer;
-  color: var(--fg-muted);
-  font-size: 11px;
-  padding: 2px 0;
-  list-style: none;
-  user-select: none;
-}
-.approval .cmd-details summary::-webkit-details-marker { display: none; }
-.approval .cmd-details summary::before {
-  content: "\25b8  ";
-  display: inline-block;
-}
-.approval .cmd-details[open] summary::before { content: "\25be  "; }
-.approval .cmd-details pre {
-  margin: 4px 0 0;
-  padding: 6px 8px;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border-subtle);
-  border-radius: 5px;
-  overflow-x: auto;
-}
-
 /* ---- version chip re-run button ---- */
 .version-wrap {
   display: inline-flex;
@@ -1988,11 +2410,48 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
 .chip { transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
 .chip:hover { background: var(--bg-inset); }
 
-/* composer: a touch more breathing room and a softer focus ring */
-.composer { padding: 10px 12px 12px; gap: 10px; border-radius: 14px; }
+/* composer: a touch more breathing room and a softer focus ring.
+   Bumped vertical breathing room and gave the body a flatter pill so the
+   chip strip + textarea + foot row feel like one continuous capsule. */
+.composer {
+  padding: 12px 14px 12px;
+  gap: 8px;
+  border-radius: 22px;
+}
 .composer:focus-within { box-shadow: 0 0 0 4px var(--accent-subtle); }
-.composer-input { padding: 8px 4px; line-height: 1.55; }
+.composer-input { padding: 8px 6px; line-height: 1.55; }
 .composer-wrap { padding: 16px 14px 20px; }
+
+/* Foot row: hint sits on the left, action cluster (model pill / stop / send)
+   sits on the right. Send becomes a flat-out circle with the accent fill. */
+.composer-foot { gap: 10px; }
+.composer-foot .composer-foot-actions {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-left: auto;
+}
+.composer-foot #btn-send {
+  width: 32px; height: 32px; padding: 0;
+  border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  background: var(--accent); color: var(--accent-fg);
+  border: none;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+.composer-foot #btn-send:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateY(-1px);
+}
+.composer-foot #btn-send:active { transform: translateY(0) scale(0.96); }
+.composer-foot #btn-send i { font-size: 14px; }
+.composer-foot #btn-send span { display: none; }
+.composer-foot #btn-stop {
+  height: 28px; padding: 0 12px;
+  border-radius: 999px;
+  font-size: 11px;
+}
 
 /* topbar: a little more vertical space */
 .topbar { transition: background-color var(--dur-base) var(--ease-out); }

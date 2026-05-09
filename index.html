@@ -128,14 +128,16 @@
               </div>
             </div>
             <span class="composer-spacer"></span>
-            <button class="model-pill" id="model-pill">select model</button>
           </div>
           <div class="image-tray hidden" id="image-tray"></div>
           <textarea class="composer-input" id="composer-input" rows="2" placeholder="ask, build, or instruct…"></textarea>
           <div class="composer-foot">
             <span class="composer-hint">⌘⏎ send · Shift⏎ newline</span>
-            <button class="btn danger hidden" id="btn-stop"><i class="ph ph-stop-circle"></i>Stop</button>
-            <button class="btn accent" id="btn-send"><i class="ph-bold ph-arrow-up"></i>Send</button>
+            <div class="composer-foot-actions">
+              <button class="model-pill" id="model-pill" title="Click to change model"><span class="model-pill-name">select model</span></button>
+              <button class="btn danger hidden" id="btn-stop"><i class="ph ph-stop-circle"></i><span>Stop</span></button>
+              <button class="btn accent" id="btn-send" title="Send (⌘⏎)"><i class="ph-bold ph-arrow-up"></i><span>Send</span></button>
+            </div>
           </div>
         </div>
       </div>
@@ -169,6 +171,7 @@
         <div class="preview-overflow-menu" id="preview-overflow-menu">
           <button class="mm-item" id="btn-screenshot" title="Screenshot the preview as PNG"><i class="ph ph-camera"></i><span>Screenshot</span></button>
           <button class="mm-item" id="btn-export-project" title="Export as .zip (index.html + any companion files)"><i class="ph ph-package"></i><span>Export project</span></button>
+          <button class="mm-item" id="btn-save-to-workspace" title="Save current preview to a workspace folder (no model call)"><i class="ph ph-folder-plus"></i><span>Save to workspace</span></button>
           <button class="mm-item" id="btn-save-snapshot" title="Save preview to data/snapshots/"><i class="ph ph-floppy-disk"></i><span>Save snapshot</span></button>
           <button class="mm-item" id="btn-copy-dataurl" title="Copy as data: URL (portable, no server needed)"><i class="ph ph-link-simple"></i><span>Copy as data URL</span></button>
           <button class="mm-item" id="btn-toggle-console" title="Toggle console pane"><i class="ph ph-terminal"></i><span>Toggle console</span></button>
@@ -336,8 +339,19 @@
       <span class="hint" id="set-model-hint">selecting a model loads it into llama-server.</span>
     </div>
     <div class="form-row">
-      <label>Vision model</label>
+      <label>Vision model <i class="ph ph-info" title="Fallback OCR/describe model. Used only when the chat model has no vision projector loaded."></i></label>
       <select id="set-vision"></select>
+      <span class="hint">fallback only — used when the chat model has no mmproj loaded.</span>
+    </div>
+
+    <div class="form-row">
+      <label>Vision projector · mmproj <i class="ph ph-info" title="Path to the vision projector .gguf for the chat model. When set, llama-server boots with --mmproj and the model sees attached images natively (no round-trip through the small vision model)."></i></label>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="set-mmproj" placeholder="auto-detect from sibling .gguf, or paste a full path" style="flex:1;">
+        <button class="btn sm" id="btn-mmproj-detect" title="Look for an mmproj-*.gguf next to the chat model"><i class="ph ph-magnifying-glass"></i></button>
+        <button class="btn sm" id="btn-mmproj-clear" title="Clear (disable native vision)"><i class="ph ph-x"></i></button>
+      </div>
+      <span class="hint" id="set-mmproj-hint">leave blank to auto-detect a sibling <code>mmproj-*.gguf</code>. requires a model relaunch.</span>
     </div>
 
     <div class="form-row">

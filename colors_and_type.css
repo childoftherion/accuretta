@@ -70,6 +70,13 @@
   --ember-2: #E8813A;
   --ember-3: #C5611C;
 
+  /* Accent purple — dark-mode counterpart to the ember accent.
+     Tuned so the mid value reads clearly on the cool dark surfaces
+     (#1a1a1d / #222227) without going neon. */
+  --purple:   #B8A3F2;
+  --purple-2: #9B7EE8;
+  --purple-3: #7A5AD9;
+
   /* ---- OFF-WHITE / OFF-BLACK NEUTRALS ---- */
   --off-white:   #F6F4EF;  /* warm paper */
   --off-white-2: #EDEAE2;
@@ -204,10 +211,14 @@
   --border-strong: #38383e;
   --border-subtle: #1f1f23;
 
-  --accent:        var(--ember);
-  --accent-hover:  #F7B884;
-  --accent-subtle: rgba(244,162,97,0.14);
-  --accent-fg:     var(--off-black);
+  /* Dark mode accent flips to purple — light mode keeps ember.
+     Mid value is the "send button" purple; subtle is the focus-ring
+     wash. accent-fg is white because purple at this brightness pairs
+     better with white than with off-black. */
+  --accent:        var(--purple-2);
+  --accent-hover:  var(--purple);
+  --accent-subtle: rgba(155,126,232,0.16);
+  --accent-fg:     #FFFFFF;
 
   --success-subtle: rgba(106,196,154,0.14);
   --warning-subtle: rgba(232,211,112,0.14);

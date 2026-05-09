@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -345,6 +347,14 @@ DEFAULT_SETTINGS = {
     "models_dir": "",               # folder containing .gguf files (set via Settings -> Models folder)
     "model_path": "",               # full path to the currently loaded .gguf
     "llama_bin": "",                # override path to llama-server.exe (auto-detected if blank)
+    "mmproj_path": "",              # full path to a vision multimodal projector (.gguf). When set,
+                                    # llama-server boots with --mmproj <path> and the chat handler
+                                    # sends images straight to the loaded model instead of routing
+                                    # through the small OCR/vision side-model. Leave blank for
+                                    # text-only models or when you've already pruned the vision
+                                    # tower from the GGUF to fit more layers in VRAM.
+    "mmproj_auto": True,            # auto-pick a sibling .mmproj.gguf (or *mmproj*.gguf) next to
+                                    # the chosen model when mmproj_path is empty.
     # llama-server tuning (all map to llama-server CLI flags). Restart required.
     "n_cpu_moe": 0,                 # --n-cpu-moe: how many MoE experts to keep on CPU. 0 = all on GPU.
                                     # The killer flag for fitting big MoE models (Qwen3 35B-A3B, GLM 4.7) on small VRAM.
@@ -437,10 +447,28 @@ def _approx_tokens(text: str) -> int:
 
 def _count_msg_tokens(msg: dict) -> int:
     content = msg.get("content") or ""
+    # Vision turns: content is a list like [{type:"text",text:...},
+    # {type:"image_url",image_url:{url:"data:image/png;base64,..."}}].
+    # Text parts count normally; each image is a flat ~600-token estimate
+    # (llama.cpp's mmproj typically expands a 336x336 patch grid into roughly
+    # that many vision tokens — close enough for budgeting).
+    if isinstance(content, list):
+        text_total = 0
+        image_count = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text_total += _approx_tokens(part.get("text") or "")
+            elif part.get("type") == "image_url":
+                image_count += 1
+        text_tokens = text_total + image_count * 600
+    else:
+        text_tokens = _approx_tokens(content)
     # tool_call JSON is also text the model sees
     tcs = msg.get("tool_calls") or []
     extra = json.dumps(tcs, ensure_ascii=False) if tcs else ""
-    return _approx_tokens(content) + _approx_tokens(extra) + 4  # role overhead
+    return text_tokens + _approx_tokens(extra) + 4  # role overhead
 
 
 def truncate_messages(msgs: list[dict], max_tokens: int, reserve: int = 256) -> list[dict]:
@@ -1052,6 +1080,113 @@ def tool_list_directory(args: dict) -> dict:
     return resp
 
 
+# Cap on extracted PDF text. Most readable PDFs land between 5 KB and 200 KB
+# of plain text; this ceiling matches the 64 KB binary cap used elsewhere so
+# the model isn't drowned in a 500-page contract.
+_PDF_TEXT_CAP = 64 * 1024
+
+
+def _extract_pdf_text(path: str) -> dict:
+    """Pull a text rendering out of a PDF for the model to read.
+    Strategy:
+      1. Try pypdf — pure-Python, ships in most envs, fast for text PDFs.
+      2. Try pdfplumber — better at preserving table-ish layouts when present.
+      3. Bail with a clear error pointing at install + scanned-PDF caveat.
+    Scanned (image-only) PDFs have no embedded text layer; the extractor
+    will return an empty string and we flag that explicitly so the model
+    knows to suggest OCR instead of pretending the file was empty."""
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        try:
+            # very old envs sometimes only have PyPDF2 — same API
+            from PyPDF2 import PdfReader  # type: ignore
+        except Exception:
+            PdfReader = None  # type: ignore
+
+    pages_text: list[str] = []
+    page_count = 0
+    backend_used = ""
+    last_err = ""
+
+    if PdfReader is not None:
+        try:
+            reader = PdfReader(path)
+            page_count = len(reader.pages)
+            for i, page in enumerate(reader.pages):
+                try:
+                    t = page.extract_text() or ""
+                except Exception as e:
+                    t = f"[page {i + 1}: extraction error — {e}]"
+                if t.strip():
+                    pages_text.append(f"--- page {i + 1} ---\n{t.rstrip()}")
+                # short-circuit if we already blew the cap
+                if sum(len(p) for p in pages_text) > _PDF_TEXT_CAP:
+                    break
+            backend_used = "pypdf"
+        except Exception as e:
+            last_err = f"pypdf failed: {e}"
+
+    # If pypdf gave us nothing usable, try pdfplumber (better with tables).
+    if not pages_text:
+        try:
+            import pdfplumber  # type: ignore
+            with pdfplumber.open(path) as pdf:
+                page_count = len(pdf.pages)
+                for i, page in enumerate(pdf.pages):
+                    try:
+                        t = page.extract_text() or ""
+                    except Exception as e:
+                        t = f"[page {i + 1}: extraction error — {e}]"
+                    if t.strip():
+                        pages_text.append(f"--- page {i + 1} ---\n{t.rstrip()}")
+                    if sum(len(p) for p in pages_text) > _PDF_TEXT_CAP:
+                        break
+            backend_used = "pdfplumber"
+        except ImportError:
+            pass
+        except Exception as e:
+            last_err = (last_err + " · " if last_err else "") + f"pdfplumber failed: {e}"
+
+    if PdfReader is None and not backend_used:
+        return {
+            "error": (
+                "PDF text extraction needs pypdf. Install with:\n"
+                "  pip install pypdf\n"
+                "(optional, better for tables: pip install pdfplumber)"
+            )
+        }
+
+    text = "\n\n".join(pages_text).strip()
+    if not text:
+        # Empty extract usually means a scanned/image-only PDF, or the PDF
+        # was malformed. Either way the model needs to know it's not blank.
+        msg = (
+            f"[no extractable text — PDF appears to be scanned (image-only) "
+            f"or has no text layer; {page_count} page(s) found]"
+        )
+        if last_err:
+            msg += f"\n[extractor note: {last_err}]"
+        return {
+            "path": path,
+            "content": msg,
+            "truncated": False,
+            "size": os.path.getsize(path),
+            "pdf": {"pages": page_count, "backend": backend_used or "none", "empty": True},
+        }
+
+    truncated = len(text) > _PDF_TEXT_CAP
+    if truncated:
+        text = text[:_PDF_TEXT_CAP] + "\n\n[... PDF truncated to 64 KB ...]"
+    return {
+        "path": path,
+        "content": text,
+        "truncated": truncated,
+        "size": os.path.getsize(path),
+        "pdf": {"pages": page_count, "backend": backend_used, "empty": False},
+    }
+
+
 def tool_read_file(args: dict) -> dict:
     path = normalize_path(args.get("path") or "")
     if not path or not os.path.isfile(path):
@@ -1062,6 +1197,12 @@ def tool_read_file(args: dict) -> dict:
         return {"error": "path outside workspace. Add folder in Workspace panel."}
     if is_ignored(path):
         return {"error": f"path ignored by .accurettaignore: {path}"}
+    # PDFs are binary containers — reading the bytes as UTF-8 yields garbage
+    # ("unicode jumbles"). Route them through a dedicated extractor that
+    # returns the actual page text, page-numbered, with a clear note when
+    # the PDF is scanned/image-only and has no text layer at all.
+    if path.lower().endswith(".pdf"):
+        return _extract_pdf_text(path)
     try:
         raw = Path(path).read_bytes()
         if len(raw) > 64 * 1024:
@@ -1657,6 +1798,214 @@ def _link_preview_extract(html: str) -> dict:
     }
 
 
+# =====================================================================
+# Outbound HTTP — believable browser identity rotation.
+#
+# Cloudflare, Akamai, and most modern WAFs 403 anything that smells like a
+# script. Sending a single "Mozilla/5.0 ... accuretta/1.0" UA only gets us
+# past the laziest filters. Below is a small pool of REAL recent browser
+# fingerprints (UA + matching Sec-Ch-Ua + matching Accept-Language /
+# Accept-Encoding / Sec-Fetch-* headers — every header set was captured
+# from a fresh install of the corresponding browser, not stitched
+# together). _pick_profile() returns one at random; _browser_headers()
+# materializes it into a header dict; _open_with_rotation() handles the
+# 403/429 → swap-profile-and-retry loop.
+#
+# This is bot-detection mitigation, not bypass. Anything fingerprinting
+# TLS (JA3/JA4) or running JS challenges will still block us. It just
+# raises the bar enough that a lot of "first request gets 403" cases now
+# succeed on attempt 1 or 2.
+# =====================================================================
+
+# Each profile: family + ua + sec-ch-ua tuple (Chromium-only). Versions
+# updated 2025-Q2 — refresh quarterly to stay current. Mix of Win/Mac
+# desktop only; no mobile UAs because some sites serve a degraded m-dot
+# version that breaks our HTML parsers.
+_BROWSER_PROFILES = [
+    {
+        "family": "chrome", "platform": "Windows",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"Windows"',
+    },
+    {
+        "family": "chrome", "platform": "macOS",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"macOS"',
+    },
+    {
+        "family": "chrome", "platform": "Windows",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"Windows"',
+    },
+    {
+        "family": "edge", "platform": "Windows",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+        "sec_ch_ua": '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"Windows"',
+    },
+    {
+        "family": "edge", "platform": "Windows",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+        "sec_ch_ua": '"Microsoft Edge";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
+        "sec_ch_ua_platform": '"Windows"',
+    },
+    {
+        # Firefox doesn't send Sec-Ch-Ua — leaving those keys out is the point.
+        "family": "firefox", "platform": "Windows",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    },
+    {
+        "family": "firefox", "platform": "macOS",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:133.0) Gecko/20100101 Firefox/133.0",
+    },
+    {
+        "family": "firefox", "platform": "Linux",
+        "ua": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    },
+    {
+        # Safari also doesn't send Sec-Ch-Ua, and pins Accept-Encoding to gzip.
+        "family": "safari", "platform": "macOS",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+    },
+    {
+        "family": "safari", "platform": "macOS",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    },
+]
+
+# Per-host stickiness — once we find a profile that works for a given host
+# we keep using it for ~10 minutes so we don't re-roll the dice every
+# request and spike the host's "this UA changed mid-session" alarm.
+_PROFILE_LOCK = threading.Lock()
+_PROFILE_BY_HOST: dict[str, tuple[dict, float]] = {}
+_PROFILE_STICKY_TTL = 600.0  # seconds
+
+
+def _pick_profile(host: str | None = None, exclude: dict | None = None) -> dict:
+    """Pick a profile — sticky per-host when possible, random otherwise.
+    `exclude` lets callers ask for *anything but this one* on retry."""
+    now = time.time()
+    if host:
+        with _PROFILE_LOCK:
+            sticky = _PROFILE_BY_HOST.get(host)
+            if sticky and (now - sticky[1] < _PROFILE_STICKY_TTL) and sticky[0] is not exclude:
+                return sticky[0]
+    pool = [p for p in _BROWSER_PROFILES if p is not exclude] or _BROWSER_PROFILES
+    return random.choice(pool)
+
+
+def _remember_profile(host: str, profile: dict) -> None:
+    if not host:
+        return
+    with _PROFILE_LOCK:
+        _PROFILE_BY_HOST[host] = (profile, time.time())
+
+
+def _browser_headers(profile: dict, *, referer: str | None = None,
+                     accept_html: bool = True) -> dict:
+    """Materialize a profile + per-request bits into a real header dict.
+    Mimics what the named browser actually sends — wrong combinations
+    (e.g. Firefox + Sec-Ch-Ua) are a known fingerprint tell, so we only
+    add Sec-Ch-Ua headers for Chromium families."""
+    h: dict[str, str] = {
+        "User-Agent": profile["ua"],
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8"
+        ) if accept_html else "*/*",
+        "Accept-Language": random.choice([
+            "en-US,en;q=0.9",
+            "en-US,en;q=0.5",
+            "en-GB,en;q=0.9",
+            "en-US,en;q=0.8,fr;q=0.5",
+        ]),
+        # urllib does NOT auto-decompress, so we DON'T advertise gzip/br
+        # — otherwise we'd get binary garbage back. Identity-only here.
+        "Accept-Encoding": "identity",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site" if referer else "none",
+        "Sec-Fetch-User": "?1",
+        "Connection": "keep-alive",
+    }
+    if referer:
+        h["Referer"] = referer
+    if profile["family"] in ("chrome", "edge"):
+        h["Sec-Ch-Ua"] = profile["sec_ch_ua"]
+        h["Sec-Ch-Ua-Mobile"] = "?0"
+        h["Sec-Ch-Ua-Platform"] = profile["sec_ch_ua_platform"]
+    return h
+
+
+def _open_with_rotation(url: str, *, timeout: float = 15.0,
+                        max_bytes: int = 1024 * 1024,
+                        attempts: int = 3,
+                        accept_html: bool = True,
+                        referer: str | None = None,
+                        method: str | None = None,
+                        data: bytes | None = None,
+                        extra_headers: dict | None = None):
+    """Fetch a URL with browser-identity rotation + 403/429 retry.
+
+    Returns a tuple (status, content_type, raw_bytes, profile_used). Raises
+    on the *final* attempt's exception — earlier failures are swallowed
+    and re-tried with a fresh profile + small jittered backoff.
+
+    Per-host stickiness: once a profile works for a host, we reuse it for
+    `_PROFILE_STICKY_TTL` seconds. That keeps requests looking like one
+    user instead of "the user's UA changed three times in a row."
+    """
+    try:
+        host = urllib.parse.urlparse(url).netloc
+    except Exception:
+        host = ""
+
+    last_exc: Exception | None = None
+    tried: list[dict] = []
+    for attempt in range(max(1, attempts)):
+        profile = _pick_profile(host, exclude=tried[-1] if tried else None)
+        tried.append(profile)
+        headers = _browser_headers(profile, referer=referer, accept_html=accept_html)
+        if extra_headers:
+            headers.update(extra_headers)
+        try:
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = getattr(resp, "status", 200) or 200
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                raw = resp.read(max_bytes)
+                _remember_profile(host, profile)
+                return status, ctype, raw, profile
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            # 403 / 429 / 503 = "we don't like your shape" — rotate and retry.
+            # Other 4xx (404, 410, ...) won't be fixed by a different UA, so
+            # bail out immediately.
+            if e.code not in (401, 403, 405, 429, 503):
+                raise
+            # Drop this host's sticky profile — clearly didn't work.
+            with _PROFILE_LOCK:
+                _PROFILE_BY_HOST.pop(host, None)
+            # Small jittered sleep before the next try (avoids back-to-back
+            # spam patterns; also gives Cloudflare's edge a tick to forget).
+            time.sleep(0.4 + random.random() * 0.6)
+            continue
+        except Exception as e:
+            last_exc = e
+            # Network-level failures (DNS, timeout) probably won't be cured
+            # by a UA swap, but one retry doesn't cost much.
+            time.sleep(0.3 + random.random() * 0.4)
+            continue
+    # All attempts exhausted — re-raise the last error.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("fetch failed without a recorded exception")
+
+
 def fetch_link_preview(url: str) -> dict:
     """Fetch a URL, extract Open Graph / standard meta tags, return a small
     dict the frontend can render in a hover card. Cached per-process so a
@@ -1669,38 +2018,33 @@ def fetch_link_preview(url: str) -> dict:
             return cached
 
     try:
-        req = urllib.request.Request(url, headers={
-            # Mimic a real browser — some servers (medium, x.com) return 403
-            # for plain "Python-urllib" UAs. Accept text/* so we don't waste
-            # bandwidth on huge images/binaries.
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) accuretta/1.0",
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-            "Accept-Language": "en-US,en;q=0.7",
-        })
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            # Only parse text/html. For images / pdfs we return a minimal
-            # preview with hostname + content-type so the hover still says
-            # *something* useful.
-            if "text/html" not in ctype and "application/xhtml" not in ctype:
-                try:
-                    pu = urllib.parse.urlparse(url)
-                    host = pu.netloc
-                except Exception:
-                    host = ""
-                out = {
-                    "url": url,
-                    "host": host,
-                    "title": (url.rsplit("/", 1)[-1] or host),
-                    "description": ctype.split(";", 1)[0].strip() or "",
-                    "image": "",
-                    "site_name": host,
-                    "content_type": ctype,
-                }
-                with _LINK_PREVIEW_CACHE_LOCK:
-                    _LINK_PREVIEW_CACHE[url] = out
-                return out
-            raw = resp.read(256 * 1024)
+        # Browser-identity rotation w/ retry — see _open_with_rotation().
+        # Link previews are short-lived hover popovers, so 2 attempts max
+        # to keep the popover snappy.
+        _status, ctype, raw, _profile = _open_with_rotation(
+            url, timeout=8, max_bytes=256 * 1024, attempts=2, accept_html=True,
+        )
+        # Only parse text/html. For images / pdfs we return a minimal
+        # preview with hostname + content-type so the hover still says
+        # *something* useful.
+        if "text/html" not in ctype and "application/xhtml" not in ctype:
+            try:
+                pu = urllib.parse.urlparse(url)
+                host = pu.netloc
+            except Exception:
+                host = ""
+            out = {
+                "url": url,
+                "host": host,
+                "title": (url.rsplit("/", 1)[-1] or host),
+                "description": ctype.split(";", 1)[0].strip() or "",
+                "image": "",
+                "site_name": host,
+                "content_type": ctype,
+            }
+            with _LINK_PREVIEW_CACHE_LOCK:
+                _LINK_PREVIEW_CACHE[url] = out
+            return out
         # Decode best-effort. Many pages declare utf-8 even when they aren't,
         # which is fine since errors='replace' keeps the regexes happy.
         text = raw.decode("utf-8", errors="replace")
@@ -1743,9 +2087,11 @@ def tool_web_fetch(args: dict) -> dict:
     if not (url.startswith("http://") or url.startswith("https://")):
         return {"error": "url must start with http:// or https://"}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Accuretta/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read(1024 * 1024)
+        # 3 attempts with rotating browser identity — see _open_with_rotation().
+        # Most "first request 403'd" cases now succeed by attempt 2.
+        _status, _ctype, raw, _profile = _open_with_rotation(
+            url, timeout=20, max_bytes=1024 * 1024, attempts=3, accept_html=True,
+        )
         text = raw.decode("utf-8", errors="replace")
         clean = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
         clean = re.sub(r"<style[\s\S]*?</style>", " ", clean, flags=re.IGNORECASE)
@@ -1782,18 +2128,17 @@ def tool_web_search(args: dict) -> dict:
     max_results = max(1, min(max_results, 20))
     try:
         body = urllib.parse.urlencode({"q": q}).encode()
-        req = urllib.request.Request(
+        # DDG html endpoint is friendly but still 403s plain UAs occasionally.
+        # Pretend we navigated from the duckduckgo homepage so the Referer
+        # check (yes, they have one) passes.
+        _status, _ctype, raw, _profile = _open_with_rotation(
             "https://html.duckduckgo.com/html/",
-            data=body,
-            method="POST",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) accuretta/1.0",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "text/html",
-            },
+            timeout=15, max_bytes=2 * 1024 * 1024, attempts=3,
+            accept_html=True, referer="https://duckduckgo.com/",
+            method="POST", data=body,
+            extra_headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        with urllib.request.urlopen(req, timeout=15) as r:
-            html = r.read().decode("utf-8", errors="replace")
+        html = raw.decode("utf-8", errors="replace")
     except Exception as e:
         return {"error": f"search failed: {e}"}
     snippets = [_strip_tags(s) for s in _DDG_SNIPPET_RE.findall(html)]
@@ -4516,7 +4861,7 @@ TOOLS: dict[str, dict] = {
         "fn": tool_list_directory,
     },
     "read_file": {
-        "description": "Read a file from the workspace. Works on text, code, markdown, and binary files (returns best-effort decoded text).",
+        "description": "Read a file from the workspace. Works on text, code, markdown, and binary files (returns best-effort decoded text). PDFs are auto-extracted to plain text page-by-page (requires pypdf); scanned image-only PDFs return a notice instead of garbage.",
         "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -5850,12 +6195,49 @@ IDE_MULTIFILE_ADDENDUM = """IDE addendum — multi-file output is ENABLED:
 
 
 def build_system_prompt(include_tools: bool, chat_mode: str = "auto") -> str:
-    """Build a token-efficient system prompt. Target: < 1500 tokens total."""
+    """Build a token-efficient system prompt. Target: < 1500 tokens total.
+    The core is mode-aware: in IDE mode we strip ALL tool guidance so the
+    model doesn't hallucinate a write_file call wrapping the HTML it was
+    asked to produce — Qwen3 / DeepSeek-distilled families default to that
+    behavior the moment the prompt mentions tools or write_file."""
     settings = get_settings()
     parts = []
 
+    is_ide = (chat_mode == "ide") or (chat_mode == "auto" and not include_tools)
+
     # === CORE PROMPT (compact, always present) ===
-    core = f"""you are accuretta, a local agent on the user's machine.
+    if is_ide:
+        # IDE prompt. Tools ARE available (so "save that to disk" works), but
+        # the model must default to a bare ```html``` fence for design requests
+        # and never wrap that fence inside write_file — the fence alone is what
+        # populates the live preview pane.
+        core = f"""you are accuretta, a local agent on the user's machine.
+
+voice: precise, lowercase, no hype.
+
+mode: IDE — you build webpages and UIs. the user sees a live preview pane next to this chat that auto-updates from any ```html``` fence you emit.
+
+decide what to do based on what the user asked:
+
+(A) user wants a webpage / UI / component / mockup / visual artifact:
+    → reply with ONE complete HTML document inside a single ```html ... ``` fence (inline <style> and <script>). that's it. do NOT call write_file. the preview pane reads the fence directly.
+
+(B) user is chatting, greeting, asking a question, or asking for clarification:
+    → reply in normal prose. one or two sentences. do NOT invent a webpage out of "hello".
+
+(C) user explicitly asks for a file operation ("save that to disk", "read this file", "list the workspace"):
+    → call the appropriate tool ONCE (write_file / read_file / list_directory). then confirm in one short sentence. for write_file, pull the content from the previous turn's ```html``` block — do NOT regenerate it.
+
+formatting rules for the ```html``` fence:
+1. real characters only — real newlines, real quotes (").
+2. never JSON-escape: no literal \\n, \\t, or \\" sequences inside the fence.
+3. never wrap the fence inside a tool call. the bare fence IS the answer for case (A).
+
+tool format (only for case C): <tool_call>{{"name":"...","arguments":{{...}}}}</tool_call>
+
+status/thinking goes in <think>...</think> tags. the visible answer (prose, fence, or tool result confirmation) goes OUTSIDE think tags."""
+    else:
+        core = f"""you are accuretta, a local agent on the user's machine.
 
 voice: precise, lowercase, no hype.
 
@@ -5890,7 +6272,12 @@ keep responses tight."""
             parts.append("IDE mode:\n" + "\n".join(ide_add))
 
     # === TOOLS (compressed format) ===
-    if include_tools and chat_mode != "ide":
+    # IDE mode now includes the tool list too — the model needs to know
+    # write_file / read_file / list_directory exist for case (C) save requests.
+    # The IDE prompt above pins the default behavior (bare ```html``` fence)
+    # so just listing the tools doesn't trigger the wrap-everything-in-write_file
+    # regression we saw before.
+    if include_tools:
         tool_lines = ["tools:"]
         for name, t in _active_tools().items():
             params = t["parameters"].get("properties", {})
@@ -6361,15 +6748,106 @@ def _sanitize_messages_for_openai(msgs: list[dict]) -> list[dict]:
 HTML_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+\-]*)\s*\n([\s\S]*?)```", re.MULTILINE)
 
 
+def _maybe_unescape_json_html(html: str) -> str:
+    """Some local fine-tunes (especially Qwen3.6-Claude-distilled and other
+    JSON-trained chats) emit HTML inside their ```html fence already escaped
+    as a JSON string literal: real newlines become the two characters `\\n`,
+    real quotes become `\\"`, and so on. The browser then renders those
+    backslash-letter pairs as visible text in the preview iframe instead of
+    treating them as line breaks — the page comes out as one giant unstyled
+    blob with `\\n` peppered through it.
+    Heuristic: lots of `\\n` sequences, very few real newlines → it's encoded.
+    Decode by reversing the standard JSON string escapes (handle `\\\\` first
+    via a sentinel so we don't double-process backslashes)."""
+    if not html or "\\" not in html:
+        return html
+    real_newlines = html.count("\n")
+    escaped_n = html.count("\\n")
+    escaped_quote = html.count('\\"')
+    # Need clear evidence of encoding: many escape sequences AND few real
+    # newlines. A normal HTML file has dozens of real newlines, so even one
+    # `\\n` next to fifty real ones is just incidental (e.g. inline JS).
+    if escaped_n < 3 and escaped_quote < 3:
+        return html
+    if real_newlines >= max(5, escaped_n // 2):
+        return html
+    sentinel = "\x00BS\x00"
+    decoded = (
+        html
+        .replace("\\\\", sentinel)
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+        .replace("\\/", "/")
+        .replace(sentinel, "\\")
+    )
+    return decoded
+
+
+def _extract_write_file_content(text: str) -> str | None:
+    """Linear scan for `"content":"<JSON-string>"` inside a write_file tool
+    call. Returns the JSON-string body (still escape-encoded) or None.
+    Tolerates a missing closing quote (truncated streams). No regex, so no
+    catastrophic backtracking on multi-KB bodies."""
+    if not text:
+        return None
+    n = len(text)
+    # Find the first occurrence of `"content"` that follows a `write_file`
+    # mention — guards against unrelated keys named "content" elsewhere.
+    wf = text.find("write_file")
+    if wf == -1:
+        return None
+    key = text.find('"content"', wf)
+    if key == -1:
+        return None
+    # Skip whitespace, expect `:`, more whitespace, then opening `"`.
+    j = key + len('"content"')
+    while j < n and text[j] in " \t\r\n":
+        j += 1
+    if j >= n or text[j] != ":":
+        return None
+    j += 1
+    while j < n and text[j] in " \t\r\n":
+        j += 1
+    if j >= n or text[j] != '"':
+        return None
+    j += 1
+    body_start = j
+    # Walk until unescaped `"` or end-of-text.
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2  # skip the escape and the escaped char
+            continue
+        if c == '"':
+            return text[body_start:j]
+        j += 1
+    # Truncated — no closing quote found. Trim a trailing `"}}</tool_call>`
+    # tail if present so the caller doesn't get JSON debris glued on.
+    tail = text[body_start:]
+    # Strip the most common truncation suffixes.
+    for suffix in ('"}}</tool_call>', '"}}', '"}'):
+        if tail.endswith(suffix):
+            tail = tail[: -len(suffix)]
+            break
+    return tail or None
+
+
 def extract_html(text: str) -> str | None:
     """Extract a complete HTML document from a model response.
     Tries, in order:
       1. Fenced code block tagged ```html (the canonical case)
       2. Any fenced code block whose contents start with <!DOCTYPE / <html
       3. The whole response if it starts with <!DOCTYPE / <html
-      4. The substring from <!DOCTYPE / <html to </html> if found anywhere
+      4. write_file tool_call regression: model wrapped HTML in a JSON
+         tool_call instead of a fence (Qwen3 / DeepSeek-distilled families
+         do this even in IDE mode). Pull `arguments.content` and use it.
+      5. The substring from <!DOCTYPE / <html to </html> if found anywhere
     Lenient extraction is the right call here — false positives just preview
     the wrong block, false negatives mean the user gets no preview at all.
+    Final pass: undo accidental JSON-string escaping if the model emitted it.
     """
     if not text:
         return None
@@ -6387,22 +6865,36 @@ def extract_html(text: str) -> str | None:
             if html_untagged is None:
                 html_untagged = body
     if html_tagged:
-        return html_tagged
+        return _maybe_unescape_json_html(html_tagged)
     if html_untagged:
-        return html_untagged
+        return _maybe_unescape_json_html(html_untagged)
     # 3: bare HTML response, no fence
     stripped = text.strip()
     sl = stripped.lower()
     if sl.startswith("<!doctype") or sl.startswith("<html"):
-        return stripped
-    # 4: HTML embedded in prose — find first doctype/<html and last </html>
+        return _maybe_unescape_json_html(stripped)
+    # 4: write_file tool_call regression. The model in IDE mode emits e.g.
+    #     <tool_call>{"name":"write_file","arguments":{"path":"...",
+    #                 "content":"<!DOCTYPE html>\\n..."}}</tool_call>
+    # (sometimes without a closing tag). Pull the content arg out with a
+    # linear indexOf-based scan — a regex with `(?:\\.|[^"\\])*` plus
+    # surrounding `[\s\S]*?` catastrophic-backtracks on 30KB+ HTML bodies
+    # and freezes the worker. The unescape pass at the end normalises
+    # \\n / \\" back to real chars.
+    if 'write_file' in text and '"content"' in text:
+        body = _extract_write_file_content(text)
+        if body and "<" in body and ">" in body:
+            bl = body.lower()
+            if "<!doctype" in bl or "<html" in bl:
+                return _maybe_unescape_json_html(body)
+    # 5: HTML embedded in prose — find first doctype/<html and last </html>
     lower = text.lower()
     starts = [i for i in (lower.find("<!doctype"), lower.find("<html")) if i >= 0]
     if starts:
         start = min(starts)
         end = lower.rfind("</html>")
         if end > start:
-            return text[start:end + len("</html>")].strip()
+            return _maybe_unescape_json_html(text[start:end + len("</html>")].strip())
     return None
 
 
@@ -6593,6 +7085,8 @@ class Handler(BaseHTTPRequestHandler):
                 "models_dir": mdir,
                 "loaded_model": loaded,
                 "llama_running": _llama.is_running() or llama_ping(timeout=0.5),
+                "vision_capable": _llama.is_vision_capable(),
+                "loaded_mmproj": _llama.loaded_mmproj(),
                 "models": files,
             })
         if p.startswith("/api/model-info/"):
@@ -6809,6 +7303,52 @@ class Handler(BaseHTTPRequestHandler):
             save_json(WORKSPACE_FILE, {"folders": folders})
             broadcast_event({"type": "workspace:update"})
             return self._send_json(200, {"folders": folders})
+        if p == "/api/save-to-workspace":
+            # Direct save of preview HTML to a workspace folder. Skips the
+            # model loop entirely — the frontend "Save to workspace" button
+            # in the preview pane uses this so the user doesn't have to ask
+            # the agent to regenerate HTML it already has on disk.
+            # Body: {root: "<configured workspace folder>", filename: "x.html",
+            #        html: "<!DOCTYPE...>", overwrite?: bool}
+            root = (body.get("root") or "").strip()
+            filename = (body.get("filename") or "").strip()
+            html = body.get("html")
+            overwrite = bool(body.get("overwrite"))
+            if not root or not filename or not isinstance(html, str):
+                return self._send_json(400, {"error": "root, filename, and html required"})
+            # filename safety: no slashes, no traversal, must end in something
+            # textual. We don't constrain the extension — could be .html /
+            # .htm / .txt depending on user intent.
+            if "/" in filename or "\\" in filename or ".." in filename:
+                return self._send_json(400, {"error": "filename must be a bare name (no slashes, no ..)"})
+            if not filename.strip("."):
+                return self._send_json(400, {"error": "invalid filename"})
+            # validate root against configured workspace
+            configured = [normalize_path(f) for f in get_workspace().get("folders", [])]
+            root_norm = normalize_path(root)
+            if root_norm not in configured:
+                return self._send_json(400, {"error": "root not in configured workspace folders"})
+            try:
+                root_path = Path(root_norm).resolve(strict=True)
+            except Exception:
+                return self._send_json(400, {"error": "workspace root unreadable"})
+            target = (root_path / filename).resolve()
+            # belt & braces: ensure the resolved target is still inside root
+            try:
+                target.relative_to(root_path)
+            except ValueError:
+                return self._send_json(400, {"error": "resolved path escapes workspace root"})
+            if target.exists() and not overwrite:
+                return self._send_json(409, {"error": "file exists", "path": str(target), "exists": True})
+            try:
+                target.write_text(html, encoding="utf-8")
+                return self._send_json(200, {
+                    "ok": True,
+                    "path": str(target),
+                    "bytes": len(html.encode("utf-8")),
+                })
+            except Exception as e:
+                return self._send_json(500, {"error": str(e)})
         if p == "/api/py-check":
             # Pure syntax check — never executes the code, never imports
             # anything. compile() builds the AST and validates structure;
@@ -6929,6 +7469,20 @@ class Handler(BaseHTTPRequestHandler):
             _llama.stop()
             broadcast_event({"type": "models:update", "loaded_model": ""})
             return self._send_json(200, {"ok": True})
+        if p == "/api/models/probe-mmproj":
+            # Auto-detect helper for the Settings panel: "given this model
+            # path, is there a sibling vision projector?" Returns the resolved
+            # path or "" so the UI can fill the input or show "none found".
+            target = (body.get("path") or "").strip()
+            if not target:
+                # default to the currently loaded / configured model
+                target = _llama.loaded_model() or (get_settings().get("model_path") or "")
+            mmproj = find_mmproj_for(target) if target else ""
+            return self._send_json(200, {
+                "ok": True,
+                "model_path": target,
+                "mmproj_path": mmproj,
+            })
         if p == "/api/chats":
             chat_id = body.get("id") or uuid.uuid4().hex[:12]
             chats = get_chats()
@@ -7149,9 +7703,33 @@ class Handler(BaseHTTPRequestHandler):
         if not user_text and not images and not regenerate:
             return self._send_json(400, {"error": "empty message"})
 
-        # describe any attached images with the small vision model first; the main
-        # chat model only ever sees text, so VRAM stays free for reasoning context
-        if images:
+        # Two paths for incoming images:
+        #   (a) The loaded model has its own vision tower (we booted with
+        #       --mmproj). Pass the images straight through as image_url
+        #       blocks so the model sees them natively. Persist the data URLs
+        #       on the message dict for replay.
+        #   (b) Text-only model + a SEPARATE vision server (VISION_LLAMA_HOST
+        #       env var) is configured. Round-trip each image through that
+        #       OCR/vision side-model and inline its description as text.
+        # If neither path is available — text-only chat model AND no separate
+        # vision server — fail the request up front instead of silently
+        # inlining "[vision server failed: …]" into the prompt, which made
+        # the chat model hallucinate excuses about a "broken llama-server."
+        vision_native = bool(images) and _llama.is_vision_capable()
+        ocr_available = (VISION_LLAMA and VISION_LLAMA != LLAMA)
+        if images and not vision_native and not ocr_available:
+            loaded = _llama.loaded_model() or "(none)"
+            loaded_name = loaded.split("\\")[-1].split("/")[-1] if loaded != "(none)" else loaded
+            return self._send_json(400, {"error":
+                f"This model can't see images. The loaded model "
+                f"'{loaded_name}' has no vision projector (mmproj), and no "
+                f"separate vision server is configured.\n\n"
+                f"Fix: load a vision-capable GGUF (one with a sibling "
+                f"mmproj-*.gguf, e.g. Qwen2.5-VL, LLaVA, MiniCPM-V) and "
+                f"point Settings → 'Vision projector (mmproj)' at the "
+                f"projector file. Then relaunch the model from Settings."
+            })
+        if images and not vision_native:
             descriptions = []
             for i, img in enumerate(images):
                 desc = describe_image(img, hint=user_text)
@@ -7194,23 +7772,55 @@ class Handler(BaseHTTPRequestHandler):
             if is_first_user_msg and chat.get("title", "").strip().lower() in ("", "new session", "new conversation"):
                 chat["title"] = _title_from_prompt(user_text)
                 broadcast_event({"type": "chat:rename", "chat_id": chat_id, "title": chat["title"]})
-            chat["messages"].append({"role": "user", "content": user_text, "t": int(time.time())})
+            user_msg: dict = {"role": "user", "content": user_text, "t": int(time.time())}
+            if vision_native:
+                # Stored as data URLs so replay on the next turn (or after a
+                # reload) reattaches them. Frontend stripped non-image fields
+                # already; we re-attach as user-attached metadata.
+                user_msg["images"] = list(images)
+            chat["messages"].append(user_msg)
         chat["updated"] = int(time.time())
         save_json(CHATS_FILE, chats)
 
-        use_tools = mode != "ide"
-        system_prompt = build_system_prompt(include_tools=use_tools)
+        # IDE mode keeps tools available — the user often asks "save that" or
+        # "read this file" mid-design session. The IDE prompt below is what
+        # stops the model from WRAPPING every HTML response in write_file;
+        # disabling tools entirely just causes existential-crisis spirals
+        # ("can I use write_file? am I allowed to? what mode am I in?").
+        use_tools = True
+        system_prompt = build_system_prompt(include_tools=use_tools, chat_mode=mode)
         msgs: list[dict] = [{"role": "system", "content": system_prompt}]
         # Replay the FULL stored history including intermediate-assistant
         # turns (with tool_calls) and tool-result messages from prior agentic
         # loops. This is the anti-amnesia change — the model picks up its
         # working memory from where the last turn left off, not from a sanitised
         # bubble-only transcript.
+        # On the vision-native path, the live model can re-see images on every
+        # replay. On the text-only path we already inlined descriptions into
+        # the user_text at append time, so list content is never reconstructed.
+        replay_vision = _llama.is_vision_capable()
         for m in chat["messages"]:
             role = m.get("role")
             if role not in ("user", "assistant", "tool"):
                 continue
-            out: dict = {"role": role, "content": m.get("content", "") or ""}
+            stored_images = m.get("images") if role == "user" else None
+            if stored_images and replay_vision:
+                # Rebuild OpenAI-style content array. Text first (the model
+                # reads top-to-bottom), then each image as image_url.
+                parts: list[dict] = []
+                txt = m.get("content", "") or ""
+                if txt:
+                    parts.append({"type": "text", "text": txt})
+                for img in stored_images:
+                    if not isinstance(img, str) or not img:
+                        continue
+                    url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+                    parts.append({"type": "image_url", "image_url": {"url": url}})
+                # If we somehow ended up with no parts (shouldn't happen),
+                # fall back to plain text so the message isn't empty.
+                out: dict = {"role": role, "content": parts if parts else (txt or "")}
+            else:
+                out: dict = {"role": role, "content": m.get("content", "") or ""}
             if role == "assistant" and m.get("tool_calls"):
                 out["tool_calls"] = m["tool_calls"]
             if role == "tool":
@@ -7915,6 +8525,52 @@ def _parse_llama_port() -> int:
     return int(m.group(1)) if m else 8080
 
 
+def find_mmproj_for(model_path: str) -> str:
+    """Look for a vision projector .gguf sitting next to the chosen model.
+    Heuristic: scan the model's directory (and one level up) for files whose
+    name contains 'mmproj' or 'mm-proj'. Returns the absolute path of the
+    closest match, or '' when nothing plausible is on disk.
+    Common upstream naming: `mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf`,
+    `model.mmproj.gguf`, `mm-projector.gguf`."""
+    if not model_path:
+        return ""
+    mp = Path(model_path)
+    if not mp.exists():
+        return ""
+    candidates: list[Path] = []
+    search_dirs = [mp.parent]
+    if mp.parent.parent and mp.parent.parent != mp.parent:
+        search_dirs.append(mp.parent.parent)
+    seen: set[str] = set()
+    for d in search_dirs:
+        try:
+            for p in d.glob("*.gguf"):
+                key = str(p.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                lname = p.name.lower()
+                if "mmproj" in lname or "mm-proj" in lname or "mm_proj" in lname:
+                    candidates.append(p)
+        except Exception:
+            continue
+    if not candidates:
+        return ""
+    # Prefer same-directory matches; then prefer names that share a token
+    # with the model file (e.g. "qwen2.5-vl-7b" shows up in both).
+    model_stem = mp.stem.lower()
+    def score(p: Path) -> tuple[int, int, int]:
+        same_dir = 0 if p.parent == mp.parent else 1
+        # crude shared-substring score
+        shared = 0
+        for tok in re.split(r"[-_.]", model_stem):
+            if len(tok) >= 3 and tok in p.stem.lower():
+                shared += 1
+        return (same_dir, -shared, len(p.name))
+    candidates.sort(key=score)
+    return str(candidates[0].resolve())
+
+
 def scan_gguf_dir(root: str) -> list[dict]:
     """List .gguf files under root (recursive). Returns [{name,path,size,modified_at}]."""
     if not root:
@@ -7945,10 +8601,23 @@ class LlamaProcess:
         self._lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
         self._loaded_model: str = ""
+        # Vision projector path the current process was started with (empty
+        # string means text-only). is_vision_capable() reads this so the chat
+        # handler can skip the describe_image side-trip when the live model
+        # already speaks images natively.
+        self._loaded_mmproj: str = ""
 
     def loaded_model(self) -> str:
         with self._lock:
             return self._loaded_model
+
+    def loaded_mmproj(self) -> str:
+        with self._lock:
+            return self._loaded_mmproj
+
+    def is_vision_capable(self) -> bool:
+        with self._lock:
+            return bool(self._loaded_mmproj) and self._proc is not None and self._proc.poll() is None
 
     def is_running(self) -> bool:
         with self._lock:
@@ -7959,6 +8628,7 @@ class LlamaProcess:
             p = self._proc
             self._proc = None
             self._loaded_model = ""
+            self._loaded_mmproj = ""
         _llama_props_ctx_invalidate()
         if not p:
             return True
@@ -8007,6 +8677,23 @@ class LlamaProcess:
         enable_metrics = bool(s.get("enable_metrics", False))
         extra_args_raw = (s.get("llama_extra_args") or "").strip()
 
+        # Vision projector resolution. Explicit setting wins; otherwise (when
+        # mmproj_auto is on, the default) we look for a sibling mmproj.gguf
+        # next to the model. Empty string means "text-only model" — chat
+        # handler will fall back to the side-vision describe_image() path.
+        mmproj_path = (s.get("mmproj_path") or "").strip()
+        if mmproj_path and not Path(mmproj_path).exists():
+            print(f"[llama] WARN mmproj_path set but missing: {mmproj_path} — ignoring")
+            mmproj_path = ""
+        if not mmproj_path and bool(s.get("mmproj_auto", True)):
+            try:
+                guess = find_mmproj_for(model_path)
+            except Exception:
+                guess = ""
+            if guess:
+                print(f"[llama] auto-detected vision projector: {guess}")
+                mmproj_path = guess
+
         # Stop any existing instance first.
         with self._lock:
             running = self._proc is not None and self._proc.poll() is None
@@ -8035,6 +8722,10 @@ class LlamaProcess:
             "--parallel", str(n_parallel),
             "--reasoning-format", "deepseek",
         ]
+        if mmproj_path:
+            # Loads the vision tower + projector. After this, /v1/chat/completions
+            # accepts {type:"image_url", image_url:{url:"data:..."}} content blocks.
+            cmd += ["--mmproj", mmproj_path]
         if n_threads > 0:
             cmd += ["-t", str(n_threads)]
         if n_cpu_moe > 0:
@@ -8077,16 +8768,22 @@ class LlamaProcess:
         with self._lock:
             self._proc = p
             self._loaded_model = model_path
+            self._loaded_mmproj = mmproj_path
 
         if not wait:
-            return {"ok": True, "pid": p.pid, "model": model_path, "ready": False}
+            return {"ok": True, "pid": p.pid, "model": model_path,
+                    "ready": False, "mmproj": mmproj_path,
+                    "vision_capable": bool(mmproj_path)}
         if wait_for_llama(wait_seconds):
-            return {"ok": True, "pid": p.pid, "model": model_path, "ready": True}
+            return {"ok": True, "pid": p.pid, "model": model_path,
+                    "ready": True, "mmproj": mmproj_path,
+                    "vision_capable": bool(mmproj_path)}
         # if we waited but nothing came up, the child likely died
         if p.poll() is not None:
             with self._lock:
                 self._proc = None
                 self._loaded_model = ""
+                self._loaded_mmproj = ""
             return {"ok": False, "error": f"llama-server exited (code {p.returncode}) — check the model file or VRAM."}
         return {"ok": False, "error": "llama-server didn't answer in time. Still loading; check the spawned window."}
 
