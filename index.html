@@ -219,11 +219,13 @@
     <span>preview</span>
   </button>
 
-  <!-- ====== MOBILE TAB BAR ====== -->
+  <!-- ====== MOBILE TAB BAR ======
+       Two tabs only: Chat (current chat) and Settings (full-screen drawer).
+       Sessions navigation lives in the topbar back-arrow / hamburger and via
+       the swipe gesture on the sidebar — no need for a Sessions tab here.
+       Approvals view still works but is reachable from inside chat. -->
   <nav class="mobile-tabs" id="mobile-tabs">
     <button class="mobile-tab active" data-mtab="chat"><i class="ph ph-chats-circle"></i><span>Chat</span></button>
-    <button class="mobile-tab" data-mtab="sessions"><i class="ph ph-list-bullets"></i><span>Sessions</span></button>
-    <button class="mobile-tab" data-mtab="approvals"><i class="ph ph-shield-check"></i><span>Approvals</span></button>
     <button class="mobile-tab" data-mtab="settings"><i class="ph ph-gear-six"></i><span>Settings</span></button>
   </nav>
 </div>

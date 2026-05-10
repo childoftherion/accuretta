@@ -7487,12 +7487,19 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = body.get("id") or uuid.uuid4().hex[:12]
             chats = get_chats()
             if chat_id not in chats["chats"]:
+                # `origin` records where the session was started — "mobile" or
+                # "desktop". The chat list uses it to swap in a phone icon for
+                # mobile-born sessions so you can spot them at a glance.
+                origin = (body.get("origin") or "desktop").strip().lower()
+                if origin not in ("mobile", "desktop"):
+                    origin = "desktop"
                 chats["chats"][chat_id] = {
                     "id": chat_id,
                     "title": body.get("title") or "new session",
                     "created": int(time.time()),
                     "updated": int(time.time()),
                     "messages": [],
+                    "origin": origin,
                 }
                 chats["order"].insert(0, chat_id)
                 save_json(CHATS_FILE, chats)

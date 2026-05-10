@@ -1479,10 +1479,14 @@
 
   // ---------- chat ----------
   async function newChat() {
+    // Tag the session with where it was born so the chat list can show a phone
+    // icon for mobile-started sessions. The bridge persists this on the chat
+    // record; it never changes after creation.
+    const origin = isMobile() ? "mobile" : "desktop";
     const c = await api("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "new session" }),
+      body: JSON.stringify({ title: "new session", origin }),
     });
     await loadChats();
     selectChat(c.id);
@@ -1504,9 +1508,15 @@
         )
       : [];
     $("#chat-title").textContent = chat ? chat.title : "new session";
-    // restore the last-used mode for this chat so the toolbar feels sticky
+    // restore the last-used mode for this chat so the toolbar feels sticky.
+    // on mobile we drop IDE — there's no preview pane to render into — and
+    // fall back to agent so the user lands in a sensible default.
     if (chat && chat.last_mode && ["auto", "ide", "agent"].includes(chat.last_mode)) {
       state.mode = chat.last_mode;
+      if (isMobile() && state.mode === "ide") state.mode = "agent";
+      $$('[data-mode]').forEach(x => x.classList.toggle("on", x.dataset.mode === state.mode));
+    } else if (isMobile() && state.mode === "ide") {
+      state.mode = "agent";
       $$('[data-mode]').forEach(x => x.classList.toggle("on", x.dataset.mode === state.mode));
     }
     // reset cumulative token counter when switching chats — it tracks the live
@@ -1697,9 +1707,15 @@
       const c = state.chats.chats[id];
       if (!c) continue;
       const row = document.createElement("div");
-      row.className = "chatrow" + (id === state.chatId ? " active" : "");
+      const isActive = id === state.chatId;
+      row.className = "chatrow" + (isActive ? " active" : "");
+      // Mobile-born sessions get a phone glyph; everything else keeps the
+      // chat-circle. The active row also shows the colored dot bullet via
+      // the `.chatrow.active::before` rule in app.css — the icon is the
+      // SECONDARY signal, the dot is the primary.
+      const iconClass = c.origin === "mobile" ? "ph ph-device-mobile" : "ph ph-chat-circle";
       row.innerHTML = `
-        <i class="ph ph-chat-circle"></i>
+        <i class="${iconClass}"></i>
         <span class="t">${esc(c.title)}</span>
         <span class="d">${relTime(c.updated)}</span>
         <button class="del" title="Delete"><i class="ph ph-trash"></i></button>`;
@@ -4491,11 +4507,15 @@
       if (menu.classList.contains("open")) positionMenu();
     }, true);
   }
-  // On mobile, move the IDE/Agent/Auto/Image chips into the overflow menu so
-  // the composer toolbar isn't crowded and clipping. On desktop, restore them
-  // to the toolbar in their original order. Idempotent — safe to call on every
-  // resize.
-  const _MOBILE_TOOLBAR_IDS = ["mode-ide", "mode-agent", "mode-auto", "btn-attach-image"];
+  // On mobile, EVERYTHING goes into the overflow (sliders) menu — Agent,
+  // Auto, Image — leaving just `[sliders] [send]` visible inline. The
+  // previous "send button is clipping into the sliders chip" complaint was
+  // really "there are too many chips fighting for room next to a round
+  // send button on a 390px-wide screen". Collapsing to a single trigger
+  // sidesteps the problem entirely. IDE stays hidden by CSS (no preview
+  // pane at this width). The Build / Network items already live in the
+  // menu, so the chips just join them.
+  const _MOBILE_TOOLBAR_IDS = ["mode-agent", "mode-auto", "btn-attach-image"];
   function applyMobileToolbarLayout() {
     const tools = document.querySelector(".composer-tools");
     const menu = document.getElementById("toolbar-overflow-menu");

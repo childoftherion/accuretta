@@ -1924,8 +1924,11 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .app {
     flex-direction: column;
     height: 100dvh;
-    /* roomy buffer above the OS status bar — notch/pill clearance */
-    padding-top: calc(env(safe-area-inset-top, 0px) + 20px);
+    /* env(safe-area-inset-top) covers the notch/dynamic-island; a small
+       +10px breather sits the topbar a comfortable distance below the
+       status-bar clock without leaving the half-centimeter gap that the
+       original +20px buffer did. */
+    padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
   }
   /* collapse theme + preview into the overflow menu */
   #btn-theme, #btn-toggle-preview { display: none !important; }
@@ -2788,4 +2791,204 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   color: var(--fg-faint);
   margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ============================================================
+   MOBILE LAYOUT v2 — matches the mock screenshot.
+   - Theme toggle promoted into the topbar (replaces three-dot menu).
+   - IDE chip hidden entirely (no preview pane at this width).
+   - Composer reflowed: input on top, chips row, send circle on bottom.
+   - Bottom tab bar trimmed to Chat + Settings (lives above the
+     OS home-bar safe area).
+   - Active session row gets the accent-colored dot bullet from the
+     mock instead of the chat-circle icon for emphasis.
+   These rules sit at the very end of app.css on purpose so they
+   beat the earlier mobile blocks in the cascade.
+   ============================================================ */
+@media (max-width: 600px) {
+  /* topbar: theme toggle becomes a first-class action on mobile.
+     The earlier mobile block hides #btn-theme; this overrides it. */
+  #btn-theme { display: inline-flex !important; }
+  /* the three-dot mobile menu is now redundant — theme is in the topbar
+     and settings is in the bottom tab bar. */
+  #btn-mobile-menu { display: none !important; }
+  /* the magnifying-glass palette button has no purpose on mobile —
+     it opens a session-switcher meant for keyboard ⌘K shortcut, which
+     doesn't exist on a phone. drop it from the topbar. */
+  #btn-palette { display: none !important; }
+
+  /* On mobile the sidebar lives at z-index:600 (overlay panel). Modals
+     at the default z-index:91 open BEHIND it — so tapping FAQ from the
+     sidebar foot opened an invisible modal. Push modals + their scrim
+     above the sidebar so they win on every layer. Same for the drawer
+     (settings) and the mobile-menu, just in case. */
+  .modal-scrim { z-index: 900 !important; }
+  .modal { z-index: 901 !important; }
+  .drawer-scrim { z-index: 700 !important; }
+  .drawer { z-index: 701 !important; }
+  /* hide the desktop "Local ▼"-style chat metadata on mobile — the mock
+     shows just the title under "new session". */
+  #chat-meta, .topbar .path .sep { display: none !important; }
+  /* the topbar gets a tighter, centered layout: hamburger | title | theme */
+  .topbar .path { justify-content: center; flex: 1 1 auto; min-width: 0; }
+  .topbar .path .em {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 100%; font-size: 14px;
+  }
+
+  /* IDE mode chip is hidden entirely on mobile — the mode is useless
+     without the preview pane next door. selectChat() in app.js also
+     downgrades any restored "ide" mode to "agent" on mobile. */
+  #mode-ide { display: none !important; }
+
+  /* ---- composer reflow ----
+     Two-row layout via CSS grid:
+       row 1:  [ textarea spanning full width                     ]
+       row 2:  [ image tray spanning full width (when present)    ]
+       row 3:  [ chips ......................... | send circle    ]
+     Stop button shares the send cell when streaming. The "send +
+     chips inline" arrangement matches the mock and keeps the input
+     uncluttered. */
+  .composer {
+    display: grid !important;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "input input"
+      "tray  tray"
+      "chips send";
+    gap: 8px;
+  }
+  .composer-input { grid-area: input; min-width: 0; }
+  .image-tray { grid-area: tray; min-width: 0; }
+  /* On mobile JS reparents Agent/Auto/Image into the toolbar-overflow
+     menu (see _MOBILE_TOOLBAR_IDS in app.js). What's LEFT in
+     .composer-tools is just the sliders trigger + a spacer, so we don't
+     need overflow scrolling, wrap, or chip-row gymnastics anymore. */
+  .composer-tools {
+    grid-area: chips;
+    align-self: center;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  /* the spacer was a desktop trick to push the overflow chip to the
+     right edge of a wide toolbar — pointless when the toolbar is just
+     one button on mobile. */
+  .composer-tools .composer-spacer { display: none; }
+  .composer-foot {
+    grid-area: send;
+    align-self: center;
+    justify-content: flex-end;
+    padding-top: 0 !important;
+    gap: 6px;
+    min-width: 0;
+  }
+  /* hint + model pill never appear in this row on mobile */
+  .composer-hint { display: none !important; }
+  .composer-foot .model-pill { display: none !important; }
+
+  /* Send button: round accent circle to match the mock. We hide the
+     "Send" text label and let the up-arrow icon speak for itself. */
+  #btn-send {
+    flex: 0 0 44px !important;
+    width: 44px; height: 44px; min-height: 44px;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    justify-content: center;
+    align-items: center;
+  }
+  #btn-send span { display: none !important; }
+  #btn-send i { font-size: 18px; }
+  /* Stop button keeps its label so it's unambiguous when streaming */
+  #btn-stop { padding: 10px 14px; min-height: 44px; }
+
+  /* ---- kill the right-edge dark band ----
+     Two causes, both fixed here:
+     1. In dark mode the body has a *fixed* vertical gradient
+        (#1f1f23 → #1a1a1d → #161618). The chat container paints flat
+        #1a1a1d. Any horizontal sliver where the body shows through
+        (because of a fixed-position child overflowing, a scrollbar
+        gutter, etc.) reveals the gradient — and at the bottom of the
+        screen that gradient is DARKER than the chat, so it reads as
+        an ominous black stripe. Light mode has no gradient, hence no
+        stripe.  Solution: drop the gradient on mobile entirely; flat
+        bg means any leak is invisible.
+     2. As belt-and-suspenders: hard-cap every container to 100vw and
+        suppress horizontal scroll on the document so nothing CAN
+        leak past the viewport in the first place. */
+  /* Nuclear: every container gets the same flat background-color AND
+     background-image:none so nothing can show through. We use
+     background-color (not the shorthand) so we don't accidentally
+     strip background-attachment or other useful sub-properties on
+     elements that need them. */
+  html, body, .app, .center, .chat, .chat-scroll, .chat-inner {
+    background-color: var(--bg) !important;
+    background-image: none !important;
+  }
+  /* overflow:clip is stricter than overflow:hidden — it forbids ALL
+     scrolling, including programmatic scroll into hidden content,
+     which kills any phantom horizontal scroll that was painting body
+     bg past the right edge. */
+  html, body { overflow-x: clip !important; max-width: 100vw; }
+  .app {
+    width: 100% !important;
+    max-width: 100vw !important;
+    overflow-x: clip !important;
+  }
+  .center, .chat, .chat-scroll, .chat-inner, .composer-wrap, .topbar, .mobile-tabs {
+    max-width: 100vw;
+    width: 100%;
+  }
+
+  /* ---- bottom tab bar: gone ----
+     Chat is the only "main view" on mobile; Settings opens via the
+     hamburger → side-foot. Showing a tab bar with one real destination
+     was wasted real estate. Sidebar overlay still uses .m-tab-sessions
+     and .m-tab-chat classes for show/hide, set via the hamburger.
+     The earlier mobile block already has `display: none !important`
+     for .mobile-tabs (line ~1986); we explicitly re-assert it here so
+     this v2 block doesn't accidentally re-show it via cascade. */
+  .mobile-tabs { display: none !important; }
+  /* composer hugs the OS home-bar safe area directly — no tab bar to
+     clear anymore. composer-wrap's own padding-bottom already includes
+     env(safe-area-inset-bottom). */
+  .composer-wrap { bottom: 0 !important; }
+  /* chat scroll only needs to clear the composer itself (~180px tall
+     with chips + tray). 240px gives breathing room without leaving a
+     huge dead zone at the bottom. */
+  .chat-scroll {
+    padding-bottom: 240px !important;
+    scroll-padding-bottom: 240px !important;
+  }
+  /* approvals view also no longer has a tab bar to clear */
+  .app.m-tab-approvals::before { inset: 48px 0 0 0; }
+  /* sidebar overlay: it used to stop short to leave room for the tab
+     bar (`inset: 0 0 64px 0`). Now it spans the full viewport height. */
+  .sidebar { inset: 0 !important; }
+
+  /* ---- session list: active row gets the accent dot bullet from the mock ----
+     We swap the chat-circle icon for a colored dot when the row is active.
+     Mobile-origin sessions still show the phone glyph (set by JS) when
+     they're not the active row. */
+  .chatlist .chatrow { position: relative; padding-left: 36px; }
+  .chatlist .chatrow > i.ph:first-child {
+    position: absolute;
+    left: 12px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 16px;
+    color: var(--fg-muted);
+    transition: opacity var(--dur-fast) var(--ease-out);
+  }
+  .chatlist .chatrow.active > i.ph:first-child { opacity: 0; }
+  .chatlist .chatrow.active::before {
+    content: "";
+    position: absolute;
+    left: 16px; top: 50%;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    transform: translateY(-50%);
+    box-shadow: 0 0 0 3px var(--accent-subtle);
+  }
 }
