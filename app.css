@@ -57,7 +57,15 @@ button { font-family: inherit; }
   font-size: 15px; font-weight: 700; letter-spacing: -0.03em;
   border-bottom: 1px solid var(--border-subtle);
 }
-.brand img { width: 22px; height: 22px; object-fit: contain; }
+/* Brand mark: two pre-loaded <img>s, one per theme variant.
+   Default (light theme) shows the dark-slab mark on the light sidebar;
+   [data-theme="dark"] flips to the white-slab mark on the dark sidebar.
+   Keeping both in the DOM means the toggle is instant — no fetch lag. */
+.brand img,
+.brand .brand-mark { width: 22px; height: 22px; object-fit: contain; }
+.brand .brand-mark-dark { display: none; }
+[data-theme="dark"] .brand .brand-mark-light { display: none; }
+[data-theme="dark"] .brand .brand-mark-dark { display: inline-block; }
 .brand .v { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); letter-spacing: 0.06em; }
 .side-actions {
   display: flex; gap: 6px; padding: 10px 10px 8px;
@@ -401,27 +409,35 @@ button { font-family: inherit; }
   margin-top: 2px;
 }
 .avatar.user { background: var(--lilac); color: #3A2E5A; font-size: 10px; font-weight: 600; }
-/* Agent avatar: user-supplied black-hole PNG (black.png in the repo root).
-   The artwork is black-on-transparent. In light themes that's already
-   correct; in dark themes we invert it so the linework stays visible on
-   the dark background. No surrounding bubble — just the glyph. */
-.avatar:has(.avatar-blackhole) {
+/* Agent avatar: the Accuretta split-A brand mark. The bubble row gets the
+   raw glyph, no circular background — same convention as the old black-hole
+   avatar. Two <img>s ship side-by-side and CSS hides whichever doesn't
+   match the active theme; that keeps the swap instant on theme toggle and
+   avoids the FOUC of swapping `src` mid-flip. */
+.avatar:has(.avatar-mark) {
   background: transparent;
   border-radius: 0;
-  width: 32px; height: 32px;
+  /* 30px = 32px (default avatar) shrunk ~5% — the split-A reads heavier
+     than the old line-art black-hole glyph at the same box size, so we
+     give it a touch less real estate to feel balanced next to user
+     bubbles. */
+  width: 30px; height: 30px;
   margin-top: 0;
+  position: relative;
 }
-.avatar-blackhole {
+.avatar-mark {
   display: block;
-  width: 32px; height: 32px;
+  width: 30px; height: 30px;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
-  transition: transform var(--dur-base) var(--ease-out), filter var(--dur-base) var(--ease-out);
+  transition: transform var(--dur-base) var(--ease-out);
 }
-[data-theme="dark"] .avatar-blackhole,
-.dark .avatar-blackhole { filter: invert(1); }
-.bubble-row:hover .avatar-blackhole { transform: rotate(-8deg) scale(1.08); }
+/* default (light theme): show light variant, hide dark */
+.avatar-mark-dark { display: none; }
+[data-theme="dark"] .avatar-mark-light { display: none; }
+[data-theme="dark"] .avatar-mark-dark { display: block; }
+.bubble-row:hover .avatar-mark { transform: scale(1.08); }
 .bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: 82%; min-width: 0; position: relative; }
 .bubble-row.user .bubble-col { align-items: flex-end; }
 

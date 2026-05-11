@@ -4,7 +4,20 @@
 <meta charset="utf-8">
 <title>Accuretta</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<meta name="theme-color" content="#141412">
+<!-- theme-color drives the iOS/Android browser chrome tint when this page is
+     installed to the home screen. Two values, one per scheme, so the chrome
+     blends with whichever Accuretta theme the user chose. -->
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e0a30" media="(prefers-color-scheme: dark)">
+<!-- favicon: the dark-slab mark on transparent. Looks correct on the white
+     browser-tab strip every modern browser uses. -->
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">
+<!-- iOS home-screen: dark navy background baked in so iOS doesn't paint a
+     ugly grey square behind a transparent icon. Sized 180x180 (Apple spec). -->
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- PWA manifest — picks up app-icon-192 + app-icon-512 from the same dir. -->
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/app.css">
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" defer></script>
@@ -17,7 +30,11 @@
   <!-- ====== LEFT SIDEBAR (desktop) / MOBILE SESSIONS SCREEN ====== -->
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <img src="/logo-mark.png" alt="">
+      <!-- Two images, one per theme variant. CSS hides whichever doesn't
+           match [data-theme] on <html>. The src is set even on the hidden
+           one so the toggle is instant — no fetch/decode lag mid-flip. -->
+      <img class="brand-mark brand-mark-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
+      <img class="brand-mark brand-mark-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
       <span>accuretta</span>
       <span class="v" id="brand-v">v0.1.0</span>
     </div>

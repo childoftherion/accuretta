@@ -232,10 +232,11 @@
   // strip when no specific tool is currently running.
   const WRENCH_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`;
 
-  // Agent avatar: the user-supplied black-hole glyph (black.png on the repo
-  // root, served via STATIC_WHITELIST). PNG is drawn black-on-transparent;
-  // CSS handles dark-mode inversion so the linework stays visible on any bg.
-  const AGENT_AVATAR_HTML = `<div class="avatar"><img class="avatar-blackhole" src="black.png" alt="" aria-hidden="true" draggable="false"></div>`;
+  // Agent avatar: the Accuretta split-A brand mark. We pre-load BOTH theme
+  // variants (dark slab on light bg, white slab on dark bg) and let CSS pick
+  // which one shows via [data-theme]. Same approach as the sidebar brand
+  // mark — keeps theme toggling instant with no fetch lag.
+  const AGENT_AVATAR_HTML = `<div class="avatar"><img class="avatar-mark avatar-mark-light" src="logo-mark-light.png" alt="" aria-hidden="true" draggable="false"><img class="avatar-mark avatar-mark-dark" src="logo-mark-dark.png" alt="" aria-hidden="true" draggable="false"></div>`;
 
   function getOrCreateToolGroup(stack) {
     // ONE group per agent turn, period. The toolStack itself is created fresh
@@ -1824,7 +1825,25 @@
       pre.classList.add("code-block");
 
       const codeEl = pre.querySelector("code");
-      const getText = () => (codeEl ? codeEl.textContent : pre.textContent) || "";
+      // wrapCodeLines() emits each source line as a <span class="code-line">
+      // and joins them with NO newline (because the spans are display:block
+      // and a literal \n inside the <pre> would render as an extra blank
+      // row). That makes the visual layout right but breaks copy-paste —
+      // .textContent on the <code> returns every line concatenated with no
+      // separator, so pasting comes out as one long line.
+      // Fix: when the body uses our line spans, walk them and join with \n.
+      // For legacy / tool-output <pre> blocks that don't have line spans,
+      // fall back to plain textContent (which already has real newlines).
+      const getText = () => {
+        if (codeEl) {
+          const lines = codeEl.querySelectorAll(".code-line");
+          if (lines.length) {
+            return Array.from(lines).map(l => l.textContent).join("\n");
+          }
+          return codeEl.textContent || "";
+        }
+        return pre.textContent || "";
+      };
 
       // Modern code-card path — buttons emitted by renderMarkdown live inline.
       const copyAct = pre.querySelector(".cc-copy");

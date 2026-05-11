@@ -6940,9 +6940,20 @@ MIME = {
     ".md": "text/markdown; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
     ".ico": "image/x-icon",
+    ".webmanifest": "application/manifest+json",
 }
 
-STATIC_WHITELIST = {"index.html", "app.js", "app.css", "colors_and_type.css", "logo-mark.png", "black.png"}
+STATIC_WHITELIST = {
+    "index.html", "app.js", "app.css", "colors_and_type.css",
+    # legacy logo file kept around so older clients / cached HTML still resolve
+    "logo-mark.png", "black.png",
+    # new brand assets — see index.html <link rel="..."> tags
+    "logo-mark-dark.png", "logo-mark-light.png",
+    "favicon.png", "favicon-32.png",
+    "apple-touch-icon.png",
+    "app-icon-192.png", "app-icon-512.png",
+    "manifest.webmanifest",
+}
 
 
 class Handler(BaseHTTPRequestHandler):
