@@ -1,6 +1,13 @@
 <div align="center">
 
-<img src="logo-mark.png" alt="Accuretta logo" width="140" />
+<picture>
+  <!-- GitHub honors prefers-color-scheme inside <picture><source> tags, so
+       the README mark adapts to whichever theme the visitor's GitHub
+       profile is set to: dark slab on light pages, white slab on dark. -->
+  <source srcset="logo-mark-dark.png" media="(prefers-color-scheme: dark)">
+  <source srcset="logo-mark-light.png" media="(prefers-color-scheme: light)">
+  <img src="logo-mark-light.png" alt="Accuretta logo" width="140" />
+</picture>
 
 # Accuretta
 
