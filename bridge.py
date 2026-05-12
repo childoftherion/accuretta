@@ -14,6 +14,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1604,6 +1605,410 @@ def tool_open_program(args: dict) -> dict:
         return {"ok": True, "path": path}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ---- git -------------------------------------------------------------------
+# Wraps the `git` CLI so the model can stage, commit, push, etc. Read-only
+# verbs (status/log/diff/branch/show/remote) run freely; anything that mutates
+# the index, working tree, or a remote is gated through request_approval. All
+# verbs run with `cwd` inside the workspace — repos outside the workspace are
+# rejected the same way file edits are. GIT_TERMINAL_PROMPT=0 means a missing
+# credential or a host-key prompt fails fast instead of hanging the worker.
+
+
+def _resolve_git_cwd(path: str) -> tuple[str | None, dict | None]:
+    """Validate `path` is inside the workspace and resolves to a directory.
+    Returns (abs_dir, None) on success or (None, {"error": ...})."""
+    if not path:
+        return None, {"error": "path is required (directory inside the workspace)"}
+    norm = normalize_path(path)
+    p = Path(norm)
+    if not p.exists():
+        return None, {"error": f"path does not exist: {norm}"}
+    if not p.is_dir():
+        norm = str(p.parent)
+    if is_blocked_path(norm):
+        return None, {"error": "path is blocked"}
+    if not is_in_workspace(norm):
+        return None, {"error": "path is outside the workspace — add it via Workspace settings first"}
+    return norm, None
+
+
+def _git_env() -> dict:
+    env = dict(os.environ)
+    # Refuse to prompt for credentials / passphrases / host keys; we can't
+    # answer them through a subprocess pipe and the worker would hang.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_PAGER"] = "cat"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env.setdefault("GCM_INTERACTIVE", "Never")
+    return env
+
+
+def _run_git(cwd: str, argv: list[str], timeout: int = 60,
+             max_stdout: int = 200_000, stream_label: str = "git") -> dict:
+    """Run `git <argv...>` in cwd. Streams stdout/stderr like _run_powershell."""
+    try:
+        proc = subprocess.Popen(
+            ["git", *argv],
+            cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=_git_env(),
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except FileNotFoundError:
+        return {"error": "git is not installed or not on PATH"}
+    except Exception as e:
+        return {"error": str(e)}
+
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+
+    def reader(pipe, sink, label):
+        try:
+            for line in iter(pipe.readline, ""):
+                sink.append(line)
+                _emit_tool_stream(label, line.rstrip("\n\r"))
+            pipe.close()
+        except Exception:
+            pass
+
+    label = f"{stream_label} {argv[0]}" if argv else stream_label
+    t_out = threading.Thread(target=reader, args=(proc.stdout, out_lines, label), daemon=True)
+    t_err = threading.Thread(target=reader, args=(proc.stderr, err_lines, label), daemon=True)
+    t_out.start(); t_err.start()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return {"error": f"timeout after {timeout}s", "argv": argv}
+
+    t_out.join(timeout=5); t_err.join(timeout=5)
+    stdout = "".join(out_lines)[-max_stdout:]
+    stderr = "".join(err_lines)[-8000:]
+    return {
+        "ok": proc.returncode == 0,
+        "exit": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "argv": ["git", *argv],
+        "cwd": cwd,
+    }
+
+
+def _git_approve(title: str, cwd: str, argv: list[str], extra: dict | None = None) -> dict | None:
+    """Block on user approval. Returns None if approved, or a refusal dict."""
+    command = "git " + " ".join(shlex.quote(a) for a in argv)
+    details = {"kind": "git", "cwd": cwd, "argv": argv}
+    if extra:
+        details.update(extra)
+    approval = request_approval(title=title, command=command, details=details)
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied git ({approval.get('status')})"}
+    return None
+
+
+def tool_git_status(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    res = _run_git(cwd, ["status", "--porcelain=v1", "--branch", "--untracked-files=normal"], timeout=30)
+    # Also fetch the current branch name verbatim — porcelain v1 ## line is
+    # cryptic when the branch has no upstream (## main vs ## HEAD (no branch)).
+    head = _run_git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+    if isinstance(res, dict) and res.get("ok"):
+        res["branch"] = (head.get("stdout") or "").strip() if isinstance(head, dict) else ""
+    return res
+
+
+def tool_git_log(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    n = max(1, min(int(args.get("max_count", 20) or 20), 200))
+    fmt = "%h%x09%an%x09%ad%x09%s"
+    argv = ["log", f"-n{n}", "--date=short", f"--pretty=format:{fmt}"]
+    ref = (args.get("ref") or "").strip()
+    if ref:
+        argv.append(ref)
+    file_filter = (args.get("file") or "").strip()
+    if file_filter:
+        argv.extend(["--", file_filter])
+    return _run_git(cwd, argv, timeout=30)
+
+
+def tool_git_diff(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["diff", "--no-color"]
+    if args.get("staged"):
+        argv.append("--cached")
+    if args.get("stat"):
+        argv.append("--stat")
+    ref = (args.get("ref") or "").strip()
+    if ref:
+        argv.append(ref)
+    file_filter = (args.get("file") or "").strip()
+    if file_filter:
+        argv.extend(["--", file_filter])
+    return _run_git(cwd, argv, timeout=60, max_stdout=400_000)
+
+
+def tool_git_branch(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["branch", "--no-color", "-vv"]
+    if args.get("all"):
+        argv.append("-a")
+    if args.get("remote"):
+        argv.append("-r")
+    return _run_git(cwd, argv, timeout=20)
+
+
+def tool_git_show(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    ref = (args.get("ref") or "HEAD").strip()
+    argv = ["show", "--no-color", ref]
+    if args.get("stat"):
+        argv.append("--stat")
+    return _run_git(cwd, argv, timeout=30, max_stdout=300_000)
+
+
+def tool_git_remote(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    return _run_git(cwd, ["remote", "-v"], timeout=15)
+
+
+def tool_git_add(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    paths = args.get("paths")
+    if isinstance(paths, str):
+        paths = [paths]
+    if not paths or not isinstance(paths, list):
+        if args.get("all"):
+            paths = ["-A"]
+        else:
+            return {"error": "specify `paths` (list of files) or `all: true`"}
+    # Refuse the lazy `-A` from a nested cwd unless the caller explicitly opts in.
+    argv = ["add", "--", *paths] if paths != ["-A"] else ["add", "-A"]
+    refusal = _git_approve(f"git add ({len(paths)} target{'s' if len(paths)!=1 else ''})", cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=60)
+
+
+def tool_git_commit(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    message = (args.get("message") or "").strip()
+    if not message:
+        return {"error": "commit message is required"}
+    argv = ["commit", "-m", message]
+    if args.get("amend"):
+        argv.append("--amend")
+        if args.get("no_edit"):
+            argv.append("--no-edit")
+    if args.get("allow_empty"):
+        argv.append("--allow-empty")
+    if args.get("all"):
+        argv.append("-a")
+    title = "git commit" + (" --amend" if args.get("amend") else "")
+    refusal = _git_approve(title, cwd, argv, extra={"message_preview": message[:200]})
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=60)
+
+
+def tool_git_push(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["push"]
+    if args.get("set_upstream"):
+        argv.append("-u")
+    if args.get("force_with_lease"):
+        argv.append("--force-with-lease")
+    if args.get("tags"):
+        argv.append("--tags")
+    remote = (args.get("remote") or "").strip()
+    branch = (args.get("branch") or "").strip()
+    if remote:
+        argv.append(remote)
+        if branch:
+            argv.append(branch)
+    elif branch:
+        # branch without remote is invalid; default remote to origin
+        argv.extend(["origin", branch])
+    refusal = _git_approve("git push", cwd, argv)
+    if refusal:
+        return refusal
+    # Push can be slow on a fresh clone with large history; 5 min cap.
+    return _run_git(cwd, argv, timeout=300)
+
+
+def tool_git_pull(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["pull"]
+    if args.get("rebase"):
+        argv.append("--rebase")
+    if args.get("ff_only"):
+        argv.append("--ff-only")
+    remote = (args.get("remote") or "").strip()
+    branch = (args.get("branch") or "").strip()
+    if remote:
+        argv.append(remote)
+        if branch:
+            argv.append(branch)
+    refusal = _git_approve("git pull", cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=300)
+
+
+def tool_git_fetch(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["fetch"]
+    if args.get("all"):
+        argv.append("--all")
+    if args.get("prune"):
+        argv.append("--prune")
+    if args.get("tags"):
+        argv.append("--tags")
+    remote = (args.get("remote") or "").strip()
+    if remote:
+        argv.append(remote)
+    refusal = _git_approve("git fetch", cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=180)
+
+
+def tool_git_checkout(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    target = (args.get("target") or "").strip()
+    if not target:
+        return {"error": "`target` is required (branch, ref, or '--' file)"}
+    argv = ["checkout"]
+    if args.get("create"):
+        argv.append("-b")
+    argv.append(target)
+    files = args.get("files")
+    if isinstance(files, str):
+        files = [files]
+    if files:
+        argv.append("--")
+        argv.extend(files)
+    refusal = _git_approve("git checkout", cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=60)
+
+
+def tool_git_restore(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    files = args.get("files")
+    if isinstance(files, str):
+        files = [files]
+    if not files:
+        return {"error": "`files` is required (list of paths to restore)"}
+    argv = ["restore"]
+    if args.get("staged"):
+        argv.append("--staged")
+    if args.get("worktree", True) and not args.get("staged"):
+        # default behavior of `git restore` is worktree; nothing to add
+        pass
+    if args.get("source"):
+        argv.extend(["--source", str(args["source"])])
+    argv.append("--")
+    argv.extend(files)
+    refusal = _git_approve("git restore", cwd, argv, extra={"files": files})
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=30)
+
+
+def tool_git_reset(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    mode = (args.get("mode") or "mixed").strip().lower()
+    if mode not in {"soft", "mixed", "hard", "keep", "merge"}:
+        return {"error": "mode must be one of: soft, mixed, hard, keep, merge"}
+    argv = ["reset", f"--{mode}"]
+    target = (args.get("target") or "").strip()
+    if target:
+        argv.append(target)
+    title = f"git reset --{mode}"
+    refusal = _git_approve(title, cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=60)
+
+
+def tool_git_init(args: dict) -> dict:
+    cwd, err = _resolve_git_cwd(args.get("path") or "")
+    if err:
+        return err
+    argv = ["init"]
+    initial_branch = (args.get("initial_branch") or "").strip()
+    if initial_branch:
+        argv.extend(["-b", initial_branch])
+    refusal = _git_approve("git init", cwd, argv)
+    if refusal:
+        return refusal
+    return _run_git(cwd, argv, timeout=20)
+
+
+def tool_git_clone(args: dict) -> dict:
+    """Clone into a directory inside the workspace. `dest` must be a workspace path."""
+    url = (args.get("url") or "").strip()
+    if not url:
+        return {"error": "`url` is required"}
+    dest = (args.get("dest") or "").strip()
+    if not dest:
+        return {"error": "`dest` is required (directory inside workspace; will be created)"}
+    dest_norm = normalize_path(dest)
+    parent = str(Path(dest_norm).parent)
+    if not is_in_workspace(parent):
+        return {"error": "dest is outside the workspace"}
+    if is_blocked_path(dest_norm):
+        return {"error": "dest path is blocked"}
+    if os.path.exists(dest_norm) and os.listdir(dest_norm):
+        return {"error": f"dest already exists and is non-empty: {dest_norm}"}
+    Path(parent).mkdir(parents=True, exist_ok=True)
+    argv = ["clone", url, dest_norm]
+    depth = args.get("depth")
+    if depth and int(depth) > 0:
+        argv.extend(["--depth", str(int(depth))])
+    branch = (args.get("branch") or "").strip()
+    if branch:
+        argv.extend(["--branch", branch])
+    refusal = _git_approve("git clone", parent, argv, extra={"url": url, "dest": dest_norm})
+    if refusal:
+        return refusal
+    # Clone runs in the parent (cwd doesn't matter much for clone with explicit dest).
+    return _run_git(parent, argv, timeout=900)
 
 
 _STOPWORDS = {
@@ -5395,6 +5800,270 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_yara_scan,
     },
+    # ---- git -----------------------------------------------------------------
+    "git_status": {
+        "description": (
+            "Show working tree state for a repo: branch, ahead/behind counters, "
+            "staged/unstaged/untracked files (porcelain v1). Use to find out what "
+            "would be committed before calling git_add/git_commit. Read-only, "
+            "no approval. `path` is any folder inside the repo (workspace-only)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Folder inside the repo (workspace path)."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_status,
+    },
+    "git_log": {
+        "description": (
+            "Recent commits as `<sha>\\t<author>\\t<date>\\t<subject>` lines. "
+            "Read-only. Use to inspect history before committing or to grab a "
+            "SHA for git_show / git_diff / git_reset."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Folder inside the repo."},
+                "max_count": {"type": "integer", "description": "1-200, default 20"},
+                "ref": {"type": "string", "description": "Optional branch/ref/range, e.g. 'main' or 'main..HEAD'"},
+                "file": {"type": "string", "description": "Optional path to scope the log to one file."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_log,
+    },
+    "git_diff": {
+        "description": (
+            "Show a unified diff. Defaults to unstaged changes; pass staged:true "
+            "for the index. Use this BEFORE git_commit to verify what will be "
+            "committed, and BEFORE git_push to see what will go out. Read-only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Folder inside the repo."},
+                "staged": {"type": "boolean", "description": "Diff the index (--cached). Default false (worktree)."},
+                "stat": {"type": "boolean", "description": "Summary stats only, not the full patch."},
+                "ref": {"type": "string", "description": "Optional ref or range, e.g. 'HEAD~3' or 'main...HEAD'"},
+                "file": {"type": "string", "description": "Optional single file/path to scope the diff."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_diff,
+    },
+    "git_branch": {
+        "description": "List branches with their tracking remotes (`git branch -vv`). Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "all": {"type": "boolean", "description": "Include remote-tracking branches (-a)."},
+                "remote": {"type": "boolean", "description": "Remotes only (-r)."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_branch,
+    },
+    "git_show": {
+        "description": "Show a commit (or any ref) with its full patch. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "ref": {"type": "string", "description": "Commit/tag/ref. Default HEAD."},
+                "stat": {"type": "boolean", "description": "Append --stat for a summary."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_show,
+    },
+    "git_remote": {
+        "description": "List configured remotes and their fetch/push URLs. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        "fn": tool_git_remote,
+    },
+    "git_add": {
+        "description": (
+            "Stage files for the next commit. Pass `paths` (list of file/dir "
+            "paths relative to the repo) or `all:true` for `git add -A`. "
+            "Requires user approval. Always run git_status BEFORE this to verify "
+            "you're staging only what you mean to."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Folder inside the repo."},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files/dirs to stage (relative to repo root)."},
+                "all": {"type": "boolean", "description": "Use `git add -A` instead of explicit paths."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_add,
+    },
+    "git_commit": {
+        "description": (
+            "Create a commit. The `message` is passed as a single -m argument, so "
+            "newlines are preserved (body separated from subject by a blank line "
+            "in the same string is fine). Requires user approval. Run git_diff "
+            "--staged BEFORE this to verify what's being committed. NEVER amend "
+            "without explicit instruction."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "message": {"type": "string", "description": "Commit message. Multi-line ok."},
+                "all": {"type": "boolean", "description": "Stage tracked changes first (-a)."},
+                "amend": {"type": "boolean", "description": "Amend the previous commit. Use ONLY with explicit user request."},
+                "no_edit": {"type": "boolean", "description": "With amend, keep the existing message."},
+                "allow_empty": {"type": "boolean", "description": "Allow a commit with no changes."},
+            },
+            "required": ["path", "message"],
+        },
+        "fn": tool_git_commit,
+    },
+    "git_push": {
+        "description": (
+            "Push commits to a remote. Default: `git push` (uses upstream). For a "
+            "brand new branch pass set_upstream:true and branch:'<name>'. "
+            "Requires user approval. NEVER force-push without explicit request; "
+            "if you must, use force_with_lease:true (safer than --force)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "remote": {"type": "string", "description": "e.g. 'origin'. Optional."},
+                "branch": {"type": "string", "description": "Branch to push. Optional."},
+                "set_upstream": {"type": "boolean", "description": "Pass -u to record the upstream."},
+                "force_with_lease": {"type": "boolean", "description": "Force-push only if remote ref hasn't moved."},
+                "tags": {"type": "boolean", "description": "Include tags."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_push,
+    },
+    "git_pull": {
+        "description": "Fetch + merge from a remote. Requires user approval. Prefer rebase:true for a linear history.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "remote": {"type": "string"},
+                "branch": {"type": "string"},
+                "rebase": {"type": "boolean", "description": "git pull --rebase"},
+                "ff_only": {"type": "boolean", "description": "git pull --ff-only — fail rather than merge."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_pull,
+    },
+    "git_fetch": {
+        "description": "Fetch remote refs without merging. Requires user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "remote": {"type": "string"},
+                "all": {"type": "boolean"},
+                "prune": {"type": "boolean", "description": "--prune"},
+                "tags": {"type": "boolean"},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_fetch,
+    },
+    "git_checkout": {
+        "description": (
+            "Switch branches or restore files. Pass `target` = branch/ref name. "
+            "Add create:true to create a new branch from current HEAD. To restore "
+            "specific files from a ref, pass `files`. Requires user approval."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "target": {"type": "string", "description": "Branch name or ref."},
+                "create": {"type": "boolean", "description": "Create the branch (-b)."},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Optional file paths to checkout from `target`."},
+            },
+            "required": ["path", "target"],
+        },
+        "fn": tool_git_checkout,
+    },
+    "git_restore": {
+        "description": (
+            "Discard changes in tracked files. Pass `files` (required). With "
+            "staged:true, unstages from the index instead of touching the worktree. "
+            "Requires user approval — this is destructive."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "staged": {"type": "boolean", "description": "--staged: unstage instead of discard."},
+                "source": {"type": "string", "description": "Optional --source ref to restore from."},
+            },
+            "required": ["path", "files"],
+        },
+        "fn": tool_git_restore,
+    },
+    "git_reset": {
+        "description": (
+            "Move HEAD and optionally the index/worktree to `target`. Modes: "
+            "soft (HEAD only), mixed (default — HEAD + index), hard (HEAD + index "
+            "+ worktree — DESTROYS uncommitted work), keep, merge. Requires "
+            "user approval. NEVER use --hard without explicit user request."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "mode": {"type": "string", "enum": ["soft", "mixed", "hard", "keep", "merge"], "description": "Default 'mixed'."},
+                "target": {"type": "string", "description": "Commit/ref. Optional (defaults to HEAD)."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_reset,
+    },
+    "git_init": {
+        "description": "Initialize a new repo in `path` (must be inside the workspace). Requires user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "initial_branch": {"type": "string", "description": "e.g. 'main'. Optional."},
+            },
+            "required": ["path"],
+        },
+        "fn": tool_git_init,
+    },
+    "git_clone": {
+        "description": (
+            "Clone a remote repo into a workspace folder. `dest` is the new repo "
+            "directory and must not already exist (or must be empty). Requires "
+            "user approval. Shallow clones via depth:N."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "dest": {"type": "string", "description": "Target directory inside the workspace."},
+                "branch": {"type": "string", "description": "Optional --branch."},
+                "depth": {"type": "integer", "description": "Optional --depth N."},
+            },
+            "required": ["url", "dest"],
+        },
+        "fn": tool_git_clone,
+    },
 }
 
 
@@ -5413,6 +6082,9 @@ _ANALYSIS_TOOL_NAMES = {
     "network_snapshot",
     "scan_apk", "decompile_apk", "ghidra_analyze",
     "binary_inspect", "yara_scan",
+    # git diffs and logs are bulky-by-design too — the model needs to read the
+    # whole patch to write a sane commit message or to verify a push payload.
+    "git_diff", "git_log", "git_show", "git_status",
 }
 # Per-tool result caps for the model context. Tools not listed here use the
 # defaults in _tool_result_cap() below (16K for analysis tools, 4K otherwise).
@@ -5437,6 +6109,12 @@ _TOOL_RESULT_CAPS = {
     # yara_scan: matches across a directory can balloon. 32K is enough room
     # for a full report on ~50 hit files without trampling the rest of context.
     "yara_scan": 32000,
+    # git_diff with a multi-file refactor easily clears 50K. The model needs
+    # the whole patch to write an accurate commit message; truncation here
+    # produces fabricated change descriptions.
+    "git_diff": 64000,
+    "git_show": 48000,
+    "git_log": 24000,
 }
 
 def _tool_result_cap(name: str) -> int:
