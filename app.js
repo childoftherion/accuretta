@@ -655,6 +655,45 @@
     return out;
   }
 
+  // Split highlighted HTML on \n while keeping multi-line token spans
+  // (docstrings, block comments) properly closed before the break and
+  // reopened on the next line so coloring stays continuous. Returns an
+  // array of per-line HTML strings — wrap them however the caller wants.
+  function splitHighlightedLines(html) {
+    const lines = [];
+    let cur = "";
+    let openTag = null;
+    let i = 0;
+    const n = html.length;
+    while (i < n) {
+      const c = html[i];
+      if (c === "<") {
+        const end = html.indexOf(">", i);
+        if (end === -1) { cur += html.slice(i); break; }
+        const tag = html.slice(i, end + 1);
+        if (tag.startsWith("</span")) openTag = null;
+        else if (tag.startsWith("<span")) openTag = tag;
+        cur += tag;
+        i = end + 1;
+        continue;
+      }
+      if (c === "\n") {
+        if (openTag) cur += "</span>";
+        lines.push(cur);
+        cur = openTag ? openTag : "";
+        i++;
+        continue;
+      }
+      cur += c;
+      i++;
+    }
+    if (cur.length || lines.length === 0) {
+      if (openTag) cur += "</span>";
+      lines.push(cur);
+    }
+    return lines;
+  }
+
   // Wrap each line of the highlighted-HTML output in <span class="code-line">
   // so the line-number gutter (CSS counters) can index them and the body can
   // wrap visually if the user resizes the bubble. If a token <span> straddles
@@ -943,16 +982,17 @@
       return `\x00F${fences.length - 1}\x00`;
     });
 
-    // extract scratchpad markers (bridge.py wraps prior <think> blocks as
-    // [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn] so the
-    // model's own reasoning survives chat-template stripping). Render as a
+    // extract short-term memory markers (bridge.py wraps prior <think> blocks
+    // as [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn] — the
+    // wire marker stays "scratchpad" so existing chat histories keep rendering
+    // correctly, but the UI brand is "short-term memory"). Render inline as a
     // small icon + italic body instead of leaking the literal tag text.
-    const scratchpads = [];
+    const stmBlocks = [];
     text = text.replace(
       /\[scratchpad-from-earlier-turn\]([\s\S]*?)\[\/scratchpad-from-earlier-turn\]/gi,
       (_m, body) => {
-        scratchpads.push((body || "").trim());
-        return `\x00S${scratchpads.length - 1}\x00`;
+        stmBlocks.push((body || "").trim());
+        return `\x00S${stmBlocks.length - 1}\x00`;
       }
     );
 
@@ -1085,12 +1125,12 @@
       return `<pre class="code-card" data-lang="${esc(displayLang)}"><div class="code-card-actions"><button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i><span>Copy</span></button>${previewBtn}</div><code class="code-card-body">${lined}</code></pre>`;
     });
 
-    // restore scratchpad blocks as a small icon + italic body
-    const SCRATCH_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>';
+    // restore short-term memory blocks as a small icon + italic body
+    const STM_SVG = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>';
     out = out.replace(/\x00S(\d+)\x00/g, (_, i) => {
-      const body = scratchpads[+i] || "";
+      const body = stmBlocks[+i] || "";
       const safe = esc(body).replace(/\n/g, "<br>");
-      return `<span class="scratchpad-block" title="model's scratchpad from an earlier turn"><span class="scratchpad-tag">${SCRATCH_SVG}<span class="scratchpad-label">scratchpad</span></span><em class="scratchpad-body">${safe}</em></span>`;
+      return `<span class="stm-block" title="model's short-term memory from an earlier turn"><span class="stm-tag">${STM_SVG}<span class="stm-label">short-term memory</span></span><em class="stm-body">${safe}</em></span>`;
     });
     return out;
   }
@@ -1638,7 +1678,7 @@
     const commands = [
       { kind: "cmd", icon: "ph-plus", label: "New session", action: () => { closePalette(); newChat(); } },
       { kind: "cmd", icon: "ph-gear-six", label: "Open Settings", action: () => { closePalette(); openSettings(); } },
-      { kind: "cmd", icon: "ph-brain", label: "Open Memories", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
+      { kind: "cmd", icon: "ph-brain", label: "Open Long-term memory", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
       { kind: "cmd", icon: "ph-arrow-counter-clockwise", label: "Regenerate last reply", action: () => { closePalette(); regenerateLast(); } },
       { kind: "cmd", icon: "ph-moon", label: "Toggle theme", action: async () => { closePalette(); const d = state.settings.theme !== "dark"; await saveSettings({ theme: d ? "dark" : "light" }); applyTheme(d); } },
       { kind: "cmd", icon: "ph-browser", label: "Toggle preview pane", action: () => { closePalette(); app.classList.toggle("preview-collapsed"); } },
@@ -1891,7 +1931,7 @@
       }
 
       // Legacy fallback — older <pre> blocks that didn't go through the
-      // code-card emit (tool result lines, scratchpad tails, etc.) still
+      // code-card emit (tool result lines, short-term memory tails, etc.) still
       // get a small floating copy button so they're not bare.
       if (!copyAct) {
         const btn = document.createElement("button");
@@ -2705,6 +2745,7 @@
     $("#preview-frame").classList.add("hidden");
     $("#code-view").classList.add("hidden");
     document.getElementById("pycheck-pane")?.classList.add("hidden");
+    document.getElementById("doc-preview-pane")?.classList.add("hidden");
     $("#preview-empty").classList.remove("hidden");
     renderVersions();
   }
@@ -2925,6 +2966,7 @@
     if (!wp) return;
     document.getElementById("preview-empty")?.classList.add("hidden");
     document.getElementById("pycheck-pane")?.classList.add("hidden");
+    document.getElementById("doc-preview-pane")?.classList.add("hidden");
     const pill = document.getElementById("preview-url");
     if (pill) pill.textContent = wp.name || wp.rel;
     const meta = document.getElementById("preview-meta");
@@ -3024,12 +3066,20 @@
 
     const lines = srcText.split("\n");
     const errLine = res.ok ? -1 : Math.max(1, parseInt(res.line || 0, 10));
-    const numbered = lines.map((ln, i) => {
+    // Run the whole source through the Python tokenizer in ONE pass so
+    // multi-line strings / docstrings keep their string coloring continuous,
+    // then split on \n so each rendered line still gets its own block (line
+    // numbers + error highlighting). Block-level .pyc-line spans give us the
+    // newline; the join("") avoids a literal \n inside <pre> that would
+    // double-space every line (the original bug from the screenshot).
+    const fullHtml = highlightCode(srcText, "py");
+    const htmlLines = splitHighlightedLines(fullHtml);
+    const numbered = htmlLines.map((html, i) => {
       const n = i + 1;
       const isErr = !res.ok && n === errLine;
-      const lineHtml = `<span class="pyc-num">${String(n).padStart(4, " ")}</span> ${esc(ln)}`;
-      return isErr ? `<span class="pyc-line err">${lineHtml}</span>` : `<span class="pyc-line">${lineHtml}</span>`;
-    }).join("\n");
+      const cls = isErr ? "pyc-line err" : "pyc-line";
+      return `<span class="${cls}"><span class="pyc-num">${String(n).padStart(4, " ")}</span> ${html}</span>`;
+    }).join("");
     codeEl.innerHTML = numbered;
 
     if (res.ok) {
@@ -3050,6 +3100,115 @@
     if (pill) pill.textContent = `pycheck · ${displayName || rel}`;
     const meta = document.getElementById("preview-meta");
     if (meta) meta.textContent = `python syntax · ${displayName || rel}`;
+  }
+
+  // Hide every right-pane mode and lazy-create or return the doc-preview pane
+  // shared by the markdown renderer and the formatted-source view. The pane
+  // lives next to .pycheck-pane inside .preview-body — same layout, same
+  // banner-on-top + scrollable body convention.
+  function _ensureDocPreviewPane() {
+    const app = document.getElementById("app");
+    if (app && app.classList.contains("preview-collapsed")) {
+      app.classList.remove("preview-collapsed");
+    }
+    document.getElementById("preview-empty")?.classList.add("hidden");
+    document.getElementById("preview-stage")?.classList.add("hidden");
+    document.getElementById("code-view")?.classList.add("hidden");
+    document.getElementById("pycheck-pane")?.classList.add("hidden");
+    document.getElementById("doc-preview-pane")?.classList.add("hidden");
+    let pane = document.getElementById("doc-preview-pane");
+    if (!pane) {
+      pane = document.createElement("div");
+      pane.id = "doc-preview-pane";
+      pane.className = "doc-preview-pane";
+      pane.innerHTML = `
+        <div class="doc-preview-banner" id="doc-preview-banner"></div>
+        <div class="doc-preview-body" id="doc-preview-body"></div>`;
+      document.getElementById("preview-body")?.appendChild(pane);
+    }
+    pane.classList.remove("hidden");
+    return pane;
+  }
+
+  // Render a workspace .md file as formatted Markdown in the preview pane.
+  // Reuses the same renderMarkdown() that powers chat bubbles, so headings,
+  // lists, tables, code fences (with syntax highlighting), inline code, links,
+  // and bold/italic all work identically. No iframe — the markdown body is
+  // injected straight into the pane and scoped via .doc-preview-body so the
+  // app's own CSS doesn't bleed into it weirdly.
+  async function previewWorkspaceMarkdown(root, rel, displayName) {
+    if (!root || !rel) return;
+    const pane = _ensureDocPreviewPane();
+    const banner = pane.querySelector("#doc-preview-banner");
+    const body = pane.querySelector("#doc-preview-body");
+    pane.classList.remove("doc-source-mode");
+    banner.className = "doc-preview-banner pending";
+    banner.innerHTML = `${SVG_BOOK} <strong>${esc(displayName || rel)}</strong> · loading…`;
+    body.innerHTML = "";
+    try {
+      const r = await fetch(wsFileUrl(root, rel));
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        banner.className = "doc-preview-banner err";
+        banner.textContent = `error: ${j.error || r.statusText}`;
+        return;
+      }
+      const txt = await r.text();
+      body.innerHTML = `<div class="doc-md">${renderMarkdown(txt)}</div>`;
+      banner.className = "doc-preview-banner ok";
+      banner.innerHTML = `${SVG_BOOK} <strong>${esc(displayName || rel)}</strong> · markdown · ${txt.split("\n").length} lines`;
+    } catch (e) {
+      banner.className = "doc-preview-banner err";
+      banner.textContent = `error: ${e.message || e}`;
+    }
+    state.workspacePreview = null;
+    const pill = document.getElementById("preview-url");
+    if (pill) pill.textContent = `md · ${displayName || rel}`;
+    const meta = document.getElementById("preview-meta");
+    if (meta) meta.textContent = `markdown · ${displayName || rel}`;
+  }
+
+  // Render a workspace text/code file as syntax-highlighted source in the
+  // preview pane. Uses the same single-pass tokenizer as chat code fences,
+  // dispatched by extension via SOURCE_VIEW_LANGS. Plain-text files (.txt,
+  // .toml, .ini) fall through to escaped monospace with no token coloring.
+  async function previewWorkspaceSource(root, rel, displayName) {
+    if (!root || !rel) return;
+    const pane = _ensureDocPreviewPane();
+    const banner = pane.querySelector("#doc-preview-banner");
+    const body = pane.querySelector("#doc-preview-body");
+    pane.classList.add("doc-source-mode");
+    banner.className = "doc-preview-banner pending";
+    banner.innerHTML = `${SVG_EYE} <strong>${esc(displayName || rel)}</strong> · loading…`;
+    body.innerHTML = "";
+    try {
+      const r = await fetch(wsFileUrl(root, rel));
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        banner.className = "doc-preview-banner err";
+        banner.textContent = `error: ${j.error || r.statusText}`;
+        return;
+      }
+      const txt = await r.text();
+      const lang = SOURCE_VIEW_LANGS[fileExt(displayName || rel)] || "text";
+      const fullHtml = highlightCode(txt, lang);
+      const htmlLines = splitHighlightedLines(fullHtml);
+      const numbered = htmlLines.map((html, i) => {
+        const n = i + 1;
+        return `<span class="pyc-line"><span class="pyc-num">${String(n).padStart(4, " ")}</span> ${html}</span>`;
+      }).join("");
+      body.innerHTML = `<pre class="pycheck-code"><code>${numbered}</code></pre>`;
+      banner.className = "doc-preview-banner ok";
+      banner.innerHTML = `${SVG_EYE} <strong>${esc(displayName || rel)}</strong> · ${esc(lang)} · ${htmlLines.length} lines`;
+    } catch (e) {
+      banner.className = "doc-preview-banner err";
+      banner.textContent = `error: ${e.message || e}`;
+    }
+    state.workspacePreview = null;
+    const pill = document.getElementById("preview-url");
+    if (pill) pill.textContent = `source · ${displayName || rel}`;
+    const meta = document.getElementById("preview-meta");
+    if (meta) meta.textContent = `source · ${displayName || rel}`;
   }
 
   function renderPreview() {
@@ -3394,6 +3553,39 @@
   // metrics, and the user explicitly asked for SVG over emoji/icon-font.
   const SVG_LIGHTNING = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
   const SVG_PYCHECK  = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+  const SVG_BOOK     = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>';
+  const SVG_EYE      = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+  // Map file extension → highlightCode() language id. Determines which
+  // entries get an "eye" view-source button in the tree and how the
+  // formatted-source preview tokenizes them. Markdown has its own button
+  // (book icon) and HTML has the iframe lightning bolt — neither belongs here.
+  const SOURCE_VIEW_LANGS = {
+    js: "js", mjs: "js", cjs: "js", jsx: "js",
+    ts: "ts", tsx: "ts",
+    py: "py", pyw: "py",
+    json: "json", jsonc: "json",
+    css: "css",
+    sh: "sh", bash: "bash", zsh: "sh",
+    ps1: "powershell", psm1: "powershell",
+    sql: "sql",
+    yaml: "yaml", yml: "yaml",
+    toml: "text", ini: "text", cfg: "text", conf: "text",
+    txt: "text", log: "text",
+    rs: "rust", go: "go", c: "c", h: "c", cpp: "cpp", hpp: "cpp", java: "java",
+    xml: "xml", svg: "svg",
+  };
+  function fileExt(name) {
+    const m = (name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+    return m ? m[1] : "";
+  }
+  function isMarkdownFile(name) {
+    const e = fileExt(name);
+    return e === "md" || e === "markdown" || e === "mdown" || e === "mkd";
+  }
+  function isSourceViewable(name) {
+    return Object.prototype.hasOwnProperty.call(SOURCE_VIEW_LANGS, fileExt(name));
+  }
 
   // relative path from a workspace root → entry.path. `entry.path` is the
   // absolute on-disk path returned by /api/list-folder.
@@ -3426,6 +3618,13 @@
       }
       if (isPythonFile(entry.name)) {
         actions += `<button class="tree-action ws-pycheck" title="Check Python syntax">${SVG_PYCHECK}</button>`;
+      }
+      if (isMarkdownFile(entry.name)) {
+        actions += `<button class="tree-action ws-preview-md" title="Render Markdown in the panel">${SVG_BOOK}</button>`;
+      } else if (isSourceViewable(entry.name) && !isPythonFile(entry.name)) {
+        // .py files already get a syntax-checker that shows highlighted
+        // source — no need for a duplicate "view source" button on those.
+        actions += `<button class="tree-action ws-preview-source" title="View formatted source in the panel">${SVG_EYE}</button>`;
       }
     }
     node.innerHTML = `
@@ -3481,6 +3680,22 @@
           e.stopPropagation();
           e.preventDefault();
           runPythonCheck(rootFolder, relPathFromRoot(rootFolder, entry.path), entry.name);
+        });
+      }
+      const mdBtn = node.querySelector(".ws-preview-md");
+      if (mdBtn) {
+        mdBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          previewWorkspaceMarkdown(rootFolder, relPathFromRoot(rootFolder, entry.path), entry.name);
+        });
+      }
+      const srcBtn = node.querySelector(".ws-preview-source");
+      if (srcBtn) {
+        srcBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          previewWorkspaceSource(rootFolder, relPathFromRoot(rootFolder, entry.path), entry.name);
         });
       }
     }

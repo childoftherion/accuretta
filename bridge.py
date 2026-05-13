@@ -956,6 +956,74 @@ def needs_approval(cmd: str) -> bool:
     return False
 
 
+# ---- bridge self-protection ------------------------------------------------
+# Some local models, when iterating on a web UI that needs npm rebuilds or
+# flask restarts, also kill the python process running THIS file — taking
+# down Accuretta itself mid-session. Approval can't help: by the time the
+# user clicks "approve" on a generic Stop-Process, the model has lost track
+# of which python is which. So we hard-refuse any tool call that names
+# bridge.py, the bridge's PID, or destructive verbs against port 8787,
+# regardless of approval state.
+
+_BRIDGE_FILE_ABS = ""
+try:
+    _BRIDGE_FILE_ABS = str(Path(__file__).resolve()).lower()
+except Exception:
+    _BRIDGE_FILE_ABS = ""
+
+_BRIDGE_PID = os.getpid()
+
+# Patterns matched against the raw PowerShell command string.
+_PROT_BRIDGE_FILE_RE = re.compile(r"\bbridge\.py\b", re.IGNORECASE)
+_PROT_DESTROY_FILE_RE = re.compile(
+    r"\b(remove-item|del|erase|rd|rmdir|move-item|out-file|set-content|add-content|"
+    r"clear-content|new-item\s+-force)\b",
+    re.IGNORECASE,
+)
+_PROT_KILL_VERB_RE = re.compile(
+    r"\b(stop-process|taskkill|tskill|kill)\b",
+    re.IGNORECASE,
+)
+_PROT_PORT_RE = re.compile(r"(?<!\d)8787(?!\d)")
+
+
+def is_bridge_self_path(path: str) -> bool:
+    """True if `path` resolves to this running bridge.py."""
+    if not path or not _BRIDGE_FILE_ABS:
+        return False
+    try:
+        return str(Path(path).resolve()).lower() == _BRIDGE_FILE_ABS
+    except Exception:
+        return False
+
+
+def bridge_self_threat(cmd: str) -> str | None:
+    """Return a refusal reason if `cmd` would kill or corrupt the bridge.
+    Pattern-only check — runs before approval so even an approved Stop-Process
+    against our PID gets refused. Returns None if the command is safe."""
+    if not cmd:
+        return None
+    low = cmd.lower()
+
+    # Direct PID reference + a kill verb.
+    if str(_BRIDGE_PID) in cmd and _PROT_KILL_VERB_RE.search(cmd):
+        # Avoid false positives: the PID has to appear as a standalone token,
+        # not as a substring of some unrelated number.
+        if re.search(rf"(?<!\d){_BRIDGE_PID}(?!\d)", cmd):
+            return f"command targets the bridge's own process (pid {_BRIDGE_PID})"
+
+    # bridge.py + a destructive file verb.
+    if _PROT_BRIDGE_FILE_RE.search(cmd) and _PROT_DESTROY_FILE_RE.search(cmd):
+        return "command would overwrite or delete bridge.py"
+
+    # Port 8787 + a kill verb. `Get-NetTCPConnection -LocalPort 8787` on its
+    # own is fine (read-only); only refuse when paired with a process killer.
+    if _PROT_PORT_RE.search(cmd) and _PROT_KILL_VERB_RE.search(cmd):
+        return f"command would kill the bridge's listener (port {PORT})"
+
+    return None
+
+
 # ---- approval queue --------------------------------------------------------
 
 _approvals: dict[str, dict] = {}
@@ -1225,6 +1293,8 @@ def tool_write_file(args: dict) -> dict:
     content = args.get("content", "")
     if not path:
         return {"error": "missing path"}
+    if is_bridge_self_path(path):
+        return {"error": "refused: bridge.py is the running server — edit it from your real IDE, not from a chat tool call. Restart the bridge afterward."}
     if is_blocked_path(path):
         return {"error": "path blocked (Windows/System32)"}
     if not is_in_workspace(path):
@@ -1257,6 +1327,8 @@ def tool_edit_file(args: dict) -> dict:
         return {"error": "missing path"}
     if not isinstance(edits, list) or not edits:
         return {"error": "edits must be a non-empty list of {old_text, new_text}"}
+    if is_bridge_self_path(path):
+        return {"error": "refused: bridge.py is the running server — edit it from your real IDE, not from a chat tool call. Restart the bridge afterward."}
     if is_blocked_path(path):
         return {"error": "path blocked (Windows/System32)"}
     if not is_in_workspace(path):
@@ -1342,6 +1414,8 @@ def tool_delete_file(args: dict) -> dict:
     path = normalize_path(args.get("path") or "")
     if not path or not os.path.exists(path):
         return {"error": f"not found: {path}"}
+    if is_bridge_self_path(path):
+        return {"error": "refused: bridge.py is the running server — won't delete the file backing this process."}
     if is_blocked_path(path):
         return {"error": "path blocked (Windows/System32)"}
     if not is_in_workspace(path):
@@ -1424,6 +1498,18 @@ def tool_run_powershell(args: dict) -> dict:
     cmd = (args.get("command") or "").strip()
     if not cmd:
         return {"error": "empty command"}
+    threat = bridge_self_threat(cmd)
+    if threat:
+        return {
+            "error": (
+                f"refused: {threat}. Accuretta won't terminate or overwrite its own "
+                "server through a tool call — restart the bridge yourself if you "
+                "really mean to. If you're trying to kill a different python "
+                "process (flask dev server, etc.), target it by exact PID rather "
+                "than 'all python.exe' or 'whatever listens on 8787'."
+            ),
+            "refused_command": cmd,
+        }
     if needs_approval(cmd):
         approval = request_approval(
             title="PowerShell (write/modify)",
@@ -1702,6 +1788,20 @@ def _run_git(cwd: str, argv: list[str], timeout: int = 60,
 
 def _git_approve(title: str, cwd: str, argv: list[str], extra: dict | None = None) -> dict | None:
     """Block on user approval. Returns None if approved, or a refusal dict."""
+    # Self-protection: refuse destructive git ops that would clobber bridge.py.
+    # `git checkout -- bridge.py`, `git restore bridge.py`, `git reset --hard`
+    # in the accuretta repo would all wipe an in-flight edit the user is
+    # actively working on. Hard refuse — bypasses approval like PowerShell does.
+    head = argv[0] if argv else ""
+    destructive = head in {"checkout", "restore", "reset", "clean", "rm"}
+    if destructive:
+        joined = " ".join(argv)
+        if _PROT_BRIDGE_FILE_RE.search(joined):
+            return {"error": "refused: would discard local changes to bridge.py. Stash or commit your edits first if you actually want this."}
+        if head == "reset" and "--hard" in argv and _is_accuretta_repo(cwd):
+            return {"error": "refused: `git reset --hard` inside the Accuretta repo would wipe uncommitted bridge edits. Stash or commit first."}
+        if head == "clean" and any(a in {"-f", "-fd", "-fdx", "-fx"} for a in argv) and _is_accuretta_repo(cwd):
+            return {"error": "refused: `git clean -f*` inside the Accuretta repo would delete untracked bridge files."}
     command = "git " + " ".join(shlex.quote(a) for a in argv)
     details = {"kind": "git", "cwd": cwd, "argv": argv}
     if extra:
@@ -1710,6 +1810,18 @@ def _git_approve(title: str, cwd: str, argv: list[str], extra: dict | None = Non
     if approval.get("decision") != "approve":
         return {"error": f"user denied git ({approval.get('status')})"}
     return None
+
+
+def _is_accuretta_repo(cwd: str) -> bool:
+    """True if `cwd` is inside the directory that contains the running bridge.py."""
+    if not _BRIDGE_FILE_ABS:
+        return False
+    try:
+        bridge_dir = str(Path(_BRIDGE_FILE_ABS).parent).lower()
+        c = str(Path(cwd).resolve()).lower()
+        return c == bridge_dir or c.startswith(bridge_dir + os.sep)
+    except Exception:
+        return False
 
 
 def tool_git_status(args: dict) -> dict:
@@ -5388,9 +5500,12 @@ TOOLS: dict[str, dict] = {
     },
     "remember": {
         "description": (
-            "Save a terse lesson (<= 220 chars) so future sessions start smarter. "
-            "Use ONLY for durable facts: a working command, a file layout, a user "
-            "preference. Never store the current task or chat transcript."
+            "Save a terse lesson (<= 220 chars) to long-term memory so future "
+            "sessions start smarter. Long-term memory is durable across chats — "
+            "use ONLY for facts that stay true: a working command, a file "
+            "layout, a user preference. Never store the current task, the chat "
+            "transcript, or anything that belongs in short-term memory (the "
+            "model's own thinking, kept inside this chat automatically)."
         ),
         "parameters": {
             "type": "object",
@@ -5403,7 +5518,7 @@ TOOLS: dict[str, dict] = {
         "fn": tool_remember,
     },
     "forget": {
-        "description": "Remove a memory by id (returned by remember).",
+        "description": "Drop a long-term memory by id (returned by `remember`).",
         "parameters": {
             "type": "object",
             "properties": {"id": {"type": "string"}},
@@ -7347,9 +7462,11 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
         _unregister_cancel(chat_id)
 
 
-# Rewrite prior assistant <think>…</think> blocks as plain-text scratchpad
-# notes so they survive chat-template stripping (Qwen3, DeepSeek, etc. all
-# discard prior reasoning by default — the model loses its own context).
+# Rewrite prior assistant <think>…</think> blocks as plain-text short-term
+# memory notes so they survive chat-template stripping (Qwen3, DeepSeek, etc.
+# all discard prior reasoning by default — the model loses its own context).
+# The wire marker stays `[scratchpad-from-earlier-turn]` so legacy chat
+# histories keep rendering — the UI brand is the only thing renamed.
 _PRIOR_THINK_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
 
 def _preserve_prior_thinking(text: str) -> str:

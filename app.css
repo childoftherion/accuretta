@@ -226,9 +226,45 @@ button { font-family: inherit; }
 
 .side-foot {
   border-top: 1px solid var(--border);
-  padding: 8px 10px 10px;
-  display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 10px 8px;
+  display: flex; flex-direction: column; gap: 4px;
 }
+.side-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+  margin-top: -2px;
+}
+.side-socials {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.side-social {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
+}
+.side-social:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg-faint) 12%, transparent);
+  transform: translateY(-1px);
+}
+.side-social:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.side-social svg { display: block; }
 .status-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 8px;
@@ -2546,12 +2582,13 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
 }
 
 /* ============================================================
-   Scratchpad markers — bridge.py wraps prior <think> blocks as
-   [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn].
-   Render them inline so the user sees a tidy icon + italic body
-   instead of literal tag text.
+   Short-term memory markers — bridge.py wraps prior <think> blocks
+   as [scratchpad-from-earlier-turn]…[/scratchpad-from-earlier-turn]
+   on the wire (kept stable so legacy chats keep rendering); the UI
+   surfaces them as "short-term memory" entries. Inline icon + italic
+   body so users see a tidy block instead of literal tag text.
    ============================================================ */
-.scratchpad-block {
+.stm-block {
   display: block;
   margin: 8px 0;
   padding: 8px 12px;
@@ -2562,7 +2599,7 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   font-size: 0.92em;
   line-height: 1.55;
 }
-.scratchpad-tag {
+.stm-tag {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -2573,9 +2610,9 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   text-transform: uppercase;
   font-weight: 600;
 }
-.scratchpad-tag svg { display: inline-block; vertical-align: middle; flex-shrink: 0; }
-.scratchpad-label { font-family: var(--font-sans); }
-.scratchpad-body {
+.stm-tag svg { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+.stm-label { font-family: var(--font-sans); }
+.stm-body {
   display: block;
   font-style: italic;
   color: var(--fg-muted);
@@ -2625,12 +2662,12 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
 .pycheck-code {
   flex: 1; min-height: 0;
   margin: 0;
-  padding: 12px 0;
+  padding: 8px 0;
   background: var(--bg);
   color: var(--fg);
   font-family: ui-monospace, "SF Mono", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 12.5px;
+  line-height: 1.45;
   overflow: auto;
   white-space: pre;
 }
@@ -2649,6 +2686,79 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   padding-left: 11px;
 }
 .pycheck-code .pyc-line.err .pyc-num { color: var(--danger, #c92a2a); font-weight: 600; }
+
+/* ============================================================
+   Doc-preview pane — shared by the markdown renderer (.md files)
+   and the formatted-source view (.txt/.json/.js/.css/etc.). Same
+   layout idiom as .pycheck-pane: banner up top, scrollable body
+   below. .doc-source-mode swaps the body's padding/colors so the
+   highlighted-source view sits flush like a code editor.
+   ============================================================ */
+.doc-preview-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.doc-preview-pane.hidden { display: none; }
+.doc-preview-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--fg);
+  flex-shrink: 0;
+}
+.doc-preview-banner svg { flex-shrink: 0; }
+.doc-preview-banner.pending { color: var(--fg-muted); }
+.doc-preview-banner.ok { color: var(--fg); }
+.doc-preview-banner.err {
+  background: color-mix(in srgb, var(--danger, #c92a2a) 14%, var(--bg-raised));
+  color: var(--danger, #c92a2a);
+  border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
+}
+[data-theme="dark"] .doc-preview-banner.err { color: #ff9b9b; }
+
+.doc-preview-body {
+  flex: 1; min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+.doc-preview-pane.doc-source-mode .doc-preview-body { padding: 0; }
+
+/* Markdown body — uses the same .md-* classes that chat bubbles use,
+   wrapped in .doc-md so we can give the renderer a comfortable reading
+   layout (max width, generous spacing) without leaking those rules into
+   the chat bubbles where messages already supply their own framing. */
+.doc-md {
+  padding: 22px 28px 40px;
+  max-width: 78ch;
+  margin: 0 auto;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.doc-md > :first-child { margin-top: 0; }
+.doc-md h1, .doc-md h2, .doc-md h3, .doc-md h4 { line-height: 1.25; margin: 1.2em 0 0.4em; }
+.doc-md p { margin: 0 0 0.8em; }
+.doc-md a { color: var(--accent); text-underline-offset: 2px; }
+.doc-md code { font-family: var(--font-mono); font-size: 0.92em; }
+.doc-md .md-list { padding-left: 26px; }
+.doc-md .md-list li { margin: 4px 0; }
+
+/* When the pane is in source-view mode, the .pycheck-code block we
+   inject already styles itself — just clear the doc-md framing so the
+   code editor sits flush. */
+.doc-preview-pane.doc-source-mode .pycheck-code {
+  border-radius: 0;
+  height: 100%;
+}
 
 /* ============================================================
    DARK MODE OVERRIDES (bubble shadows)

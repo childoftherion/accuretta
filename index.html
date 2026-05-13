@@ -64,7 +64,7 @@
     </div>
 
     <div class="side-foot">
-      <div class="ctx-gauge" id="ctx-gauge" title="context window usage">
+      <div class="ctx-gauge" id="ctx-gauge" title="working memory used">
         <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true">
           <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.15"></circle>
           <circle id="ctx-gauge-arc" cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"
@@ -73,7 +73,17 @@
         </svg>
         <span class="ctx-gauge-label" id="ctx-gauge-label">0%</span>
       </div>
-      <span class="tok-total" id="tok-total" title="Total generated tokens this session">0 tok</span>
+      <div class="side-meta-row">
+        <span class="tok-total" id="tok-total" title="Total generated tokens this session">0 tok</span>
+        <div class="side-socials" aria-label="Social links">
+          <a class="side-social" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" title="@NoJetsNextDoor on X" aria-label="X / Twitter">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+          </a>
+          <a class="side-social" href="https://github.com/mkultraware/" target="_blank" rel="noopener noreferrer" title="mkultraware on GitHub" aria-label="GitHub">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+          </a>
+        </div>
+      </div>
       <button class="btn ghost sm" id="btn-faq" title="About Accuretta"><i class="ph ph-question"></i>FAQ</button>
       <button class="btn ghost sm" id="btn-settings"><i class="ph ph-gear-six"></i>Settings</button>
     </div>
@@ -290,17 +300,20 @@
     <div class="faq-q">how is my data stored?</div>
     <p>everything lives in <code>./data</code>: chat history, workspace, settings, versions, system context. nothing leaves the machine unless you explicitly allow it.</p>
 
-    <div class="faq-q">what does the context gauge show?</div>
-    <p>how full the current session's prompt is relative to <code>num_ctx</code>. the count is conservative (≈3 chars per token) so it errs on the safe side. once it hits the outer ring, the bridge silently drops the oldest non-system messages to stay under budget — you don't need to start a new session. hover any assistant bubble's meta line to see how many tokens that reply used.</p>
+    <div class="faq-q">how does memory work in accuretta?</div>
+    <p>every local model gets three layers of memory:</p>
+    <p><b>working memory</b> — the live context window for this turn. shown as the ring gauge in the sidebar. when it fills up, the bridge silently drops the oldest non-system messages so you never have to start a new chat. hover any assistant bubble's meta line to see how many tokens that reply used.</p>
+    <p><b>short-term memory</b> — the model's prior <code>&lt;think&gt;</code> reasoning, kept alive between turns inside the same chat. most local chat templates (Qwen, DeepSeek, GLM…) discard prior thinking by default; accuretta rewraps it as a "short-term memory" entry so the model's own train of thought survives. shown inline as a small italic block with a notepad icon. toggle with <i>preserve_prior_thinking</i> in <code>data/settings.json</code>.</p>
+    <p><b>long-term memory</b> — durable lessons the model saves across sessions via the <code>remember</code> tool: a working command, a file layout, a user preference. manage them in Settings → Long-term memory.</p>
+
+    <div class="faq-q">what does the working-memory ring show?</div>
+    <p>how full the current session's prompt is relative to <code>num_ctx</code>. the count is conservative (≈3 chars per token) so it errs on the safe side. once it hits the outer ring, the bridge silently drops the oldest non-system messages to stay under budget — you don't need to start a new session.</p>
 
     <div class="faq-q">what is kv cache quant?</div>
     <p>controls the precision of the model's memory cache. <code>q4_0</code> uses half the VRAM of <code>q8_0</code> with barely noticeable quality loss — ideal for 16GB cards. <code>f16</code> is best quality but uses full VRAM.</p>
 
     <div class="faq-q">does the composer save drafts?</div>
     <p>yes — whatever you type is saved to browser storage per chat. if you refresh the page or switch chats, your draft is restored when you come back. it is cleared when you hit send.</p>
-
-    <div class="faq-q">what's that scratchpad block in some replies?</div>
-    <p>most local chat templates (Qwen, DeepSeek, GLM…) discard prior <code>&lt;think&gt;</code> reasoning before sending the conversation back to the model — meaning the model loses its own train of thought between turns. accuretta rewraps those blocks as a "scratchpad-from-earlier-turn" so the reasoning survives. you'll see them rendered inline as a small italic block with a <svg class="faq-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg> notepad icon. toggle it off via <i>preserve_prior_thinking</i> in <code>data/settings.json</code> if you don't want them.</p>
 
     <div class="faq-q">keyboard shortcuts?</div>
     <p><code>⌘⏎</code> / <code>Ctrl⏎</code> send · <code>Shift⏎</code> newline · <code>Ctrl+K</code> / <code>⌘K</code> session switcher · click model name in the chat meta to open Settings.</p>
@@ -571,20 +584,20 @@
     </div>
 
     <div class="form-group" style="display:flex;align-items:center;gap:8px;">
-      <span>Memories</span>
+      <span>Long-term memory</span>
       <span class="grow" style="flex:1;"></span>
       <span id="mem-count" class="hint" style="font-size:10px;"></span>
       <button class="btn sm" id="btn-mem-refresh" type="button" title="Reload"><i class="ph ph-arrow-clockwise"></i></button>
-      <button class="btn danger sm" id="btn-mem-clear" type="button" title="Forget all memories"><i class="ph ph-trash"></i>Clear</button>
+      <button class="btn danger sm" id="btn-mem-clear" type="button" title="Forget every long-term memory"><i class="ph ph-trash"></i>Clear</button>
     </div>
     <div class="form-row">
-      <span class="hint">durable facts the model learned about you across sessions. delete anything stale or wrong — the model can always re-learn.</span>
+      <span class="hint">durable lessons the model learned about you and carried across sessions. delete anything stale or wrong — the model can always re-learn.</span>
     </div>
     <div class="form-row">
       <div class="mem-list" id="mem-list"></div>
     </div>
     <div class="form-row inline" style="gap:6px;">
-      <input type="text" id="mem-add-text" placeholder="add a memory…" style="flex:1;">
+      <input type="text" id="mem-add-text" placeholder="add a long-term memory…" style="flex:1;">
       <button class="btn sm" id="btn-mem-add"><i class="ph ph-plus"></i>Add</button>
     </div>
 
