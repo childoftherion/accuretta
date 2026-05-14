@@ -4037,6 +4037,12 @@
   }
 
   // ---------- SSE ----------
+  // Tracks the bridge's monotonic event-id snapshot across reconnects.
+  // When `hello` arrives with a snapshot_id LOWER than the last one we
+  // saw, the bridge restarted (id counter resets on boot) — useful for
+  // showing a "bridge restarted" toast distinct from a normal reconnect.
+  let _lastSnapshotId = -1;
+
   function subscribeSSE() {
     const es = new EventSource("/api/events");
     es.onmessage = (e) => {
@@ -4069,6 +4075,55 @@
           if ($("#settings-drawer")?.classList.contains("open")) populateSettingsForm();
           renderModelPill();
         });
+      } else if (evt.type === "hello") {
+        // New connection. If snapshot_id went BACKWARDS (or jumped to a
+        // tiny number after we'd been running for a while), the bridge
+        // restarted — surface that distinctly from a normal wifi blip.
+        const snap = Number(evt.snapshot_id || 0);
+        if (_lastSnapshotId > 0 && snap < _lastSnapshotId) {
+          toast("Bridge restarted — reconnected.", "info", 3500, "sse-hello");
+        } else if (evt.replayed_from && _lastSnapshotId > 0) {
+          // Reconnect WITHOUT a bridge restart — just say "back online".
+          toast("Reconnected.", "ok", 1800, "sse-hello");
+        }
+        _lastSnapshotId = snap;
+      } else if (evt.type === "events:gap") {
+        // The disconnect was longer than the bridge's 256-event ring buffer
+        // — some events were lost forever. Tell the user so they know to
+        // reload if things look stale (mid-tool-call, half-rendered turn).
+        const lost = (evt.lost_to || 0) - (evt.lost_from || 0) + 1;
+        toast(
+          `Connection dropped for too long — ${lost} event${lost === 1 ? "" : "s"} missed. ` +
+          `Reload the page if anything looks half-finished.`,
+          "warn", 8000, "sse-gap"
+        );
+      } else if (evt.type === "llama:watchdog_restart") {
+        // llama-server crashed; bridge is auto-restarting. Backoff is in
+        // evt.delay seconds; attempt N of 3.
+        const att = evt.attempt || 1;
+        const max = 3;
+        const sec = Math.round(evt.delay || 2);
+        toast(
+          `llama-server crashed — auto-restart attempt ${att}/${max} in ${sec}s…`,
+          "warn", 4500, "llama-watchdog"
+        );
+      } else if (evt.type === "llama:watchdog_restored") {
+        toast(
+          `llama-server back up${evt.pid ? ` (pid ${evt.pid})` : ""} — keep going.`,
+          "ok", 3000, "llama-watchdog"
+        );
+        // Refresh model pill / status since the loaded model is back.
+        try { loadModels().then(renderModelPill); } catch {}
+      } else if (evt.type === "llama:watchdog_stuck") {
+        // Circuit breaker tripped: 3 crashes in 60s. The bridge has given
+        // up auto-restarting. This is the most important event in the
+        // batch — long-lived toast with a clear next-step.
+        toast(
+          (evt.message || "llama-server keeps crashing.") +
+          " Auto-restart suspended. Open Settings → Models and pick a different model or lower num_ctx.",
+          "err", 60000, "llama-watchdog"
+        );
+        try { loadModels().then(renderModelPill); } catch {}
       }
     };
     es.onerror = () => {

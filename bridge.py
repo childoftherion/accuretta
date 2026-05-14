@@ -304,7 +304,20 @@ def load_json(path: Path, default: Any) -> Any:
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        # Corruption recovery — rename the broken file aside instead of
+        # silently returning default. Without this, a partially-written
+        # chats.json (interrupted manual edit, OS hard reset, disk full
+        # pre-atomicity) would erase the user's entire chat history with
+        # zero diagnostic trail. The .corrupt-<ts> file is left in place
+        # so the user (or a recovery script) can attempt salvage.
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            bak = path.with_name(f"{path.name}.corrupt-{ts}")
+            path.rename(bak)
+            print(f"[load_json] corrupt: {path} -> {bak.name} ({e!r})", file=sys.stderr)
+        except Exception as e2:
+            print(f"[load_json] corrupt + rename failed: {path} ({e!r}; rename: {e2!r})", file=sys.stderr)
         return default
 
 
@@ -345,6 +358,10 @@ DEFAULT_SETTINGS = {
     "max_tool_rounds": 60,          # how many tool-call rounds the model may run per user turn before forced stop
     "preserve_prior_thinking": True,# rewrite prior <think>…</think> as plain text so it survives chat-template stripping
     # llama-server lifecycle (bridge spawns it for us)
+    "watchdog_enabled": True,       # auto-respawn llama-server on silent crash (OOM, segfault).
+                                    # Circuit breaker stops trying after 3 crashes in 60s — fix
+                                    # config and click 'Restart server' to resume. /api/models/stop
+                                    # disables auto-restart until next /api/models/load.
     "models_dir": "",               # folder containing .gguf files (set via Settings -> Models folder)
     "model_path": "",               # full path to the currently loaded .gguf
     "llama_bin": "",                # override path to llama-server.exe (auto-detected if blank)
@@ -1079,16 +1096,34 @@ def list_approvals() -> list[dict]:
 
 
 # ---- SSE event bus ---------------------------------------------------------
+# Reconnect-friendly pub/sub. Every broadcast assigns a monotonic id and
+# appends to a small ring buffer (last EVENT_LOG_MAX events). The SSE
+# handler reads `Last-Event-ID` from the request, replays anything missed
+# from the buffer, then resumes the live stream — recovers cleanly from
+# wifi flicker / sleep / brief disconnects without losing tool_result or
+# approval events. Subscribers also get the snapshot id at subscribe time
+# so events newer than the snapshot only arrive via the live queue (no
+# duplicates between replay and queue).
+
+from collections import deque
+
+EVENT_LOG_MAX = 256
 
 _subscribers: list[Queue] = []
 _subs_lock = threading.Lock()
+_event_log: deque = deque(maxlen=EVENT_LOG_MAX)  # holds (id, evt) tuples
+_event_log_id = 0  # monotonic counter, only incremented under _subs_lock
 
 
-def subscribe() -> Queue:
+def subscribe() -> tuple[Queue, int]:
+    """Returns (queue, snapshot_id). snapshot_id is the highest event id
+    that existed BEFORE this subscription returns — used by the SSE handler
+    to slice the replay log so events newer than snapshot_id are delivered
+    via the queue (avoids dupes between replay and live stream)."""
     q: Queue = Queue(maxsize=1024)
     with _subs_lock:
         _subscribers.append(q)
-    return q
+        return q, _event_log_id
 
 
 def unsubscribe(q: Queue) -> None:
@@ -1098,11 +1133,20 @@ def unsubscribe(q: Queue) -> None:
 
 
 def broadcast_event(evt: dict) -> None:
+    global _event_log_id
     with _subs_lock:
+        _event_log_id += 1
+        evt_id = _event_log_id
+        # Tag a copy so the original dict the caller passed isn't mutated.
+        # Clients that want the id can read evt['_id']; the SSE handler
+        # writes it into the wire `id:` field for Last-Event-ID resume.
+        logged = dict(evt)
+        logged["_id"] = evt_id
+        _event_log.append((evt_id, logged))
         dead = []
         for q in _subscribers:
             try:
-                q.put_nowait(evt)
+                q.put_nowait(logged)
             except Exception:
                 dead.append(q)
         for q in dead:
@@ -1110,6 +1154,13 @@ def broadcast_event(evt: dict) -> None:
                 _subscribers.remove(q)
             except Exception:
                 pass
+
+
+def replay_events_since(since_id: int, up_to_id: int) -> list:
+    """Return logged events with since_id < id <= up_to_id, in order.
+    Snapshot under the lock so we don't iterate a deque mid-append."""
+    with _subs_lock:
+        return [(i, e) for (i, e) in _event_log if since_id < i <= up_to_id]
 
 
 # ---- tool implementations --------------------------------------------------
@@ -6238,6 +6289,157 @@ def _tool_result_cap(name: str) -> int:
     return 16000 if name in _ANALYSIS_TOOL_NAMES else 4000
 
 
+# Fields known to carry the bulk of a tool's output. We elide these in place
+# (head + ellipsis marker + tail) BEFORE serializing the result so the JSON
+# envelope stays valid even on very large outputs — chopping the serialized
+# string at a fixed character count, the previous behavior, would produce
+# truncated-mid-value JSON that the model can't parse and that hides the
+# trailing diagnostics (errors usually appear at the bottom of stdout).
+_BULK_TOOL_FIELDS = ("stdout", "stderr", "content", "text", "output", "html", "body")
+
+
+def _elide_text(s: str, cap: int) -> str:
+    """Head/tail line-aware elision. Keep ~half the budget on each end with
+    a one-line summary marker between them. cap is in characters (consistent
+    with the rest of the tool-result pipeline). Returns s unchanged when
+    s already fits."""
+    if not isinstance(s, str) or len(s) <= cap:
+        return s
+    lines = s.split("\n")
+    # Single-blob with no newlines (e.g. a giant base64 PNG): char-level
+    # slice is the only sane fallback.
+    if len(lines) <= 4:
+        half = max(1, (cap - 80) // 2)
+        return s[:half] + f"\n… [{len(s) - cap} chars elided] …\n" + s[-half:]
+    # Line-aware elision: greedily fill head and tail keeping them roughly
+    # balanced by char count. Tokens scale ~linearly with chars for typical
+    # text, so this also balances by token cost.
+    target_each = max(256, (cap - 80) // 2)
+    head_lines: list[str] = []
+    tail_lines: list[str] = []
+    head_chars = 0
+    tail_chars = 0
+    i = 0
+    j = len(lines) - 1
+    while i <= j and (head_chars < target_each or tail_chars < target_each):
+        if head_chars <= tail_chars:
+            head_lines.append(lines[i])
+            head_chars += len(lines[i]) + 1
+            i += 1
+        else:
+            tail_lines.append(lines[j])
+            tail_chars += len(lines[j]) + 1
+            j -= 1
+        if i > j:
+            break
+    omitted = j - i + 1
+    if omitted <= 0:
+        return s  # ate the whole thing, no elision needed
+    omitted_chars = sum(len(lines[k]) + 1 for k in range(i, j + 1))
+    marker = f"… [{omitted} of {len(lines)} lines elided · {omitted_chars} chars] …"
+    return "\n".join(head_lines) + "\n" + marker + "\n" + "\n".join(reversed(tail_lines))
+
+
+def _truncation_envelope(result: Any, cap: int, original_chars: int) -> str:
+    """Last-resort fallback. Returns a tiny, *valid* JSON object describing
+    that the result was too large even after compression. Never produces
+    malformed JSON — the model treats this as a structured "I tried, it
+    didn't fit" message instead of walking off a cliff into truncated bytes."""
+    keys = list(result.keys()) if isinstance(result, dict) else None
+    return json.dumps({
+        "_truncated": True,
+        "_note": (
+            f"tool result exceeded {cap} chars even after head/tail elision "
+            f"(original ~{original_chars} chars). "
+            f"Re-run the tool with a tighter scope or a smaller range."
+        ),
+        "keys_present": keys,
+    }, ensure_ascii=False)
+
+
+def compress_tool_result(name: str, result: Any, cap: int) -> str:
+    """Serialize a tool result as JSON for the model, applying line-aware
+    head/tail elision to known bulk fields BEFORE serializing. Errors are
+    never elided (they're always small and always critical). Iteratively
+    tightens the per-field budget if JSON escaping overhead pushes the
+    result over cap; falls back to a minimal truncation envelope rather
+    than producing malformed JSON."""
+    # Non-dict results (lists, scalars). For lists we elide the JSON-string
+    # form; for scalars we just serialize. Both stay valid JSON because we
+    # only ever return either the full serialization or the safe envelope.
+    if not isinstance(result, dict):
+        s = json.dumps(result, ensure_ascii=False, default=str)
+        if len(s) <= cap:
+            return s
+        # Try to keep a head sample of the list as a separate JSON; otherwise
+        # fall through to the envelope.
+        if isinstance(result, list) and len(result) > 4:
+            for keep in (200, 100, 50, 20, 10, 5):
+                if keep >= len(result):
+                    continue
+                sample = result[:keep]
+                sampled = {
+                    "_truncated": True,
+                    "_note": f"showing first {keep} of {len(result)} items",
+                    "items": sample,
+                }
+                ss = json.dumps(sampled, ensure_ascii=False, default=str)
+                if len(ss) <= cap:
+                    return ss
+        return _truncation_envelope(result, cap, len(s))
+
+    # Errors: never compress, always pass through verbatim. They're critical
+    # and almost always small. If a tool somehow returns an error PLUS a
+    # huge stdout (rare), strip the bulk fields rather than chopping the
+    # error message itself.
+    if isinstance(result.get("error"), str) and len(result["error"]) < cap // 2:
+        s = json.dumps(result, ensure_ascii=False, default=str)
+        if len(s) <= cap:
+            return s
+        slim = {k: v for k, v in result.items() if k not in _BULK_TOOL_FIELDS}
+        slim["_note"] = "bulk fields stripped — error preserved verbatim"
+        ss = json.dumps(slim, ensure_ascii=False, default=str)
+        if len(ss) <= cap:
+            return ss
+        return _truncation_envelope(result, cap, len(s))
+
+    s_full = json.dumps(result, ensure_ascii=False, default=str)
+    if len(s_full) <= cap:
+        return s_full
+
+    # In-place compression of bulk fields. Budget is split across the bulk
+    # fields present so {stdout: 100KB, stderr: 50KB} shrink proportionally
+    # instead of one eating the whole budget. Iteratively tighten because
+    # JSON escaping (\n → \\n etc.) inflates the serialized size by a few
+    # percent — the first attempt often lands just over cap.
+    bulk_present = [
+        k for k in _BULK_TOOL_FIELDS
+        if isinstance(result.get(k), str) and len(result[k]) > 200
+    ]
+    if bulk_present:
+        scratch = dict(result)
+        for k in bulk_present:
+            scratch[k] = ""
+        overhead = len(json.dumps(scratch, ensure_ascii=False, default=str))
+        # Start with the full available budget per field, then halve until
+        # the serialized result fits or the per-field budget would be too
+        # small to be useful.
+        base_budget = max(256, (cap - overhead) // len(bulk_present))
+        for attempt in range(6):
+            per_field = max(256, base_budget >> attempt)
+            compressed = dict(result)
+            for k in bulk_present:
+                compressed[k] = _elide_text(result[k], per_field)
+            s = json.dumps(compressed, ensure_ascii=False, default=str)
+            if len(s) <= cap:
+                return s
+            if per_field <= 256:
+                break  # can't tighten further usefully
+
+    # Final fallback: minimal envelope. Always valid JSON.
+    return _truncation_envelope(result, cap, len(s_full))
+
+
 def _active_tools() -> dict:
     """Return TOOLS filtered by current settings — desktop tools only show
     when enabled, so the model doesn't keep calling tools that will refuse."""
@@ -7449,12 +7651,18 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                 # analysis tools produce large structured output (string lists,
                 # grep hit lists, disasm listings). Cap looser so the model can
                 # actually reason over the output. Chatty tools stay tight.
+                # compress_tool_result does line-aware head/tail elision on
+                # known bulk fields (stdout/stderr/content/etc.) BEFORE
+                # serializing, so the JSON envelope stays valid and trailing
+                # diagnostics survive — char-truncating the serialized JSON
+                # (the previous behavior) chopped mid-value and hid the bottom
+                # of every long output, where errors usually live.
                 _trunc = _tool_result_cap(name)
                 conversation.append({
                     "role": "tool",
                     "tool_call_id": call.get("id") or name,
                     "name": name,
-                    "content": json.dumps(result, ensure_ascii=False)[:_trunc],
+                    "content": compress_tool_result(name, result, _trunc),
                 })
             rounds += 1
     finally:
@@ -8272,9 +8480,14 @@ class Handler(BaseHTTPRequestHandler):
                 broadcast_event({"type": "models:update", "loaded_model": target})
             return self._send_json(200 if res.get("ok") else 500, res)
         if p == "/api/models/stop":
-            _llama.stop()
+            # User-initiated stop: also tells the watchdog "leave it down"
+            # so a perfectly healthy llama doesn't immediately respawn 5s
+            # later. The next /api/models/load re-arms the watchdog.
+            _llama.stop_permanent()
             broadcast_event({"type": "models:update", "loaded_model": ""})
             return self._send_json(200, {"ok": True})
+        if p == "/api/models/watchdog":
+            return self._send_json(200, _llama.watchdog_status())
         if p == "/api/models/probe-mmproj":
             # Auto-detect helper for the Settings panel: "given this model
             # path, is there a sibling vision projector?" Returns the resolved
@@ -8465,6 +8678,20 @@ class Handler(BaseHTTPRequestHandler):
     # ---- SSE
 
     def _serve_sse(self):
+        # Reconnect support: browser EventSource auto-resends Last-Event-ID
+        # after a network drop. We replay any events the client missed from
+        # the in-memory ring buffer before resuming the live stream. The
+        # subscribe() snapshot id is the cut-off — anything newer than it
+        # arrives via the queue, anything older was either already seen or
+        # has rolled off the buffer (we send a `lost` marker for that).
+        last_id = 0
+        raw = (self.headers.get("Last-Event-ID") or "").strip()
+        if raw.isdigit():
+            try:
+                last_id = int(raw)
+            except Exception:
+                last_id = 0
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -8472,17 +8699,42 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self._set_cors()
         self.end_headers()
-        q = subscribe()
+        q, snapshot_id = subscribe()
         try:
-            # send hello + any pending approvals so reconnects resync
-            self._sse_send({"type": "hello", "t": int(time.time())})
+            # Hello includes the snapshot id so the client can detect a
+            # bridge restart (snapshot_id reset to a small number).
+            self._sse_send(
+                {"type": "hello", "t": int(time.time()),
+                 "snapshot_id": snapshot_id,
+                 "replayed_from": last_id if last_id else None},
+                evt_id=snapshot_id or None,
+            )
+            # Replay missed events.
+            if last_id and last_id < snapshot_id:
+                missed = replay_events_since(last_id, snapshot_id)
+                if missed:
+                    # If the gap exceeds the buffer, the oldest replayed id
+                    # will be > last_id + 1 — flag the gap explicitly so
+                    # the client can decide whether to reload the page.
+                    oldest_replayed = missed[0][0]
+                    if oldest_replayed > last_id + 1:
+                        self._sse_send({
+                            "type": "events:gap",
+                            "lost_from": last_id + 1,
+                            "lost_to": oldest_replayed - 1,
+                            "note": "bridge buffer overflowed during disconnect; some events were lost",
+                        })
+                    for evt_id, evt in missed:
+                        self._sse_send(evt, evt_id=evt_id)
+            # Pending approvals are *state*, not history — always re-emit
+            # so a fresh tab finds them even if the original event aged out.
             for a in list_approvals():
                 self._sse_send({"type": "approval:new", "approval": a})
             last_ping = time.time()
             while True:
                 try:
                     evt = q.get(timeout=15)
-                    self._sse_send(evt)
+                    self._sse_send(evt, evt_id=evt.get("_id"))
                 except Empty:
                     if time.time() - last_ping > 14:
                         try:
@@ -8496,8 +8748,10 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             unsubscribe(q)
 
-    def _sse_send(self, obj: dict):
+    def _sse_send(self, obj: dict, evt_id: int = None):
         try:
+            if evt_id is not None and evt_id > 0:
+                self.wfile.write(f"id: {evt_id}\n".encode("utf-8"))
             self.wfile.write(b"data: ")
             self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
             self.wfile.write(b"\n\n")
@@ -9408,7 +9662,33 @@ def scan_gguf_dir(root: str) -> list[dict]:
 
 
 class LlamaProcess:
-    """Single llama-server subprocess; thread-safe start / stop / swap-model."""
+    """Single llama-server subprocess; thread-safe start / stop / swap-model.
+
+    Watchdog: a background thread polls every WATCHDOG_POLL_S and respawns
+    the subprocess with the same args used last time start() succeeded, so a
+    silent crash (OOM, signal, segfault) gets healed without user
+    intervention. Three guardrails prevent the watchdog from being a foot-gun:
+
+      1. _watchdog_disabled — set by stop_permanent() (the user clicked
+         "Stop server" or asked the bridge to leave llama alone). Cleared on
+         the next user-initiated start(). Prevents respawning a process the
+         user is intentionally shutting down.
+
+      2. Circuit breaker — if the process dies >=WATCHDOG_MAX_CRASHES times
+         within WATCHDOG_WINDOW_S seconds, auto-restart suspends until the
+         user manually calls start() again. Prevents a doomed config (bad
+         model file, wrong mmproj, OOM with current ctx) from looping
+         forever and burning the user's SSD.
+
+      3. _watchdog_stop event — set by shutdown_watchdog() during bridge
+         exit. The thread checks this before AND after every sleep so it
+         exits within ~5s of bridge shutdown, before the process tree
+         tears down.
+    """
+
+    WATCHDOG_POLL_S = 5.0
+    WATCHDOG_MAX_CRASHES = 3
+    WATCHDOG_WINDOW_S = 60.0
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -9419,6 +9699,13 @@ class LlamaProcess:
         # handler can skip the describe_image side-trip when the live model
         # already speaks images natively.
         self._loaded_mmproj: str = ""
+        # Watchdog bookkeeping.
+        self._last_start_args: Optional[dict] = None
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_stop = threading.Event()
+        self._watchdog_disabled = False
+        self._restart_failed = False
+        self._restart_history: list[float] = []
 
     def loaded_model(self) -> str:
         with self._lock:
@@ -9456,7 +9743,150 @@ class LlamaProcess:
             pass
         return True
 
-    def start(self, model_path: str, wait: bool = True, wait_seconds: int = 120) -> dict:
+    # ---- watchdog --------------------------------------------------------
+    def stop_permanent(self, timeout: float = 5.0) -> bool:
+        """User-initiated stop: terminate llama-server AND tell the watchdog
+        not to respawn it. Use this for the UI 'Stop server' action. The next
+        successful start() re-enables the watchdog automatically."""
+        self._watchdog_disabled = True
+        self._restart_history = []
+        self._restart_failed = False
+        return self.stop(timeout=timeout)
+
+    def watchdog_status(self) -> dict:
+        """Snapshot for the UI / debug endpoint."""
+        return {
+            "enabled": bool(get_settings().get("watchdog_enabled", True)),
+            "disabled_by_user": self._watchdog_disabled,
+            "circuit_tripped": self._restart_failed,
+            "recent_crashes": len(self._restart_history),
+            "max_crashes": self.WATCHDOG_MAX_CRASHES,
+            "window_s": self.WATCHDOG_WINDOW_S,
+            "running": self.is_running(),
+            "thread_alive": self._watchdog_thread is not None and self._watchdog_thread.is_alive(),
+            "has_last_args": self._last_start_args is not None,
+        }
+
+    def reset_circuit_breaker(self) -> None:
+        """Clear the crash history so the watchdog will try again. Called
+        implicitly by every user-initiated start()."""
+        self._restart_history = []
+        self._restart_failed = False
+        self._watchdog_disabled = False
+
+    def shutdown_watchdog(self) -> None:
+        """Called from atexit / Ctrl+C handlers. Stops the watchdog thread
+        cleanly so it doesn't try to respawn during process teardown."""
+        self._watchdog_stop.set()
+        t = self._watchdog_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)
+
+    def _ensure_watchdog(self) -> None:
+        """Lazy-start the polling thread on the first successful start()."""
+        if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
+            return
+        self._watchdog_stop.clear()
+        t = threading.Thread(target=self._watchdog_loop, name="llama-watchdog", daemon=True)
+        self._watchdog_thread = t
+        t.start()
+
+    def _watchdog_loop(self) -> None:
+        """Poll loop. Sleeps via Event.wait() so shutdown_watchdog() gets a
+        prompt response. Exceptions are logged and swallowed — a watchdog
+        that crashes itself defeats the whole point."""
+        while not self._watchdog_stop.is_set():
+            if self._watchdog_stop.wait(self.WATCHDOG_POLL_S):
+                return
+            try:
+                self._maybe_restart()
+            except Exception as e:
+                print(f"[watchdog] error: {e!r}", file=sys.stderr)
+
+    def _maybe_restart(self) -> None:
+        """Per-tick check. Returns silently in any of the suspend states."""
+        # Settings toggle (lets the user disable globally without losing
+        # state). Check every tick so toggling in the UI takes effect on the
+        # next poll, not on the next restart.
+        try:
+            if not bool(get_settings().get("watchdog_enabled", True)):
+                return
+        except Exception:
+            pass
+        if self._watchdog_disabled or self._restart_failed:
+            return
+        if self._last_start_args is None:
+            return  # never had a successful start to remember
+        if self.is_running():
+            return  # process is fine
+
+        # Process is dead. Apply the circuit breaker.
+        now = time.time()
+        self._restart_history = [t for t in self._restart_history if now - t < self.WATCHDOG_WINDOW_S]
+        if len(self._restart_history) >= self.WATCHDOG_MAX_CRASHES:
+            self._restart_failed = True
+            msg = (
+                f"llama-server crashed {len(self._restart_history)} times in "
+                f"{int(self.WATCHDOG_WINDOW_S)}s; auto-restart suspended. "
+                f"Fix the config (model path, ctx size, mmproj) and click "
+                f"'Restart server' in Settings to resume."
+            )
+            print(f"[watchdog] {msg}", file=sys.stderr)
+            try:
+                broadcast_event({"type": "llama:watchdog_stuck", "message": msg})
+            except Exception:
+                pass
+            return
+
+        self._restart_history.append(now)
+        # Exponential backoff: 2s, 4s, 8s. The wait is cancellable so a
+        # graceful shutdown during backoff still exits in ~1s.
+        delay = float(1 << len(self._restart_history))  # 2, 4, 8
+        attempt = len(self._restart_history)
+        print(
+            f"[watchdog] llama-server is dead — restart attempt {attempt}/"
+            f"{self.WATCHDOG_MAX_CRASHES} in {delay:.0f}s",
+            file=sys.stderr,
+        )
+        try:
+            broadcast_event({
+                "type": "llama:watchdog_restart",
+                "attempt": attempt,
+                "delay": delay,
+            })
+        except Exception:
+            pass
+        if self._watchdog_stop.wait(delay):
+            return  # bridge shutting down, abort restart
+
+        try:
+            args = dict(self._last_start_args)
+        except Exception:
+            args = {}
+        # _last_start_args was captured at successful-start time; we DON'T
+        # call reset_circuit_breaker() before the watchdog-driven restart
+        # because we want each respawn attempt to count toward the limit.
+        try:
+            res = self.start(_from_watchdog=True, **args)
+        except Exception as e:
+            print(f"[watchdog] restart raised: {e!r}", file=sys.stderr)
+            return
+        if res.get("ok"):
+            print(f"[watchdog] llama-server back up (pid {res.get('pid')})", file=sys.stderr)
+            try:
+                broadcast_event({"type": "llama:watchdog_restored", "pid": res.get("pid")})
+            except Exception:
+                pass
+        else:
+            print(f"[watchdog] restart failed: {res.get('error')}", file=sys.stderr)
+
+    def start(self, model_path: str, wait: bool = True, wait_seconds: int = 120,
+              _from_watchdog: bool = False) -> dict:
+        # User-initiated start clears the circuit breaker and re-enables the
+        # watchdog. Watchdog-initiated retries skip this so each attempt
+        # counts toward the crash limit (otherwise the breaker never trips).
+        if not _from_watchdog:
+            self.reset_circuit_breaker()
         bin_path = find_llama_bin()
         if not bin_path:
             return {"ok": False, "error": "llama-server.exe not found. Set llama_bin in Settings or install llama.cpp."}
@@ -9582,6 +10012,16 @@ class LlamaProcess:
             self._proc = p
             self._loaded_model = model_path
             self._loaded_mmproj = mmproj_path
+        # Remember exactly how to respawn this configuration. The watchdog
+        # uses these args verbatim, so any change in user settings between
+        # crash and restart is intentionally NOT picked up — we replay the
+        # last-known-good launch. wait=False keeps the watchdog non-blocking.
+        self._last_start_args = {
+            "model_path": model_path,
+            "wait": False,
+            "wait_seconds": wait_seconds,
+        }
+        self._ensure_watchdog()
 
         if not wait:
             return {"ok": True, "pid": p.pid, "model": model_path,
@@ -9687,9 +10127,15 @@ def main():
         else:
             print(f"  [info] no model loaded yet. Pick one in Settings -> Models.")
 
-    # ensure the spawned llama-server dies with us
+    # ensure the spawned llama-server dies with us. Order matters: atexit
+    # runs callbacks in REVERSE registration order, so stop() registers
+    # first (runs last) and shutdown_watchdog() registers second (runs
+    # first) — that way the watchdog isn't still polling when we kill
+    # the subprocess from underneath it, which would trigger an
+    # at-shutdown respawn race.
     import atexit
     atexit.register(_llama.stop)
+    atexit.register(_llama.shutdown_watchdog)
 
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     httpd.daemon_threads = True
@@ -9784,6 +10230,12 @@ def main():
     except KeyboardInterrupt:
         print("\nstopping.")
     finally:
+        # Stop the watchdog FIRST so it doesn't observe the impending
+        # subprocess death and try to "heal" it during shutdown.
+        try:
+            _llama.shutdown_watchdog()
+        except Exception:
+            pass
         try:
             _llama.stop()
         except Exception:
