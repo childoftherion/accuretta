@@ -9706,6 +9706,13 @@ class LlamaProcess:
         self._watchdog_disabled = False
         self._restart_failed = False
         self._restart_history: list[float] = []
+        # True while a user-initiated start() is in flight. The watchdog
+        # respects this so it doesn't see the brief proc-is-dead window
+        # between stop() and the new spawn (e.g. settings reload, model
+        # switch) and "helpfully" launch a second process with the old
+        # args while the user's new one is still loading. Cleared in a
+        # finally so it's always released, even on spawn failure.
+        self._starting = False
 
     def loaded_model(self) -> str:
         with self._lock:
@@ -9815,6 +9822,9 @@ class LlamaProcess:
             pass
         if self._watchdog_disabled or self._restart_failed:
             return
+        if self._starting:
+            return  # user-initiated start() in flight; the brief proc-is-dead
+                    # window between stop() and the new spawn is not a crash
         if self._last_start_args is None:
             return  # never had a successful start to remember
         if self.is_running():
@@ -9882,6 +9892,25 @@ class LlamaProcess:
 
     def start(self, model_path: str, wait: bool = True, wait_seconds: int = 120,
               _from_watchdog: bool = False) -> dict:
+        # Thin wrapper that guards the call with the _starting flag so the
+        # watchdog leaves us alone while a transition is in flight. Setting
+        # the flag BEFORE reset_circuit_breaker() and BEFORE the inner stop()
+        # closes the race that lets a settings-driven reload (which calls
+        # self.stop() then re-spawns with new args) get caught by a
+        # watchdog tick mid-load and spawn a duplicate process with the
+        # OLD args. The finally clause guarantees the flag is released even
+        # if _start_impl raises.
+        self._starting = True
+        try:
+            return self._start_impl(model_path=model_path, wait=wait,
+                                    wait_seconds=wait_seconds,
+                                    _from_watchdog=_from_watchdog)
+        finally:
+            self._starting = False
+
+    def _start_impl(self, model_path: str, wait: bool = True,
+                    wait_seconds: int = 120,
+                    _from_watchdog: bool = False) -> dict:
         # User-initiated start clears the circuit breaker and re-enables the
         # watchdog. Watchdog-initiated retries skip this so each attempt
         # counts toward the crash limit (otherwise the breaker never trips).
