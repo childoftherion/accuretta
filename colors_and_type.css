@@ -162,6 +162,28 @@
   /* ---- INNER SHADOWS (inset wells, code blocks) ---- */
   --shadow-inset: inset 0 1px 0 rgba(20,20,18,0.04), inset 0 0 0 1px rgba(20,20,18,0.04);
 
+  /* ---- SOFT-BUTTON SHADOWS ----
+     Layered: a 1px inset white highlight on the top edge that reads as
+     "lit from above," plus a soft outer drop for the raised feel. The
+     hairline is part of the same token so a button always has a crisp
+     boundary even on the same-coloured background. Active state collapses
+     the shadow so the button reads as "pressed in." */
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.55),
+                       0 1px 1px rgba(20,20,18,0.04),
+                       0 1px 3px rgba(20,20,18,0.06),
+                       0 0 0 1px rgba(20,20,18,0.05);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.65),
+                       0 2px 4px rgba(20,20,18,0.08),
+                       0 6px 14px rgba(20,20,18,0.10),
+                       0 0 0 1px rgba(20,20,18,0.07);
+  --btn-shadow-active: inset 0 1px 2px rgba(20,20,18,0.06),
+                       0 0 0 1px rgba(20,20,18,0.05);
+  /* Send-button gradient — warm pink → coral, with the inherited accent
+     as the rest fill on dark. Used as `background-image` so the existing
+     `background-color: var(--accent)` stays as a fallback. */
+  --btn-send-gradient: linear-gradient(135deg, #ff7eb6 0%, #ff5e9c 38%, #ff8d5a 100%);
+  --btn-send-glow:     0 6px 18px rgba(255, 110, 156, 0.32);
+
   /* ---- MOTION ---- */
   --ease-out:    cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in-out: cubic-bezier(0.6, 0, 0.4, 1);
@@ -232,11 +254,106 @@
   --shadow-pop: 0 24px 70px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.08);
 
   --shadow-inset: inset 0 1px 0 rgba(0,0,0,0.3), inset 0 0 0 1px rgba(255,255,255,0.04);
+
+  /* Dark-mode soft-button shadows. Inverted logic: the top highlight is
+     a soft white at low opacity (mimicking light bouncing off the bevel),
+     and the drop turns into a crisp dark + a subtle white hairline so
+     the button stays visible against same-coloured panels. */
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.07),
+                       0 1px 1px rgba(0,0,0,0.30),
+                       0 2px 6px rgba(0,0,0,0.30),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.10),
+                       0 3px 8px rgba(0,0,0,0.40),
+                       0 8px 18px rgba(0,0,0,0.40),
+                       0 0 0 1px rgba(255,255,255,0.06);
+  --btn-shadow-active: inset 0 1px 3px rgba(0,0,0,0.45),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  /* Dark-mode send button leans purple → magenta (reads as the dark-mode
+     accent family). Glow is tuned for the darker surrounding bg. */
+  --btn-send-gradient: linear-gradient(135deg, #b07cff 0%, #ff7eb6 60%, #ff8d5a 100%);
+  --btn-send-glow:     0 6px 22px rgba(176, 124, 255, 0.40);
+}
+
+/* ============================================================
+   DIM MODE — the OLED-friendly middle ground.
+   Lighter than dark (so reading is easier when the eyes want
+   more brightness) but never goes near pure white (which would
+   risk burn-in on OLED panels and feel harsh after long sessions).
+   Warm slate palette keeps tonal continuity with the warm light
+   theme; ember accent stays as the brand colour because it sits
+   well against both ends. Mid-grey backgrounds also distribute
+   pixel wear better than either pure black or pure white, which
+   is the OLED-burn-in nudge baked in for free.
+   ============================================================ */
+[data-theme="dim"] {
+  --bg:        #36332e;
+  --bg-raised: #403d37;
+  --bg-sunken: #2c2924;
+  --bg-inset:  #4a4640;
+
+  --bg-gradient: linear-gradient(180deg, #3b3832 0%, #36332e 38%, #2f2c27 100%);
+
+  --fg:        #E8E5DD;
+  --fg-muted:  #B5B1A6;
+  --fg-subtle: #8A8679;
+  --fg-faint:  #6A6659;
+  --fg-invert: var(--off-black);
+
+  --border:        #4a4640;
+  --border-strong: #5a5650;
+  --border-subtle: #3d3a34;
+
+  /* Accent: a desaturated sage. The previous ember accent doubled
+     down on the warm slate bg and made everything read as a "piss
+     filter" — a cool sage breaks the monotony, sits comfortably
+     against warm taupe/grey neutrals, and stays muted enough that
+     focus rings + chip on-states don't scream. accent-fg stays white
+     so filled accent buttons (Save, etc.) keep contrast. */
+  --accent:        #8AA89A;
+  --accent-hover:  #7A988A;
+  --accent-subtle: rgba(138,168,154,0.18);
+  --accent-fg:     #FFFFFF;
+
+  --success-subtle: rgba(106,196,154,0.16);
+  --warning-subtle: rgba(232,211,112,0.16);
+  --danger-subtle:  rgba(255,106,0,0.16);
+  --info-subtle:    rgba(155,126,232,0.16);
+
+  /* Shadows tuned for the medium-dark surface: stronger than light
+     mode's barely-there shadows, softer than dark mode's deep blacks. */
+  --shadow-xs: 0 1px 0 rgba(0,0,0,0.18);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.22), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-lg: 0 12px 32px rgba(0,0,0,0.32), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-pop: 0 22px 64px rgba(0,0,0,0.40), 0 0 0 1px rgba(255,255,255,0.06);
+
+  --shadow-inset: inset 0 1px 0 rgba(0,0,0,0.15), inset 0 0 0 1px rgba(255,255,255,0.04);
+
+  /* Soft-button shadows: gentle inset white highlight + moderate dark
+     drop. Less intense than dark mode (where the surrounding panel is
+     much darker so a deeper drop is needed for the same depth read). */
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.10),
+                       0 1px 1px rgba(0,0,0,0.16),
+                       0 2px 5px rgba(0,0,0,0.18),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.14),
+                       0 3px 7px rgba(0,0,0,0.22),
+                       0 7px 14px rgba(0,0,0,0.22),
+                       0 0 0 1px rgba(255,255,255,0.06);
+  --btn-shadow-active: inset 0 1px 3px rgba(0,0,0,0.25),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  /* Send button: warm gradient matching the warm dim palette. Same
+     hue family as light theme but slightly muted glow for the medium
+     surrounding background. */
+  --btn-send-gradient: linear-gradient(135deg, #ff8d5a 0%, #ff5e9c 60%, #b07cff 100%);
+  --btn-send-glow:     0 6px 18px rgba(255, 141, 90, 0.32);
 }
 
 /* Apply the gradient at the page level only — children with their own
    bg keep their flat color so we don't "double up" gradients. */
 [data-theme="dark"] body,
+[data-theme="dim"] body,
 .dark body {
   background: var(--bg-gradient, var(--bg)) fixed;
 }

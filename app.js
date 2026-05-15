@@ -1390,7 +1390,7 @@
       await newChat();
     }
 
-    applyTheme(state.settings.theme === "dark");
+    applyTheme(state.settings.theme || "dark");
     renderStatus();
     renderModelPill();
     renderChatList();
@@ -1603,7 +1603,11 @@
       const r = await fetch(`/api/desktop/chat-state/${state.chatId}`).then(x => x.json());
       state.sessionDesktopDisabled = !!r.disabled;
     } catch { state.sessionDesktopDisabled = false; }
-    btn.classList.toggle("off", state.sessionDesktopDisabled);
+    // Class name matches the CSS rule `#btn-session-desktop.is-disabled`
+    // in app.css (red border / red-tinted background while OFF). The
+    // older `off` class string had no matching rule, so toggling it
+    // dropped the button into a styleless state that read as "gone".
+    btn.classList.toggle("is-disabled", state.sessionDesktopDisabled);
     btn.title = state.sessionDesktopDisabled
       ? "Desktop automation OFF for this chat — click to re-enable"
       : "Desktop automation ON for this chat — click to disable";
@@ -1680,7 +1684,7 @@
       { kind: "cmd", icon: "ph-gear-six", label: "Open Settings", action: () => { closePalette(); openSettings(); } },
       { kind: "cmd", icon: "ph-brain", label: "Open Long-term memory", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
       { kind: "cmd", icon: "ph-arrow-counter-clockwise", label: "Regenerate last reply", action: () => { closePalette(); regenerateLast(); } },
-      { kind: "cmd", icon: "ph-moon", label: "Toggle theme", action: async () => { closePalette(); const d = state.settings.theme !== "dark"; await saveSettings({ theme: d ? "dark" : "light" }); applyTheme(d); } },
+      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
       { kind: "cmd", icon: "ph-browser", label: "Toggle preview pane", action: () => { closePalette(); app.classList.toggle("preview-collapsed"); } },
       { kind: "cmd", icon: "ph-camera", label: "Screenshot preview", action: () => { closePalette(); screenshotPreview(); } },
       { kind: "cmd", icon: "ph-package", label: "Export project", action: () => { closePalette(); exportProjectZip(); } },
@@ -3981,10 +3985,26 @@
       card.className = "approval inline";
       if (isDesktop) card.classList.add("kind-desktop");
       if (isDestructive) card.classList.add("kind-destructive");
+      // Status pill markup. Default state is "pending" — on click of the
+      // approve/deny buttons we morph the pill in place (`is-pending` →
+      // `is-approved` / `is-denied`) for a brief moment before the card
+      // slides out, so the user sees the decision land instead of the
+      // card just disappearing. Icons use Phosphor classes inline so
+      // they swap with the variant via JS.
+      const pillSvg = {
+        pending:  '<i class="ph-fill ph-clock"></i>',
+        approved: '<i class="ph-fill ph-check-circle"></i>',
+        denied:   '<i class="ph-fill ph-x-circle"></i>',
+        expired:  '<i class="ph-fill ph-hourglass"></i>',
+      };
       card.innerHTML = `
         <div class="appr-head">
           <span class="appr-head-icon">${headerIcon}</span>
           <span class="appr-head-title">${esc(a.title || "Action")}</span>
+          <span class="status-pill-soft is-pending" data-status-pill>
+            <span class="pill-dot">${pillSvg.pending}</span>
+            <span class="pill-label">Pending</span>
+          </span>
           <span class="appr-head-tag">${esc(String(kind).toUpperCase())}</span>
         </div>
         <div class="appr-sub">${esc(sub)}</div>
@@ -4006,8 +4026,28 @@
           <summary><span class="appr-advanced-chevron">${APPR_SVG.chevron}</span><span>Advanced details</span></summary>
           <pre class="appr-advanced-body">${esc(a.command || "(no raw command)")}</pre>
         </details>`;
-      card.querySelector('[data-act="approve"]').addEventListener("click", () => decideApproval(a.id, "approve"));
-      card.querySelector('[data-act="deny"]').addEventListener("click", () => decideApproval(a.id, "deny"));
+      // Morph the status pill in place before the card slides out so the
+      // user sees the decision register. The pill swap is purely cosmetic
+      // (the actual decideApproval() POST + state mutation runs in
+      // parallel) and adds ~280ms of visible feedback.
+      const morphPill = (toState) => {
+        const pill = card.querySelector("[data-status-pill]");
+        if (!pill) return;
+        pill.classList.remove("is-pending", "is-approved", "is-denied", "is-expired");
+        pill.classList.add("is-" + toState);
+        const labelEl = pill.querySelector(".pill-label");
+        const dotEl = pill.querySelector(".pill-dot");
+        if (labelEl) labelEl.textContent = toState.charAt(0).toUpperCase() + toState.slice(1);
+        if (dotEl && pillSvg[toState]) dotEl.innerHTML = pillSvg[toState];
+      };
+      card.querySelector('[data-act="approve"]').addEventListener("click", () => {
+        morphPill("approved");
+        setTimeout(() => decideApproval(a.id, "approve"), 280);
+      });
+      card.querySelector('[data-act="deny"]').addEventListener("click", () => {
+        morphPill("denied");
+        setTimeout(() => decideApproval(a.id, "deny"), 280);
+      });
       row.innerHTML = `
         <div class="avatar approval-avatar">${APPR_SVG.shield}</div>
         <div class="bubble-col"></div>`;
@@ -4571,7 +4611,7 @@
     const changedLoadKeys = LOAD_TIME_KEYS.filter(k => String(prev[k] ?? "") !== String(payload[k] ?? ""));
 
     await saveSettings(payload);
-    applyTheme(payload.theme === "dark");
+    applyTheme(payload.theme || "dark");
 
     if (changedLoadKeys.length && payload.model_path) {
       const tid = "reload-llama";
@@ -4600,9 +4640,37 @@
     }
   }
 
-  function applyTheme(dark) {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-    $("#btn-theme").innerHTML = dark ? '<i class="ph ph-sun"></i>' : '<i class="ph ph-moon"></i>';
+  // Three themes now: dark (default), dim (OLED-friendly middle), light.
+  // Cycle order on the toggle button is dark → dim → light → dark, so the
+  // first click from dark lands on the safer middle option instead of
+  // jumping straight to bright white. nextTheme() handles the cycle and
+  // accepts whatever string is in settings as the starting point.
+  const THEME_CYCLE = ["dark", "dim", "light"];
+  const THEME_ICONS = {
+    dark:  "ph ph-moon",
+    dim:   "ph ph-moon-stars",
+    light: "ph ph-sun",
+  };
+  function nextTheme(cur) {
+    const idx = THEME_CYCLE.indexOf(cur);
+    return THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
+  }
+  // applyTheme accepts a theme STRING ("dark" | "dim" | "light"). For
+  // backward-compat with old callers that passed a boolean, we coerce:
+  // true → "dark", false → "light". New code should pass the string.
+  function applyTheme(theme) {
+    if (theme === true) theme = "dark";
+    else if (theme === false) theme = "light";
+    if (!THEME_CYCLE.includes(theme)) theme = "dark";
+    document.documentElement.dataset.theme = theme;
+    const iconClass = THEME_ICONS[theme] || THEME_ICONS.dark;
+    const topBtn = $("#btn-theme");
+    if (topBtn) topBtn.innerHTML = `<i class="${iconClass}"></i>`;
+    // Keep the sidebar-foot mirror in sync. We only swap the inner <i>'s
+    // class (instead of replacing innerHTML) so the small inline font-size
+    // style on the icon stays put.
+    const sideIcon = document.getElementById("btn-theme-side-icon");
+    if (sideIcon) sideIcon.className = iconClass;
   }
 
   function renderStatus() {
@@ -5081,9 +5149,20 @@
     $("#btn-sysctx-rescan").addEventListener("click", rescanSystemContext);
     $("#btn-sysctx-save").addEventListener("click", saveSystemContext);
     $("#btn-theme").addEventListener("click", async () => {
-      const dark = state.settings.theme !== "dark";
-      await saveSettings({ theme: dark ? "dark" : "light" });
-      applyTheme(dark);
+      // Cycle: dark → dim → light → dark. The dim middle option is the
+      // OLED-safe pick for users who find pure white too harsh; first
+      // click from the dark default lands there instead of jumping
+      // straight to bright light.
+      const next = nextTheme(state.settings.theme || "dark");
+      await saveSettings({ theme: next });
+      applyTheme(next);
+    });
+    // Sidebar-foot mirror so the toggle is reachable even if the topbar
+    // gets covered, the sidebar is the only thing visible on a narrow
+    // window, etc. Delegates to the topbar handler so behaviour stays
+    // identical and we keep one source of truth.
+    document.getElementById("btn-theme-side")?.addEventListener("click", () => {
+      $("#btn-theme")?.click();
     });
     $("#btn-send").addEventListener("click", send);
     $("#btn-stop").addEventListener("click", stopStreaming);
@@ -5283,9 +5362,14 @@
     const mmBtn = $("#btn-mobile-menu");
     const closeMM = () => { mm.classList.remove("open"); mmScrim.classList.remove("open"); };
     const openMM = () => {
-      const dark = document.documentElement.getAttribute("data-theme") !== "light";
+      // Mobile menu shows the NEXT theme as the action label
+      // ("Switch to dim", "Switch to light", "Switch to dark") so the
+      // user knows what the tap will do, mirroring the desktop cycle.
+      const cur = document.documentElement.getAttribute("data-theme") || "dark";
+      const next = nextTheme(cur);
+      const niceName = { dark: "Dark", dim: "Dim", light: "Light" }[next] || next;
       const lbl = $("#mm-theme-label");
-      if (lbl) lbl.textContent = dark ? "Light mode" : "Dark mode";
+      if (lbl) lbl.textContent = `Switch to ${niceName.toLowerCase()}`;
       mm.classList.add("open"); mmScrim.classList.add("open");
     };
     mmBtn?.addEventListener("click", (e) => {

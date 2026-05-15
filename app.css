@@ -59,13 +59,13 @@ button { font-family: inherit; }
 }
 /* Brand mark: two pre-loaded <img>s, one per theme variant.
    Default (light theme) shows the dark-slab mark on the light sidebar;
-   [data-theme="dark"] flips to the white-slab mark on the dark sidebar.
+   :is([data-theme="dark"], [data-theme="dim"]) flips to the white-slab mark on the dark sidebar.
    Keeping both in the DOM means the toggle is instant — no fetch lag. */
 .brand img,
 .brand .brand-mark { width: 22px; height: 22px; object-fit: contain; }
 .brand .brand-mark-dark { display: none; }
-[data-theme="dark"] .brand .brand-mark-light { display: none; }
-[data-theme="dark"] .brand .brand-mark-dark { display: inline-block; }
+:is([data-theme="dark"], [data-theme="dim"]) .brand .brand-mark-light { display: none; }
+:is([data-theme="dark"], [data-theme="dim"]) .brand .brand-mark-dark { display: inline-block; }
 .brand .v { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--fg-faint); letter-spacing: 0.06em; }
 .side-actions {
   display: flex; gap: 6px; padding: 10px 10px 8px;
@@ -251,6 +251,14 @@ button { font-family: inherit; }
   border-radius: 6px;
   color: var(--fg-muted);
   text-decoration: none;
+  /* Reset for the <button>-as-icon variant (theme toggle). Anchors don't
+     need these but buttons inherit a border / native bg that would break
+     the visual parity with the X / GitHub <a> siblings. */
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
   transition: color var(--dur-fast) var(--ease-out),
               background-color var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out);
@@ -424,9 +432,31 @@ button { font-family: inherit; }
   background: transparent; border: none; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--fg-muted);
+  transition: background-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
 }
-.iconbtn:hover { background: var(--bg-inset); color: var(--fg); }
-.iconbtn.active { background: var(--accent-subtle); color: var(--accent); }
+/* Hover lifts the iconbtn into a soft raised pill — keeps the existing
+   square-rounded shape, just adds depth so the button feels affordant
+   instead of looking like a flat icon you're not sure is clickable.
+   Uses --bg-inset (not --bg-raised) so the hover stays visible against
+   the topbar, which is itself --bg-raised. */
+.iconbtn:hover {
+  background: var(--bg-inset);
+  color: var(--fg);
+  box-shadow: var(--btn-shadow-rest);
+  transform: translateY(-1px);
+}
+.iconbtn:active {
+  transform: translateY(0);
+  box-shadow: var(--btn-shadow-active);
+}
+.iconbtn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  box-shadow: var(--btn-shadow-rest);
+}
 
 /* ---- chat ---- */
 .chat { display: grid; grid-template-rows: 1fr auto; min-height: 0; min-width: 0; background: var(--bg); }
@@ -445,6 +475,9 @@ button { font-family: inherit; }
   margin-top: 2px;
 }
 .avatar.user { background: var(--lilac); color: #3A2E5A; font-size: 10px; font-weight: 600; }
+/* dim theme: matches the dark neutral-taupe user bubble. Light cream
+   text on the dark taupe stays readable; cool lilac would clash. */
+[data-theme="dim"] .avatar.user { background: #2D2925; color: #F0EBE0; }
 /* Agent avatar: the Accuretta split-A brand mark. The bubble row gets the
    raw glyph, no circular background — same convention as the old black-hole
    avatar. Two <img>s ship side-by-side and CSS hides whichever doesn't
@@ -471,8 +504,8 @@ button { font-family: inherit; }
 }
 /* default (light theme): show light variant, hide dark */
 .avatar-mark-dark { display: none; }
-[data-theme="dark"] .avatar-mark-light { display: none; }
-[data-theme="dark"] .avatar-mark-dark { display: block; }
+:is([data-theme="dark"], [data-theme="dim"]) .avatar-mark-light { display: none; }
+:is([data-theme="dark"], [data-theme="dim"]) .avatar-mark-dark { display: block; }
 .bubble-row:hover .avatar-mark { transform: scale(1.08); }
 .bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: 82%; min-width: 0; position: relative; }
 .bubble-row.user .bubble-col { align-items: flex-end; }
@@ -500,6 +533,36 @@ button { font-family: inherit; }
   border-top-right-radius: 4px;
   box-shadow: 0 4px 16px color-mix(in srgb, var(--lilac) 40%, transparent);
 }
+/* dim theme: cool lilac clashes with the warm slate palette, so we
+   swap to a much darker neutral taupe — clearly darker than the page
+   bg so the bubble reads as carved-in rather than floating, and grey
+   enough to drop the "piss filter" feel from the previous tan version.
+   Cream text + a soft dark glow keep readability against the new bg. */
+[data-theme="dim"] .bubble.user {
+  background: #2D2925 !important;
+  color: #F0EBE0 !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.40) !important;
+}
+[data-theme="dim"] .bubble.user p,
+[data-theme="dim"] .bubble.user strong,
+[data-theme="dim"] .bubble.user em,
+[data-theme="dim"] .bubble.user span {
+  color: #F0EBE0 !important;
+  -webkit-text-fill-color: #F0EBE0 !important;
+}
+/* Inline code / pre inside the user bubble: the base rule paints them
+   with a near-black tile that disappears on the new dark taupe. Bump
+   to a light translucent tile + light text so they still read as
+   "code" without losing contrast against the bubble. */
+[data-theme="dim"] .bubble.user code,
+[data-theme="dim"] .bubble.user pre {
+  background: rgba(255, 250, 240, 0.10) !important;
+  color: #F0EBE0 !important;
+}
+[data-theme="dim"] .bubble.user .code-card-body { color: #F0EBE0 !important; }
+[data-theme="dim"] .bubble.user .code-card-body .code-line::before { color: rgba(240, 235, 224, 0.45); }
+[data-theme="dim"] .bubble.user .cc-act { color: rgba(240, 235, 224, 0.65); }
+[data-theme="dim"] .bubble.user .cc-act:hover { color: #F0EBE0; background: rgba(255, 250, 240, 0.10); border-color: rgba(255, 250, 240, 0.20); }
 .bubble.user p,
 .bubble.user strong,
 .bubble.user em,
@@ -671,16 +734,16 @@ button { font-family: inherit; }
 .tok-decorator{ color: #C5611C; }
 .tok-punct    { color: var(--fg-muted); }
 
-[data-theme="dark"] .tok-keyword  { color: #C8A8FF; }
-[data-theme="dark"] .tok-string   { color: #B5E29B; }
-[data-theme="dark"] .tok-number   { color: #F4A261; }
-[data-theme="dark"] .tok-comment  { color: var(--fg-faint); }
-[data-theme="dark"] .tok-fn       { color: #7CC0FF; }
-[data-theme="dark"] .tok-tag      { color: #C8A8FF; }
-[data-theme="dark"] .tok-attr     { color: #F4B57A; }
-[data-theme="dark"] .tok-var      { color: #F4A261; }
-[data-theme="dark"] .tok-decorator{ color: #F4B57A; }
-[data-theme="dark"] .tok-punct    { color: var(--fg-muted); }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-keyword  { color: #C8A8FF; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-string   { color: #B5E29B; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-number   { color: #F4A261; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-comment  { color: var(--fg-faint); }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-fn       { color: #7CC0FF; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-tag      { color: #C8A8FF; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-attr     { color: #F4B57A; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-var      { color: #F4A261; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-decorator{ color: #F4B57A; }
+:is([data-theme="dark"], [data-theme="dim"]) .tok-punct    { color: var(--fg-muted); }
 .bubble-meta {
   font-size: 11px;
   letter-spacing: 0;
@@ -1260,22 +1323,35 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 8px;
   border-radius: 999px;
-  border: 1px solid var(--border);
+  /* Border swapped for box-shadow's hairline (same reasoning as .btn).
+     The visual edge stays the same width but no more double-edges. */
+  border: 0;
   background: var(--bg-raised);
   color: var(--fg-muted);
   font-family: var(--font-sans);
   font-size: 10px;
   cursor: pointer;
+  box-shadow: var(--btn-shadow-rest);
+  transition: color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
 }
-.chip:hover { color: var(--fg); border-color: var(--border-strong); }
+.chip:hover {
+  color: var(--fg);
+  box-shadow: var(--btn-shadow-hover);
+  transform: translateY(-1px);
+}
+.chip:active { transform: translateY(0); box-shadow: var(--btn-shadow-active); }
 .chip.on {
   background: var(--accent-subtle);
   color: var(--accent-hover);
-  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  box-shadow: var(--btn-shadow-hover),
+              inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
 }
-[data-theme="dark"] .chip.on,
-[data-theme="dark"] .toolbar-overflow-menu .chip.on,
-[data-theme="dark"] .preview-overflow-menu .chip.on {
+:is([data-theme="dark"], [data-theme="dim"]) .chip.on,
+:is([data-theme="dark"], [data-theme="dim"]) .toolbar-overflow-menu .chip.on,
+:is([data-theme="dark"], [data-theme="dim"]) .preview-overflow-menu .chip.on {
   color: var(--accent-hover);
 }
 .composer-spacer { flex: 1; }
@@ -1318,7 +1394,7 @@ button { font-family: inherit; }
   font-size: 10px;
   flex-shrink: 0;
 }
-[data-theme="dark"] .model-pill .model-pill-vision,
+:is([data-theme="dark"], [data-theme="dim"]) .model-pill .model-pill-vision,
 .dark .model-pill .model-pill-vision {
   background: color-mix(in srgb, var(--mint-3) 22%, transparent);
   color: var(--mint);
@@ -1338,20 +1414,32 @@ button { font-family: inherit; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 14px;
   font-family: var(--font-sans); font-size: 12px; font-weight: 500;
-  border-radius: 6px; border: 1px solid var(--border);
+  /* Border swapped for box-shadow's hairline so the soft-button shadow
+     can paint a single coherent edge (border + box-shadow at the same
+     position double up and look muddy). Visual width is unchanged. */
+  border-radius: 6px; border: 0;
   background: var(--bg-raised); color: var(--fg);
   cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease-out);
+  box-shadow: var(--btn-shadow-rest);
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out);
 }
-.btn:hover { border-color: var(--border-strong); }
-.btn:active { transform: scale(0.98); }
-.btn.accent { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.btn:hover { box-shadow: var(--btn-shadow-hover); transform: translateY(-1px); }
+.btn:active { transform: translateY(0) scale(0.98); box-shadow: var(--btn-shadow-active); }
+.btn.accent { background: var(--accent); color: var(--accent-fg); }
 .btn.accent:hover { background: var(--accent-hover); }
-.btn.ghost { background: transparent; }
-.btn.danger { color: var(--danger); border-color: var(--border); }
-.btn.danger:hover { background: var(--danger-subtle); border-color: var(--danger); }
+/* Ghost: no shadow, no raised feel — used for low-noise actions inside
+   already-raised contexts (sidebar foot, etc.). Overrides the base
+   shadow rather than disabling .btn entirely. */
+.btn.ghost { background: transparent; box-shadow: none; }
+.btn.ghost:hover { background: var(--bg-inset); box-shadow: none; transform: none; }
+.btn.ghost:active { box-shadow: none; transform: scale(0.98); }
+.btn.danger { color: var(--danger); }
+.btn.danger:hover { background: var(--danger-subtle); }
 .btn.sm { padding: 4px 10px; font-size: 11px; }
-.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; box-shadow: var(--btn-shadow-rest); transform: none; }
+.btn[disabled]:hover { box-shadow: var(--btn-shadow-rest); transform: none; }
 
 /* ============================================================
    Right: preview pane (code/render toggle + versions)
@@ -1512,7 +1600,15 @@ button { font-family: inherit; }
   font-family: var(--font-sans); font-size: 10px; letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.preview-collapsed .pull-tab { display: inline-flex; }
+/* The .pull-tab is intentionally never shown. It used to surface the
+   word "PREVIEW" at fixed top-right when the preview pane was collapsed,
+   but it sits at z-index 900 right on top of .topbar .actions and
+   covered the theme / palette / preview-toggle iconbtns — making them
+   look like they didn't exist when the preview was collapsed. The
+   browser icon in the topbar (#btn-toggle-preview) already does the
+   same thing, so the floating tab is pure redundancy. Element kept in
+   the markup for now in case we want to repurpose it. */
+.pull-tab { display: none !important; }
 .pull-tab:hover { background: var(--bg-inset); color: var(--fg); border-color: var(--border-strong); }
 .pull-tab i { font-size: 12px; }
 
@@ -1553,13 +1649,23 @@ button { font-family: inherit; }
   width: min(420px, 94vw);
   background: var(--bg);
   border-left: 1px solid var(--border);
-  box-shadow: var(--shadow-pop);
+  /* No box-shadow here on purpose. The drawer is positioned fixed at
+     right:0 and slides off-screen via transform: translateX(100%) when
+     closed. A box-shadow with a 70px blur radius (--shadow-pop) would
+     bloom in all directions from the off-screen drawer, leaking back
+     onto the visible viewport as a faint dark vertical strip on the
+     right edge. The shadow only gets applied when .open below, where
+     the drawer is actually in view and the shadow is desired. */
   z-index: calc(var(--z-modal) + 1);
   transform: translateX(100%);
-  transition: transform var(--dur-base) var(--ease-out);
+  transition: transform var(--dur-base) var(--ease-out),
+              box-shadow var(--dur-base) var(--ease-out);
   display: flex; flex-direction: column;
 }
-.drawer.open { transform: translateX(0); }
+.drawer.open {
+  transform: translateX(0);
+  box-shadow: var(--shadow-pop);
+}
 .drawer-head {
   padding: 16px 20px;
   display: flex; align-items: center; gap: 10px;
@@ -1652,6 +1758,62 @@ button { font-family: inherit; }
   border-radius: 5px;
   flex-shrink: 0;
 }
+
+/* ============================================================
+   Soft status pills — used on approval cards (Pending / Approved
+   / Denied / Expired) and free for reuse anywhere a status
+   indicator with an icon belongs. Each variant is a coloured
+   icon + matching tinted text on a soft pill background. The
+   shape inherits the same depth treatment as .chip / .btn so
+   the family reads consistently.
+   ============================================================ */
+.status-pill-soft {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  box-shadow: var(--btn-shadow-rest);
+  transition: box-shadow var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.status-pill-soft .pill-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.status-pill-soft .pill-dot svg { width: 11px; height: 11px; display: block; }
+.status-pill-soft .pill-dot i { font-size: 11px; line-height: 1; }
+
+/* Pending — yellow/amber. The default for any new approval. */
+.status-pill-soft.is-pending { color: #b27800; }
+.status-pill-soft.is-pending .pill-dot { background: rgba(232,178,40,0.18); color: #b27800; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-pending { color: #f0c44a; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-pending .pill-dot { background: rgba(232,178,40,0.18); color: #f0c44a; }
+
+/* Approved — green. Briefly shown on approval click before card slides out. */
+.status-pill-soft.is-approved { color: #2f7a3a; }
+.status-pill-soft.is-approved .pill-dot { background: rgba(106,196,154,0.20); color: #2f7a3a; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-approved { color: #95e0a8; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-approved .pill-dot { background: rgba(106,196,154,0.20); color: #95e0a8; }
+
+/* Denied — red. Briefly shown on deny click. */
+.status-pill-soft.is-denied { color: #c44141; }
+.status-pill-soft.is-denied .pill-dot { background: rgba(231,108,108,0.18); color: #c44141; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-denied { color: #ff9b9b; }
+:is([data-theme="dark"], [data-theme="dim"]) .status-pill-soft.is-denied .pill-dot { background: rgba(231,108,108,0.18); color: #ff9b9b; }
+
+/* Expired — neutral grey, no urgency. */
+.status-pill-soft.is-expired { color: var(--fg-faint); }
+.status-pill-soft.is-expired .pill-dot { background: color-mix(in srgb, var(--fg-faint) 18%, transparent); color: var(--fg-faint); }
 
 /* ---- subtitle ---- */
 .approval .appr-sub {
@@ -2489,17 +2651,34 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   border-radius: 999px;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 14px;
-  background: var(--accent); color: var(--accent-fg);
+  /* Gradient styled as background-image so the existing `var(--accent)`
+     stays as the fallback color underneath. The gradient hue rotates
+     between light and dark mode (warm pink/coral in light, purple →
+     pink → orange in dark) via the --btn-send-gradient token. */
+  background: var(--accent);
+  background-image: var(--btn-send-gradient);
+  color: #ffffff;
   border: none;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
-  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+  /* Layered glow + soft inset top so the button reads as raised AND
+     glowing, not just filled. */
+  box-shadow: var(--btn-send-glow),
+              inset 0 1px 0 rgba(255, 255, 255, 0.35),
+              0 0 0 1px rgba(0, 0, 0, 0.06);
+  transition: transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out),
+              filter var(--dur-fast) var(--ease-out);
 }
 .composer-foot #btn-send:hover {
-  background: var(--accent-hover);
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 45%, transparent);
+  /* Brighten the gradient slightly on hover instead of swapping the
+     whole color (cheaper than re-painting and stays on-brand). */
+  filter: brightness(1.06);
+  box-shadow: var(--btn-send-glow),
+              inset 0 1px 0 rgba(255, 255, 255, 0.45),
+              0 0 0 1px rgba(0, 0, 0, 0.08),
+              0 4px 8px rgba(0, 0, 0, 0.10);
   transform: translateY(-1px);
 }
-.composer-foot #btn-send:active { transform: translateY(0) scale(0.96); }
+.composer-foot #btn-send:active { transform: translateY(0) scale(0.96); filter: brightness(0.98); }
 .composer-foot #btn-send i { font-size: 14px; }
 .composer-foot #btn-send span { display: none; }
 .composer-foot #btn-stop {
@@ -2657,8 +2836,8 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   color: var(--danger, #c92a2a);
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
-[data-theme="dark"] .pycheck-banner.ok { color: #95e0a8; }
-[data-theme="dark"] .pycheck-banner.err { color: #ff9b9b; }
+:is([data-theme="dark"], [data-theme="dim"]) .pycheck-banner.ok { color: #95e0a8; }
+:is([data-theme="dark"], [data-theme="dim"]) .pycheck-banner.err { color: #ff9b9b; }
 .pycheck-code {
   flex: 1; min-height: 0;
   margin: 0;
@@ -2722,7 +2901,7 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   color: var(--danger, #c92a2a);
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
-[data-theme="dark"] .doc-preview-banner.err { color: #ff9b9b; }
+:is([data-theme="dark"], [data-theme="dim"]) .doc-preview-banner.err { color: #ff9b9b; }
 
 .doc-preview-body {
   flex: 1; min-height: 0;
@@ -2763,7 +2942,7 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
 /* ============================================================
    DARK MODE OVERRIDES (bubble shadows)
    ============================================================ */
-[data-theme="dark"],
+:is([data-theme="dark"], [data-theme="dim"]),
 .dark {
   .bubble.agent {
     box-shadow: 0 4px 16px rgba(0,0,0,0.25);
