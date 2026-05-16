@@ -379,7 +379,14 @@ DEFAULT_SETTINGS = {
     "flash_attn": True,             # --flash-attn on/off. Off only if your GPU/build doesn't support it.
     "n_parallel": 1,                # --parallel: concurrent sequences. 1 is fine for chat. 2+ wastes ctx.
     "n_ubatch": 0,                  # --ubatch-size. 0 = auto (half of batch, clamped 512..1024).
-    "enable_speculative": True,     # speculative decoding (ngram-mod). Free speedup; turn off if it confuses your model.
+    "enable_speculative": True,     # DEPRECATED — kept for backward-compat. Read by older configs only;
+                                    # new field `spec_strategy` supersedes it. True maps to "ngram-mod", False to "off".
+    "spec_strategy": "ngram-mod",   # Speculative decoding strategy. One of:
+                                    #   "off"        — no speculative decoding (best for unusual models that confuse the drafter)
+                                    #   "ngram-mod"  — n-gram modular draft, works on any model (default, current behavior)
+                                    #   "draft-mtp"  — uses the model's built-in MTP heads (Qwen 3.5/3.6, DeepSeek V3/R1).
+                                    #                  ~1.85x decode speedup on MTP-capable models; fails at startup on others.
+                                    #                  Requires llama.cpp built from master after 2026-05-16 (PR #22673).
     "no_warmup": False,             # --no-warmup. Saves a few seconds at startup.
     "enable_metrics": False,        # --metrics. Exposes Prometheus metrics on /metrics. Off by default.
     "llama_extra_args": "",         # Free-form extra flags appended verbatim, e.g. "--alias my-model --rope-scaling linear".
@@ -9077,6 +9084,10 @@ def read_gguf_metadata(path: str, max_bytes: int = 4 * 1024 * 1024) -> dict:
         "feed_forward_length": 0,
         "expert_feed_forward_length": 0,  # MoE: per-expert FFN width
         "context_length": 0,              # the model's trained max context
+        "nextn_predict_layers": 0,        # >0 means the GGUF carries MTP heads
+                                          # (key: "<arch>.nextn_predict_layers"). This is the same
+                                          # signal llama.cpp itself uses to enable --spec-type draft-mtp.
+        "has_mtp": False,                 # convenience flag: nextn_predict_layers > 0
     }
     if not path:
         return out
@@ -9183,6 +9194,23 @@ def read_gguf_metadata(path: str, max_bytes: int = 4 * 1024 * 1024) -> dict:
         if not out["value_length"]:
             out["value_length"] = out["key_length"]
 
+        # MTP detection. llama.cpp tags MTP-capable architectures (Qwen 3.5/3.6,
+        # DeepSeek V3/R1, ...) with "<arch>.nextn_predict_layers" in the GGUF
+        # metadata KV. Reading the value here means we never have to guess from
+        # filenames — works even if the file is renamed or repacked. Falls
+        # cleanly to has_mtp=False on older GGUFs that lack the key.
+        nextn = num(f"{arch}.nextn_predict_layers")
+        if not nextn:
+            # Some converters drop the arch prefix on this key. Catch the unprefixed
+            # variant as a backup before giving up.
+            for k, v in meta.items():
+                if k.endswith(".nextn_predict_layers") or k == "nextn_predict_layers":
+                    if isinstance(v, (int, float)) and v > 0:
+                        nextn = int(v)
+                        break
+        out["nextn_predict_layers"] = int(nextn or 0)
+        out["has_mtp"] = out["nextn_predict_layers"] > 0
+
         out["ok"] = bool(out["architecture"] and out["block_count"])
         return out
     except Exception:
@@ -9216,6 +9244,8 @@ def inspect_model(model_path: str) -> dict:
         "expert_feed_forward_length": 0,
         "context_length": 0,
         "metadata_source": "filename",  # or "gguf"
+        "has_mtp": False,                 # GGUF carries built-in MTP heads (nextn_predict_layers > 0)
+        "nextn_predict_layers": 0,
     }
     if not model_path:
         return out
@@ -9246,6 +9276,8 @@ def inspect_model(model_path: str) -> dict:
         out["expert_feed_forward_length"] = gg["expert_feed_forward_length"]
         out["context_length"] = gg["context_length"]
         out["is_moe"] = gg["expert_count"] > 1
+        out["has_mtp"] = bool(gg.get("has_mtp", False))
+        out["nextn_predict_layers"] = int(gg.get("nextn_predict_layers", 0) or 0)
         # total/active param counts: prefer the size_label like "30B-A3B"
         sl = (gg.get("size_label") or "").lower()
         am = _ACTIVE_RE.search(sl) or _ACTIVE_RE.search(name_lc)
@@ -9366,7 +9398,7 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
         "n_ubatch": 0,                 # auto in spawn
         "num_thread": 0,               # auto = let llama-server pick
         "flash_attn": True,
-        "enable_speculative": True,
+        "spec_strategy": "ngram-mod",   # off | ngram-mod | draft-mtp — set per-model below
         "no_warmup": False,
         "enable_metrics": False,
         "quant_downshift": "",          # banner string; "" = no suggestion
@@ -9532,15 +9564,45 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
             notes.append(f"num_gpu: {out['num_gpu']} layers (dense partial offload).")
 
     # -- Speculative decoding --
-    # Independent benchmarks (RTX 3090 + Qwen3.6 35B-A3B post llama.cpp #19493)
-    # show speculative decoding is net-negative on MoE: every drafted token
-    # pulls a fresh expert through the memory hierarchy, even at 100% draft
-    # acceptance. Disable it for MoE; keep it on for dense.
-    if is_moe:
-        out["enable_speculative"] = False
-        notes.append("speculative decoding: OFF (net-negative on MoE per public benchmarks).")
+    # Three-way pick:
+    #   1. If the model ships MTP heads (Qwen 3.5/3.6, DeepSeek V3/R1) → "draft-mtp".
+    #      The model's own MTP heads draft 3 tokens/step; reported ~1.85x decode
+    #      win on Qwen3.6 27B with ~75% acceptance. Beats both n-gram and off on
+    #      these architectures and stays in-budget on MoE since drafts come from
+    #      the same forward pass instead of pulling fresh experts.
+    #   2. Else if MoE → "off". Independent benchmarks (RTX 3090 + Qwen3.6
+    #      35B-A3B post llama.cpp #19493) show n-gram speculation is net-negative
+    #      on MoE: every drafted token pulls a fresh expert through the memory
+    #      hierarchy, even at 100% draft acceptance.
+    #   3. Else (dense, non-MTP) → "ngram-mod". Free win, no model requirements.
+    # Primary signal: GGUF metadata key "<arch>.nextn_predict_layers" set by
+    # llama.cpp's own converter for MTP-capable arches. Reliable — no false
+    # positives from filenames, no false negatives from non-canonical names.
+    has_mtp = bool(profile.get("has_mtp", False))
+    if not has_mtp:
+        # Fallback: filename / arch heuristic, for GGUFs that lost the metadata
+        # during conversion or third-party repacks that didn't carry it through.
+        name_blob = ((profile.get("name") or "") + " " + (profile.get("architecture") or "")).lower()
+        _MTP_HINTS = (
+            "qwen3.5", "qwen3.6", "qwen-3.5", "qwen-3.6", "qwen_3.5", "qwen_3.6",
+            "qwen3_5", "qwen3_6", "qwen_3_5", "qwen_3_6",
+            "deepseek-v3", "deepseek_v3", "deepseekv3",
+            "deepseek-r1", "deepseek_r1", "deepseekr1",
+        )
+        has_mtp = any(h in name_blob for h in _MTP_HINTS)
+    if has_mtp:
+        out["spec_strategy"] = "draft-mtp"
+        nextn = int(profile.get("nextn_predict_layers", 0) or 0)
+        if nextn:
+            notes.append(f"speculative decoding: draft-mtp ({nextn} MTP heads detected, ~1.85x decode win).")
+        else:
+            notes.append("speculative decoding: draft-mtp (MTP-capable model by name, ~1.85x decode win).")
+    elif is_moe:
+        out["spec_strategy"] = "off"
+        notes.append("speculative decoding: OFF (n-gram is net-negative on MoE per public benchmarks).")
     else:
-        notes.append("speculative decoding: ON (free win on dense models).")
+        out["spec_strategy"] = "ngram-mod"
+        notes.append("speculative decoding: ngram-mod (free win on dense models).")
 
     # -- batch / ubatch --
     # When offloading to CPU, bigger batches dramatically improve prompt eval
@@ -9944,7 +10006,24 @@ class LlamaProcess:
         if kv_type not in ("f16", "f32", "q8_0", "q4_0", "q5_0", "q5_1", "q4_1"):
             kv_type = "q8_0"
         flash_on = bool(s.get("flash_attn", True))
-        spec_on = bool(s.get("enable_speculative", True))
+        # Three-way speculative strategy with legacy-flag honoring.
+        #
+        # Migration is trickier than it looks because DEFAULTS now carries
+        # spec_strategy="ngram-mod", which gets merged into `s` for any
+        # settings.json that pre-dates this field. That means a user whose
+        # autotuner wrote `enable_speculative=false` (e.g. for an MoE model
+        # where n-gram speculation is net-negative) would see their preference
+        # silently overridden by the merged default — and llama-server crash
+        # at startup with spec flags it shouldn't be getting.
+        #
+        # Rule: an EXPLICIT False on the legacy field always wins. That
+        # preserves the autotuner's intent across the upgrade. Otherwise
+        # spec_strategy is the source of truth.
+        spec_strategy = (s.get("spec_strategy") or "").strip().lower()
+        if s.get("enable_speculative") is False:
+            spec_strategy = "off"
+        elif spec_strategy not in ("off", "ngram-mod", "draft-mtp"):
+            spec_strategy = "ngram-mod" if bool(s.get("enable_speculative", True)) else "off"
         no_warmup = bool(s.get("no_warmup", False))
         enable_metrics = bool(s.get("enable_metrics", False))
         extra_args_raw = (s.get("llama_extra_args") or "").strip()
@@ -10005,11 +10084,11 @@ class LlamaProcess:
             # Keeping `n` MoE expert tensors on CPU lets giant MoE models run on
             # tiny VRAM by paying a latency tax instead of an OOM error.
             cmd += ["--n-cpu-moe", str(n_cpu_moe)]
-        if spec_on:
+        if spec_strategy == "ngram-mod":
             # llama.cpp renamed --spec-ngram-size-n to --spec-ngram-mod-n-match
             # in recent builds. older flag was removed outright (exits with an
             # error), so older binaries that don't recognise the new flag will
-            # also exit. either way, set enable_speculative=false in settings
+            # also exit. either way, set spec_strategy="off" in settings
             # if your llama.cpp build is mismatched.
             cmd += [
                 "--spec-type", "ngram-mod",
@@ -10017,6 +10096,27 @@ class LlamaProcess:
                 "--draft-min", "48",
                 "--draft-max", "64",
             ]
+        elif spec_strategy == "draft-mtp":
+            # Multi-token prediction draft. Requires the model to have MTP heads
+            # baked in (Qwen 3.5/3.6, DeepSeek V3/R1 as of 2026-05-16) and a
+            # llama.cpp build that includes PR #22673. Picking this on a model
+            # without MTP heads will make llama-server exit at startup with
+            # "no MTP layers found" — switch to ngram-mod or off in settings.
+            # n-max defaults to whatever nextn_predict_layers the GGUF declares
+            # (different MTP models ship different head counts — Qwen3.6 has 3,
+            # DeepSeek V3 has 1). Falls back to 3 if the metadata isn't readable.
+            spec_n_max = 3
+            try:
+                gg_mtp = read_gguf_metadata(model_path)
+                if gg_mtp.get("nextn_predict_layers"):
+                    spec_n_max = max(1, int(gg_mtp["nextn_predict_layers"]))
+            except Exception:
+                pass
+            cmd += [
+                "--spec-type", "draft-mtp",
+                "--spec-draft-n-max", str(spec_n_max),
+            ]
+        # "off" emits nothing — no speculative decoding.
         if no_warmup:
             cmd += ["--no-warmup"]
         if enable_metrics:
@@ -10030,6 +10130,16 @@ class LlamaProcess:
                 cmd += shlex.split(extra_args_raw, posix=False)
             except Exception:
                 cmd += extra_args_raw.split()
+        # Log the exact command before spawning so flag-rename / unknown-flag
+        # crashes are debuggable. On Windows llama-server runs in a separate
+        # CREATE_NEW_CONSOLE window that closes the instant llama-server exits,
+        # which is faster than a human can read — having the cmd here lets the
+        # user paste it into their own PowerShell and see the real error.
+        try:
+            import shlex as _shlex
+            print(f"[llama] launch: {_shlex.join(cmd) if hasattr(_shlex, 'join') else ' '.join(cmd)}")
+        except Exception:
+            print(f"[llama] launch: {cmd}")
         try:
             creationflags = 0
             if sys.platform == "win32":

@@ -1431,14 +1431,14 @@
     if (sugCtx > curCtx) update.num_ctx = sugCtx;  // grow only
     // For non-ctx flags, defer to the suggester since these are speed knobs
     // and the user explicitly asked for autotune behavior.
-    const speedKeys = ["num_gpu", "num_batch", "n_cpu_moe", "n_ubatch", "kv_cache_type"];
+    const speedKeys = ["num_gpu", "num_batch", "n_cpu_moe", "n_ubatch", "kv_cache_type", "spec_strategy"];
     for (const k of speedKeys) {
       if (sug[k] != null && String(sug[k]) !== String(cur[k] ?? "")) {
         update[k] = sug[k];
       }
     }
     // Booleans: same idea but explicit
-    for (const k of ["flash_attn", "enable_speculative"]) {
+    for (const k of ["flash_attn"]) {
       if (sug[k] != null && !!sug[k] !== !!cur[k]) {
         update[k] = !!sug[k];
       }
@@ -4271,7 +4271,7 @@
       setVal("#set-ubatch", sug.n_ubatch);
       setVal("#set-parallel", sug.n_parallel);
       setSwitch("#sw-flash", sug.flash_attn);
-      setSwitch("#sw-spec", sug.enable_speculative);
+      if (sug.spec_strategy) setVal("#set-spec-strategy", sug.spec_strategy);
       setSwitch("#sw-nowarmup", sug.no_warmup);
       setSwitch("#sw-metrics", sug.enable_metrics);
 
@@ -4501,7 +4501,22 @@
     fill("#set-ubatch", s.n_ubatch ?? 0);
     fill("#set-parallel", s.n_parallel ?? 1);
     $("#sw-flash")?.classList.toggle("on", s.flash_attn !== false);
-    $("#sw-spec")?.classList.toggle("on", s.enable_speculative !== false);
+    // spec_strategy is the new field; fall back to enable_speculative for
+    // settings.json files written before the MTP option landed. Mirror the
+    // bridge's launch-time rule: an explicit `enable_speculative=false` on
+    // the legacy field always wins, even if spec_strategy got filled in from
+    // DEFAULTS during merge. Otherwise the UI would show "ngram-mod" while
+    // the bridge actually launched with "off".
+    const specSel = $("#set-spec-strategy");
+    if (specSel) {
+      let strat = (s.spec_strategy || "").trim().toLowerCase();
+      if (s.enable_speculative === false) {
+        strat = "off";
+      } else if (!["off", "ngram-mod", "draft-mtp"].includes(strat)) {
+        strat = "ngram-mod";
+      }
+      specSel.value = strat;
+    }
     $("#sw-nowarmup")?.classList.toggle("on", !!s.no_warmup);
     $("#sw-metrics")?.classList.toggle("on", !!s.enable_metrics);
     const xa = $("#set-extra-args");
@@ -4556,7 +4571,7 @@
   const LOAD_TIME_KEYS = [
     "num_ctx", "num_gpu", "num_batch", "num_thread", "kv_cache_type", "model_path",
     "n_cpu_moe", "n_ubatch", "n_parallel", "flash_attn",
-    "enable_speculative", "no_warmup", "enable_metrics", "llama_extra_args",
+    "spec_strategy", "no_warmup", "enable_metrics", "llama_extra_args",
     // mmproj_path changes how the server is launched (--mmproj <path>) so it
     // also requires a relaunch to take effect.
     "mmproj_path",
@@ -4580,7 +4595,11 @@
       n_ubatch: Math.max(0, n("#set-ubatch") || 0),
       n_parallel: Math.max(1, n("#set-parallel") || 1),
       flash_attn: $("#sw-flash")?.classList.contains("on") !== false,
-      enable_speculative: $("#sw-spec")?.classList.contains("on") !== false,
+      // Write both the new spec_strategy and the legacy enable_speculative
+      // so anything still reading the old field (older bridge instances, the
+      // launch-time legacy-honoring rule) stays in sync with the user's pick.
+      spec_strategy: ($("#set-spec-strategy")?.value || "ngram-mod"),
+      enable_speculative: ($("#set-spec-strategy")?.value || "ngram-mod") !== "off",
       no_warmup: !!$("#sw-nowarmup")?.classList.contains("on"),
       enable_metrics: !!$("#sw-metrics")?.classList.contains("on"),
       llama_extra_args: ($("#set-extra-args")?.value || "").trim(),
@@ -4776,7 +4795,10 @@
       badge = document.createElement("span");
       badge.className = "model-pill-vision";
       badge.innerHTML = '<i class="ph ph-eye"></i>';
-      pill.appendChild(badge);
+      // Insert before the caret so the order reads name → badge → caret.
+      const caret = pill.querySelector(".model-pill-caret");
+      if (caret) pill.insertBefore(badge, caret);
+      else pill.appendChild(badge);
     } else if (!wantBadge && badge) {
       badge.remove();
       badge = null;
@@ -4785,6 +4807,205 @@
       const mm = state.loadedMmproj ? String(state.loadedMmproj).split(/[\\/]/).pop() : "mmproj";
       badge.title = `vision: native — ${mm}`;
     }
+  }
+
+  // Reload model list from the bridge, then re-mirror it everywhere it shows
+  // (settings dropdown + pill + dropdown menu). Lifted to module scope so any
+  // module-level caller (loadModelByPath, autoRetuneOnBoot) can reach it —
+  // previously a local closure inside wireEvents which made the others throw.
+  async function refreshModels() {
+    await loadModels();
+    populateSettingsForm();
+    renderModelPill();
+  }
+
+  // Shared model-load flow — called from the settings <select> AND the new
+  // model-pill dropdown. Mirrors auto-tuned values into the settings form so
+  // the user can see what got applied (form elements still exist whether the
+  // drawer is open or not). Returns true on success.
+  async function loadModelByPath(modelPath, opts = {}) {
+    if (!modelPath) return false;
+    const hint = opts.hint || null;
+    const prev = hint?.textContent;
+    const tier = Number($("#set-vram-tier")?.value || 0);
+    let tuned = null;
+    if (tier > 0) {
+      if (hint) hint.textContent = "auto-tuning for this model…";
+      try {
+        const r = await api("/api/llama/auto-tune", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ model_path: modelPath, vram_gb: tier }),
+        });
+        tuned = r?.suggested || null;
+        if (tuned) {
+          // RULE: autotune may GROW num_ctx, never shrink it.
+          const curCtx = Number($("#set-ctx")?.value || state.settings.num_ctx || 0) || 0;
+          const sugCtx = Number(tuned.num_ctx || 0) || 0;
+          if (sugCtx > 0 && sugCtx < curCtx) tuned.num_ctx = curCtx;
+          const setVal = (id, v) => { const el = $(id); if (el != null && v != null) el.value = String(v); };
+          const setSwitch = (id, v) => { const el = $(id); if (!el || v == null) return; el.classList.toggle("on", !!v); };
+          setVal("#set-ctx", tuned.num_ctx);
+          setVal("#set-gpu", tuned.num_gpu);
+          setVal("#set-batch", tuned.num_batch);
+          const kv = $("#set-kv"); if (kv && tuned.kv_cache_type) kv.value = tuned.kv_cache_type;
+          setVal("#set-ncmoe", tuned.n_cpu_moe);
+          setVal("#set-ubatch", tuned.n_ubatch);
+          setSwitch("#sw-flash", tuned.flash_attn);
+          if (tuned.spec_strategy) setVal("#set-spec-strategy", tuned.spec_strategy);
+          const tnotes = $("#autotune-notes");
+          if (tnotes && tuned.notes) {
+            const lines = [];
+            if (tuned.quant_downshift) { lines.push(`>> ${tuned.quant_downshift}`); lines.push(""); }
+            lines.push(tuned.notes);
+            tnotes.textContent = lines.join("\n");
+          }
+        }
+      } catch (e) {
+        console.warn("auto-tune on model change failed:", e);
+      }
+    }
+    if (hint) hint.textContent = "loading model into llama-server...";
+    try {
+      const persistPayload = {
+        model_path: modelPath,
+        model: modelPath.split(/[\\/]/).pop().replace(/\.gguf$/i, ""),
+      };
+      if (tuned) {
+        if (tuned.num_ctx != null) persistPayload.num_ctx = Number(tuned.num_ctx);
+        if (tuned.num_gpu != null) persistPayload.num_gpu = Number(tuned.num_gpu);
+        if (tuned.num_batch != null) persistPayload.num_batch = Number(tuned.num_batch);
+        if (tuned.kv_cache_type) persistPayload.kv_cache_type = tuned.kv_cache_type;
+        if (tuned.n_cpu_moe != null) persistPayload.n_cpu_moe = Number(tuned.n_cpu_moe);
+        if (tuned.n_ubatch != null) persistPayload.n_ubatch = Number(tuned.n_ubatch);
+        if (tuned.flash_attn != null) persistPayload.flash_attn = !!tuned.flash_attn;
+        if (tuned.spec_strategy) persistPayload.spec_strategy = String(tuned.spec_strategy);
+      }
+      await saveSettings(persistPayload);
+      await api("/api/models/load", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ path: modelPath }),
+      });
+      await refreshModels();
+      if (tuned) {
+        const msg = tuned.quant_downshift
+          ? "model loaded — auto-tuned (see quant suggestion in notes)"
+          : `model loaded — auto-tuned (ctx ${Number(tuned.num_ctx).toLocaleString()}, n_cpu_moe ${tuned.n_cpu_moe ?? 0})`;
+        toast(msg, tuned.quant_downshift ? "warn" : "ok", 4000);
+      } else {
+        toast("model loaded", "ok", 2500);
+      }
+      return true;
+    } catch (e) {
+      if (hint) hint.textContent = prev || "";
+      toast("load failed: " + (e.message || e), "error", 6000);
+      return false;
+    }
+  }
+
+  // Build the rows for the model-pill dropdown from state.modelsList. Re-run
+  // on every open so the "loaded" indicator stays in sync with whatever the
+  // bridge actually has running right now.
+  function renderModelMenu() {
+    const menu = $("#model-pill-menu");
+    if (!menu) return;
+    menu.innerHTML = "";
+    const list = state.modelsList || [];
+    if (!list.length) {
+      const empty = document.createElement("div");
+      empty.className = "model-pill-menu-empty";
+      empty.textContent = state.modelsError || "pick a models folder in Settings";
+      menu.appendChild(empty);
+      return;
+    }
+    const loadedPath = state.loadedModel || state.settings.model_path || "";
+    for (const m of list) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mm-row" + ((m.path === loadedPath || m.loaded) ? " loaded" : "");
+      row.dataset.path = m.path;
+      row.setAttribute("role", "option");
+      row.title = m.path;
+      const dot = document.createElement("span");
+      dot.className = "mm-row-dot";
+      const name = document.createElement("span");
+      name.className = "mm-row-name";
+      name.textContent = m.name;
+      row.appendChild(dot);
+      row.appendChild(name);
+      if (m.size_gb) {
+        const size = document.createElement("span");
+        size.className = "mm-row-size";
+        size.textContent = `${m.size_gb} GB`;
+        row.appendChild(size);
+      }
+      row.addEventListener("click", async () => {
+        const btn = $("#model-pill");
+        menu.classList.remove("open");
+        btn?.classList.remove("open");
+        const allRows = menu.querySelectorAll(".mm-row");
+        allRows.forEach(r => r.setAttribute("disabled", "true"));
+        try {
+          await loadModelByPath(m.path);
+        } finally {
+          allRows.forEach(r => r.removeAttribute("disabled"));
+        }
+      });
+      menu.appendChild(row);
+    }
+  }
+
+  // Toggle behaviour for the model-pill dropdown. Mirrors wireOverflow's
+  // positioning approach (reparent to <body> to escape any composer-level
+  // backdrop-filter / transform, then JS-position each open) but right-
+  // aligns to the pill since the pill sits at the bottom-right corner.
+  function wireModelMenu() {
+    const btn = $("#model-pill");
+    const menu = $("#model-pill-menu");
+    if (!btn || !menu) return;
+    if (menu.parentNode !== document.body) document.body.appendChild(menu);
+    function positionMenu() {
+      const r = btn.getBoundingClientRect();
+      const mw = menu.offsetWidth || 240;
+      const mh = menu.offsetHeight || 200;
+      const margin = 8;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let top = r.top - mh - 6;
+      if (top < margin) top = r.bottom + 6;
+      if (top + mh > vh - margin) top = Math.max(margin, vh - mh - margin);
+      let left = r.right - mw;
+      if (left + mw > vw - margin) left = vw - mw - margin;
+      if (left < margin) left = margin;
+      menu.style.top = `${Math.round(top)}px`;
+      menu.style.left = `${Math.round(left)}px`;
+    }
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = !menu.classList.contains("open");
+      if (willOpen) {
+        renderModelMenu();
+        menu.classList.add("open");
+        btn.classList.add("open");
+        positionMenu();
+        requestAnimationFrame(positionMenu);
+      } else {
+        menu.classList.remove("open");
+        btn.classList.remove("open");
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+        menu.classList.remove("open");
+        btn.classList.remove("open");
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && menu.classList.contains("open")) {
+        menu.classList.remove("open");
+        btn.classList.remove("open");
+      }
+    });
+    window.addEventListener("resize", () => { if (menu.classList.contains("open")) positionMenu(); });
+    window.addEventListener("scroll", () => { if (menu.classList.contains("open")) positionMenu(); }, true);
   }
 
   // ---------- mobile tabs ----------
@@ -4951,16 +5172,11 @@
     $("#sw-thinking")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     // advanced llama-server toggles
     $("#sw-flash")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
-    $("#sw-spec")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    // (#set-spec-strategy is a <select>, no click handler needed)
     $("#sw-nowarmup")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     $("#sw-metrics")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     // Auto-tune (VRAM picker → suggested flags)
     $("#btn-autotune")?.addEventListener("click", runAutoTune);
-    const refreshModels = async () => {
-      await loadModels();
-      populateSettingsForm();
-      renderModelPill();
-    };
     $("#btn-refresh-models").addEventListener("click", async () => {
       const btn = $("#btn-refresh-models");
       btn.disabled = true;
@@ -5044,104 +5260,14 @@
         toast("scan failed: " + (err.message || err), "error");
       }
     });
-    $("#model-pill").addEventListener("click", openSettings);
+    wireModelMenu();
     $("#set-model").addEventListener("change", async () => {
       const sel = $("#set-model");
       const m = sel.value;
       if (!m) return;
-      const hint = $("#set-model-hint");
-      const prev = hint?.textContent;
       sel.disabled = true;
-      // If a VRAM tier is set, auto-tune for THIS model and apply the suggested
-      // flags AT THE SAME TIME as the load — no separate Suggest click required.
-      // Picking a model = "do the right thing for this model on my GPU."
-      const tier = Number($("#set-vram-tier")?.value || 0);
-      let tuned = null;
-      if (tier > 0) {
-        if (hint) hint.textContent = "auto-tuning for this model…";
-        try {
-          const r = await api("/api/llama/auto-tune", {
-            method: "POST", headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ model_path: m, vram_gb: tier }),
-          });
-          tuned = r?.suggested || null;
-          if (tuned) {
-            // RULE (per user): autotune is allowed to GROW num_ctx, never shrink
-            // it. If the suggester's number is smaller than what's already set,
-            // we keep the existing larger value. Same for the persisted payload
-            // below. "longer context if possible, otherwise leave it."
-            const curCtx = Number($("#set-ctx")?.value || state.settings.num_ctx || 0) || 0;
-            const sugCtx = Number(tuned.num_ctx || 0) || 0;
-            if (sugCtx > 0 && sugCtx < curCtx) {
-              tuned.num_ctx = curCtx;  // keep the bigger one
-            }
-            // Mirror tuned values into the form so the user sees what's applied.
-            const setVal = (id, v) => { const el = $(id); if (el != null && v != null) el.value = String(v); };
-            const setSwitch = (id, v) => {
-              const el = $(id);
-              if (!el || v == null) return;
-              el.classList.toggle("on", !!v);
-            };
-            setVal("#set-ctx", tuned.num_ctx);
-            setVal("#set-gpu", tuned.num_gpu);
-            setVal("#set-batch", tuned.num_batch);
-            const kv = $("#set-kv");
-            if (kv && tuned.kv_cache_type) kv.value = tuned.kv_cache_type;
-            setVal("#set-ncmoe", tuned.n_cpu_moe);
-            setVal("#set-ubatch", tuned.n_ubatch);
-            setSwitch("#sw-flash", tuned.flash_attn);
-            setSwitch("#sw-spec", tuned.enable_speculative);
-            const tnotes = $("#autotune-notes");
-            if (tnotes && tuned.notes) {
-              const lines = [];
-              if (tuned.quant_downshift) {
-                lines.push(`>> ${tuned.quant_downshift}`);
-                lines.push("");
-              }
-              lines.push(tuned.notes);
-              tnotes.textContent = lines.join("\n");
-            }
-          }
-        } catch (e) {
-          // Auto-tune failure is non-fatal — fall back to existing settings.
-          console.warn("auto-tune on model change failed:", e);
-        }
-      }
-      if (hint) hint.textContent = "loading model into llama-server...";
       try {
-        // Persist tuned flags + new model_path in ONE settings write so the
-        // backend launches llama-server with the right ctx/n_cpu_moe/etc.
-        const persistPayload = {
-          model_path: m,
-          model: m.split(/[\\/]/).pop().replace(/\.gguf$/i, ""),
-        };
-        if (tuned) {
-          if (tuned.num_ctx != null) persistPayload.num_ctx = Number(tuned.num_ctx);
-          if (tuned.num_gpu != null) persistPayload.num_gpu = Number(tuned.num_gpu);
-          if (tuned.num_batch != null) persistPayload.num_batch = Number(tuned.num_batch);
-          if (tuned.kv_cache_type) persistPayload.kv_cache_type = tuned.kv_cache_type;
-          if (tuned.n_cpu_moe != null) persistPayload.n_cpu_moe = Number(tuned.n_cpu_moe);
-          if (tuned.n_ubatch != null) persistPayload.n_ubatch = Number(tuned.n_ubatch);
-          if (tuned.flash_attn != null) persistPayload.flash_attn = !!tuned.flash_attn;
-          if (tuned.enable_speculative != null) persistPayload.enable_speculative = !!tuned.enable_speculative;
-        }
-        await saveSettings(persistPayload);
-        await api("/api/models/load", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ path: m }),
-        });
-        await refreshModels();
-        if (tuned) {
-          const msg = tuned.quant_downshift
-            ? "model loaded — auto-tuned (see quant suggestion in notes)"
-            : `model loaded — auto-tuned (ctx ${Number(tuned.num_ctx).toLocaleString()}, n_cpu_moe ${tuned.n_cpu_moe ?? 0})`;
-          toast(msg, tuned.quant_downshift ? "warn" : "ok", 4000);
-        } else {
-          toast("model loaded", "ok", 2500);
-        }
-      } catch (e) {
-        if (hint) hint.textContent = prev || "";
-        toast("load failed: " + (e.message || e), "error", 6000);
+        await loadModelByPath(m, { hint: $("#set-model-hint") });
       } finally {
         sel.disabled = false;
       }

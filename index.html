@@ -164,7 +164,8 @@
           <div class="composer-foot">
             <span class="composer-hint">⌘⏎ send · Shift⏎ newline</span>
             <div class="composer-foot-actions">
-              <button class="model-pill" id="model-pill" title="Click to change model"><span class="model-pill-name">select model</span></button>
+              <button class="model-pill" id="model-pill" title="Click to change model"><span class="model-pill-name">select model</span><i class="ph ph-caret-down model-pill-caret"></i></button>
+              <div class="model-pill-menu" id="model-pill-menu" role="listbox" aria-label="Pick a model"></div>
               <button class="btn danger hidden" id="btn-stop"><i class="ph ph-stop-circle"></i><span>Stop</span></button>
               <button class="btn accent" id="btn-send" title="Send (⌘⏎)"><i class="ph-bold ph-arrow-up"></i><span>Send</span></button>
             </div>
@@ -319,7 +320,7 @@
     <p>yes — whatever you type is saved to browser storage per chat. if you refresh the page or switch chats, your draft is restored when you come back. it is cleared when you hit send.</p>
 
     <div class="faq-q">keyboard shortcuts?</div>
-    <p><code>⌘⏎</code> / <code>Ctrl⏎</code> send · <code>Shift⏎</code> newline · <code>Ctrl+K</code> / <code>⌘K</code> session switcher · click model name in the chat meta to open Settings.</p>
+    <p><code>⌘⏎</code> / <code>Ctrl⏎</code> send · <code>Shift⏎</code> newline · <code>Ctrl+K</code> / <code>⌘K</code> session switcher · click the model pill (bottom-right of composer) to swap models.</p>
 
     <div class="faq-q">on mobile / iPad?</div>
     <p>the UI adapts: composer chips collapse into the <svg class="faq-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/></svg> button, send/stop fill the bottom row, and tap targets follow the iOS 44px minimum. <b>swipe left or right</b> on the sidebar to dismiss it back to the chat. the preview pane is hidden on mobile — open the page on a desktop browser to use IDE mode.</p>
@@ -469,9 +470,14 @@
       <label>Flash attention <i class="ph ph-info" title="--flash-attn on/off. Off only if your GPU or llama.cpp build does not support it."></i></label>
       <div class="sw" id="sw-flash"></div>
     </div>
-    <div class="form-row inline">
-      <label>Speculative decoding <i class="ph ph-info" title="ngram-mod speculation. Free speedup on most models. Turn off if it confuses your specific model."></i></label>
-      <div class="sw" id="sw-spec"></div>
+    <div class="form-row">
+      <label>Speculative decoding <i class="ph ph-info" title="Pick a draft strategy. Auto-tune sets this per model: draft-mtp for Qwen 3.5/3.6 and DeepSeek V3/R1; off for non-MTP MoE; ngram-mod for dense."></i></label>
+      <select id="set-spec-strategy">
+        <option value="off">off · no speculative decoding</option>
+        <option value="ngram-mod">ngram-mod · works on any model (default)</option>
+        <option value="draft-mtp">draft-mtp · uses the model's MTP heads (Qwen 3.5/3.6, DeepSeek V3/R1) · ~1.85x decode</option>
+      </select>
+      <span class="hint">draft-mtp needs a llama.cpp build from <b>2026-05-16</b> or later (PR #22673). Picking it on a model without MTP heads makes llama-server fail at startup.</span>
     </div>
     <div class="form-row inline">
       <label>Skip warmup <i class="ph ph-info" title="--no-warmup. Saves a few seconds at startup. First reply may be slightly slower."></i></label>
