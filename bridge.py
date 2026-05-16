@@ -10006,9 +10006,14 @@ class LlamaProcess:
             # tiny VRAM by paying a latency tax instead of an OOM error.
             cmd += ["--n-cpu-moe", str(n_cpu_moe)]
         if spec_on:
+            # llama.cpp renamed --spec-ngram-size-n to --spec-ngram-mod-n-match
+            # in recent builds. older flag was removed outright (exits with an
+            # error), so older binaries that don't recognise the new flag will
+            # also exit. either way, set enable_speculative=false in settings
+            # if your llama.cpp build is mismatched.
             cmd += [
                 "--spec-type", "ngram-mod",
-                "--spec-ngram-size-n", "24",
+                "--spec-ngram-mod-n-match", "24",
                 "--draft-min", "48",
                 "--draft-max", "64",
             ]

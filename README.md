@@ -186,6 +186,16 @@ The one outbound channel is the agent's own web fetch tool. When the model asks 
 
 If you are paranoid (and you should be), run Wireshark next to it. The only outbound traffic you will see is whatever the agent fetched. Want full silence? Run with the network unplugged or block the bridge process at the firewall. The model itself runs offline once loaded, so you can chat all day with no internet at all.
 
+## Before you start
+
+A few things that will save you a long debugging session:
+
+* **Python 3.10 or newer.** 3.14 works too. earlier versions might run but are not tested.
+* **A llama-server binary that actually loads your model.** download a release from [ggml-org/llama.cpp/releases](https://github.com/ggml-org/llama.cpp/releases). NVIDIA users grab the CUDA build (e.g. `llama-bNNNN-bin-win-cuda-13-x64.zip`) AND the matching CUDA DLLs zip (e.g. `cudart-llama-bin-win-cuda-13.1-x64.zip`). extract both into the same folder. without the DLLs llama-server crashes on launch with no useful error.
+* **Match the CUDA build to your driver.** run `nvidia-smi` and look at the CUDA Version field top right. CUDA 13 build needs a 13.x driver, CUDA 12 build runs on 12.x or newer drivers.
+* **At least one GGUF model on disk.** anything llama.cpp can load. avoid the brand-new MTP / hybrid variants (e.g. some Qwen3.6 MTP GGUFs from Unsloth) unless your llama.cpp build is recent enough to load SSM tensors. if you see `error loading model: missing tensor 'blk.NN.ssm_conv1d.weight'` your binary is too old for that model. grab the non-MTP version of the same model and you're fine.
+* **Avoid speculative decoding on very new llama.cpp builds.** the flag name changed recently and older bridge releases pass the deprecated name, which makes llama-server exit on startup and the bridge crash-loop trying to respawn it. if that happens, open `data/settings.json` and set `"enable_speculative": false`, or update from the latest accuretta which uses the new flag name.
+
 ## Quick start
 
 1. Install Python 3.10 or newer.
