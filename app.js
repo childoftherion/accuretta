@@ -3828,6 +3828,7 @@
     extract_archive:   { sub: "The model wants to extract an archive.",                      info: "Writes the unpacked tree into a sandbox subfolder next to the archive." },
     extract_squashfs:  { sub: "The model wants to extract a squashfs image.",                info: "Writes the unpacked filesystem into a sandbox subfolder next to the image." },
     carve_file:        { sub: "The model wants to carve a region out of a file.",            info: "Reads the requested byte range and writes it as a new file in the workspace." },
+    registry:          { sub: "The model wants to MODIFY THE WINDOWS REGISTRY (user hive).", info: "Registry edits change how Windows and installed apps behave for your user account. They're not file-level — there's no undo. System hives (HKLM / HKCR / HKU) are hard-blocked at the bridge and never reach this card; only HKCU / HKCC writes can ask. Hold the Approve button for 2 seconds to confirm." },
   };
 
   // Build a friendly, language-style command preview from kind + details. We
@@ -3867,6 +3868,12 @@
     if (kind === "powershell") {
       // PowerShell is the only kind where the raw command IS the most honest
       // preview. Show it verbatim, line-wrapped.
+      return `<span class="appr-cmd-shell">${esc(a.command || "")}</span>`;
+    }
+    if (kind === "registry") {
+      // Same reasoning as powershell — the raw command IS the truth, and
+      // hiding it behind a synthetic call would be misleading for the one
+      // approval where reading every character matters most.
       return `<span class="appr-cmd-shell">${esc(a.command || "")}</span>`;
     }
     if (kind === "network_snapshot") {
@@ -3914,6 +3921,15 @@
     } else if (kind === "powershell") {
       row(APPR_SVG.terminal, "Shell", "PowerShell");
       row(APPR_SVG.info, "Read the command below", "before approving");
+    } else if (kind === "registry") {
+      // Surface every hive being touched as its own row so the user can
+      // scan the targets at a glance. System hives never reach this card
+      // (bridge refuses them), so everything here is HKCU/HKCC scope.
+      const targets = Array.isArray(d.targets) ? d.targets : [];
+      if (targets.length === 0) row(APPR_SVG.hash, "Target", "(unknown — opaque .reg import?)");
+      else for (const t of targets) row(APPR_SVG.hash, "Key", t);
+      row(APPR_SVG.info, "Scope", "User hive (HKCU / HKCC) — no system damage possible");
+      row(APPR_SVG.info, "Reversible", "No undo — registry edits are immediate");
     } else if (kind === "network_snapshot") {
       row(APPR_SVG.globe, "Reads", "Active TCP/UDP + DNS cache");
       row(APPR_SVG.info, "Admin", "Not required");
@@ -3955,6 +3971,12 @@
       // warning-tone shield — same outline, no checkmark.
       return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 4 5v6c0 4.5 3.2 8.5 8 10 4.8-1.5 8-5.5 8-10V5z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
     }
+    if (kind === "registry") {
+      // Filled warning triangle — heaviest icon in the set, deliberately
+      // distinct from the shield used elsewhere so the registry card reads
+      // as "this is a different category of dangerous" at a glance.
+      return '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" fill="currentColor" stroke="currentColor"/><line x1="12" y1="9" x2="12" y2="13" stroke="#fff" stroke-width="2"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="#fff" stroke-width="2.5"/></svg>';
+    }
     return APPR_SVG.shield;
   }
 
@@ -3985,6 +4007,11 @@
       card.className = "approval inline";
       if (isDesktop) card.classList.add("kind-desktop");
       if (isDestructive) card.classList.add("kind-destructive");
+      // The registry kind gets its own strong-warning treatment AND a
+      // hold-to-approve button (wired below). Sits above kind-destructive
+      // in the visual hierarchy.
+      const isRegistry = kind === "registry";
+      if (isRegistry) card.classList.add("kind-registry");
       // Status pill markup. Default state is "pending" — on click of the
       // approve/deny buttons we morph the pill in place (`is-pending` →
       // `is-approved` / `is-denied`) for a brief moment before the card
@@ -4040,11 +4067,52 @@
         if (labelEl) labelEl.textContent = toState.charAt(0).toUpperCase() + toState.slice(1);
         if (dotEl && pillSvg[toState]) dotEl.innerHTML = pillSvg[toState];
       };
-      card.querySelector('[data-act="approve"]').addEventListener("click", () => {
-        morphPill("approved");
-        setTimeout(() => decideApproval(a.id, "approve"), 280);
-      });
-      card.querySelector('[data-act="deny"]').addEventListener("click", () => {
+      const approveBtn = card.querySelector('[data-act="approve"]');
+      const denyBtn = card.querySelector('[data-act="deny"]');
+      if (isRegistry) {
+        // Hold-to-approve. 2-second hold required; releasing the button or
+        // dragging off cancels and resets the fill. Prevents accidental
+        // enter-key / single-click approvals on a destructive operation.
+        // The .appr-btn-hold class triggers a ::before progress fill in
+        // CSS; the is-holding class enables the 2s width transition.
+        const HOLD_MS = 2000;
+        let holdTimer = null;
+        approveBtn.classList.add("appr-btn-hold");
+        const labelEl = approveBtn.querySelector("span");
+        if (labelEl) labelEl.textContent = "Hold to approve";
+        const cancelHold = () => {
+          if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+          approveBtn.classList.remove("is-holding");
+        };
+        const startHold = (e) => {
+          e.preventDefault();
+          if (holdTimer) return;
+          approveBtn.classList.add("is-holding");
+          holdTimer = setTimeout(() => {
+            holdTimer = null;
+            approveBtn.classList.remove("is-holding");
+            approveBtn.classList.add("is-armed");
+            morphPill("approved");
+            setTimeout(() => decideApproval(a.id, "approve"), 280);
+          }, HOLD_MS);
+        };
+        approveBtn.addEventListener("pointerdown", startHold);
+        approveBtn.addEventListener("pointerup", cancelHold);
+        approveBtn.addEventListener("pointerleave", cancelHold);
+        approveBtn.addEventListener("pointercancel", cancelHold);
+        // Block plain click + Enter key — they'd skip the hold gate
+        // entirely. The pointerdown path is the only way in.
+        approveBtn.addEventListener("click", (e) => e.preventDefault());
+        approveBtn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") e.preventDefault();
+        });
+      } else {
+        approveBtn.addEventListener("click", () => {
+          morphPill("approved");
+          setTimeout(() => decideApproval(a.id, "approve"), 280);
+        });
+      }
+      denyBtn.addEventListener("click", () => {
         morphPill("denied");
         setTimeout(() => decideApproval(a.id, "deny"), 280);
       });

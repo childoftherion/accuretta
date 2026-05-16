@@ -980,6 +980,100 @@ def needs_approval(cmd: str) -> bool:
     return False
 
 
+# ---- registry guardrails ---------------------------------------------------
+# Registry writes are the single highest-blast-radius operation the agent
+# can do on Windows — one bad value under HKLM can brick the OS. We split
+# protection into two tiers based on which hive the command touches:
+#
+#   - SYSTEM hives (HKLM, HKCR, HKU): hard-refused at the bridge. The
+#     agent gets an error back; no approval card is even shown. This
+#     matches "format-my-PC" territory.
+#   - USER hives (HKCU, HKCC): routed through a special REGISTRY EDIT
+#     approval card on the frontend with hold-to-approve, so a single
+#     mis-click can't push through a registry write.
+#
+# Opaque imports — `reg import file.reg` or `regedit /s file.reg` — escalate
+# to SYSTEM because the actual target hive isn't visible from the cmd
+# string alone, and .reg files in the wild routinely write HKLM.
+_REG_SYSTEM_HIVES = (
+    "HKLM:", "HKCR:", "HKU:",
+    "HKEY_LOCAL_MACHINE", "HKEY_CLASSES_ROOT", "HKEY_USERS",
+)
+_REG_USER_HIVES = (
+    "HKCU:", "HKCC:",
+    "HKEY_CURRENT_USER", "HKEY_CURRENT_CONFIG",
+)
+_REG_WRITE_VERBS = re.compile(
+    r"\b("
+    r"Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|Clear-ItemProperty"
+    r"|New-Item|Remove-Item|Rename-Item|Copy-Item|Move-Item"
+    r"|reg\s+(?:add|delete|copy|restore)"
+    r")\b",
+    re.IGNORECASE,
+)
+_REG_OPAQUE_IMPORT = re.compile(
+    r"\b(reg\s+import\b|regedit(?:\.exe)?\s+(?:/s\b|-s\b))",
+    re.IGNORECASE,
+)
+_REG_LAUNCH_REGEDIT = re.compile(
+    r"\b(Start-Process\s+regedit|^\s*regedit(?:\.exe)?\b|;\s*regedit(?:\.exe)?\b)",
+    re.IGNORECASE,
+)
+
+
+def registry_assess(cmd: str) -> dict:
+    """Classify whether a PowerShell/cmd string writes to the registry, and
+    at what blast-radius. Returns {"level": "none"|"user"|"system",
+    "targets": [matched hive references]}.
+
+    Conservative on ambiguity — `reg import` / `regedit /s` and bare
+    `regedit` launches escalate to "system" because their actual targets
+    aren't visible in the cmd string.
+    """
+    if not cmd:
+        return {"level": "none", "targets": []}
+    # Opaque imports / regedit launches: can't see the target, assume worst.
+    if _REG_OPAQUE_IMPORT.search(cmd) or _REG_LAUNCH_REGEDIT.search(cmd):
+        return {"level": "system", "targets": ["(opaque: .reg file or regedit launch)"]}
+    # No registry-write verb? Then this command can't be writing to registry.
+    # (Set-ItemProperty / New-Item also work on filesystem PSDrives, so we
+    # need to see both a write verb AND a hive reference.)
+    if not _REG_WRITE_VERBS.search(cmd):
+        return {"level": "none", "targets": []}
+    system_hits: list[str] = []
+    user_hits: list[str] = []
+    # Match hive prefix + the path that follows it. Stop at whitespace,
+    # quote, comma, semicolon, or backtick (PowerShell line continuation).
+    for hive in _REG_SYSTEM_HIVES:
+        for m in re.finditer(re.escape(hive) + r"[\\:\w.()$ -]*", cmd, re.IGNORECASE):
+            system_hits.append(m.group(0).strip())
+    for hive in _REG_USER_HIVES:
+        for m in re.finditer(re.escape(hive) + r"[\\:\w.()$ -]*", cmd, re.IGNORECASE):
+            user_hits.append(m.group(0).strip())
+    if system_hits:
+        # Dedupe while preserving order; user hits ride along so the
+        # approval card can show the full picture even though the level
+        # is determined by the more dangerous one.
+        seen = set()
+        targets = []
+        for t in system_hits + user_hits:
+            if t.lower() not in seen:
+                seen.add(t.lower())
+                targets.append(t)
+        return {"level": "system", "targets": targets}
+    if user_hits:
+        seen = set()
+        targets = []
+        for t in user_hits:
+            if t.lower() not in seen:
+                seen.add(t.lower())
+                targets.append(t)
+        return {"level": "user", "targets": targets}
+    # Write verb found but no hive reference → not a registry write
+    # (e.g. Set-ItemProperty against a filesystem path).
+    return {"level": "none", "targets": []}
+
+
 # ---- bridge self-protection ------------------------------------------------
 # Some local models, when iterating on a web UI that needs npm rebuilds or
 # flask restarts, also kill the python process running THIS file — taking
@@ -1568,7 +1662,36 @@ def tool_run_powershell(args: dict) -> dict:
             ),
             "refused_command": cmd,
         }
-    if needs_approval(cmd):
+    # Registry tier check runs BEFORE the generic powershell approval so
+    # system-hive writes never even reach the approval queue. Refusal here
+    # is the catastrophic-failure safeguard that prevents another "one rule
+    # bricked the PC" incident.
+    reg = registry_assess(cmd)
+    if reg["level"] == "system":
+        return {
+            "error": (
+                "refused: command writes to a SYSTEM registry hive "
+                f"({', '.join(reg['targets']) or 'HKLM/HKCR/HKU'}). "
+                "Accuretta hard-blocks these because a single bad value here "
+                "can brick Windows. If this is genuinely intentional, do it "
+                "manually in regedit with admin rights — no agent path."
+            ),
+            "refused_command": cmd,
+            "registry_level": "system",
+            "registry_targets": reg["targets"],
+        }
+    if reg["level"] == "user":
+        # Loud REGISTRY EDIT approval card with hold-to-approve on the
+        # frontend. Detail keys travel via details["targets"] so the card
+        # can render them as a prominent list.
+        approval = request_approval(
+            title="REGISTRY EDIT (user hive)",
+            command=cmd,
+            details={"kind": "registry", "level": "user", "targets": reg["targets"]},
+        )
+        if approval.get("decision") != "approve":
+            return {"error": f"user denied registry edit ({approval.get('status')})"}
+    elif needs_approval(cmd):
         approval = request_approval(
             title="PowerShell (write/modify)",
             command=cmd,

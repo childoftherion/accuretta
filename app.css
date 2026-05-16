@@ -2121,6 +2121,118 @@ button { font-family: inherit; }
   border-color: var(--accent-hover);
 }
 
+/* ============================================================
+   REGISTRY EDIT approval — loud variant.
+   Bridge hard-blocks system-hive (HKLM/HKCR/HKU) writes outright;
+   anything that reaches this card is HKCU/HKCC scope and routed
+   through request_approval with kind="registry". The styling is
+   deliberately the loudest in the whole UI so it can't be confused
+   with a regular write_file / powershell approval.
+   ============================================================ */
+.approval.kind-registry {
+  border-color: var(--danger);
+  /* Faint orange wash + an inner stripe along the top edge so the
+     card reads as "this is hot" even before you look at the icon. */
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--danger) 14%, transparent) 0, transparent 6px),
+    var(--bg-raised);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px var(--danger),
+    0 0 28px color-mix(in srgb, var(--danger) 22%, transparent);
+}
+.approval.kind-registry .appr-head-icon {
+  background: var(--danger);
+  color: var(--accent-fg);
+}
+.approval.kind-registry .appr-head-title {
+  color: var(--danger);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+.approval.kind-registry .appr-head-tag {
+  background: var(--danger);
+  color: var(--accent-fg);
+  border-color: var(--danger);
+}
+.approval.kind-registry .appr-sub {
+  color: var(--fg);
+  font-weight: 600;
+}
+.approval.kind-registry .appr-detail-icon { color: var(--danger); }
+.approval.kind-registry .appr-detail-row {
+  border-bottom-color: color-mix(in srgb, var(--danger) 22%, transparent);
+}
+/* Target keys highlighted in mono so the user can scan exactly what's
+   getting touched without parsing PowerShell syntax. */
+.approval.kind-registry .appr-detail-val {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg);
+  word-break: break-all;
+}
+
+/* Hold-to-approve button. A ::before pseudo-element fills the button
+   from left to right over the hold duration (2s). Releasing snaps the
+   fill back to 0 width (transition: 0s on the inactive state). The
+   button label switches to "Hold to approve" via JS. */
+.approval.kind-registry .appr-btn-approve {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--accent-fg);
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.approval.kind-registry .appr-btn-approve:hover {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+  border-color: var(--danger);
+}
+.approval.kind-registry .appr-btn-approve.appr-btn-hold::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 0;
+  background: rgba(255, 255, 255, 0.28);
+  transition: width 0s linear;
+  pointer-events: none;
+  z-index: 0;
+}
+.approval.kind-registry .appr-btn-approve.appr-btn-hold.is-holding::before {
+  width: 100%;
+  transition: width 2s linear;
+}
+/* Keep the icon + label above the fill */
+.approval.kind-registry .appr-btn-approve > svg,
+.approval.kind-registry .appr-btn-approve > span {
+  position: relative;
+  z-index: 1;
+}
+.approval.kind-registry .appr-btn-approve.is-armed {
+  background: var(--success, #3fa86a);
+  border-color: var(--success, #3fa86a);
+}
+/* Brighten the deny button too — it's the safer of the two options
+   on this card so it should look fully clickable. */
+.approval.kind-registry .appr-btn-deny {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.approval.kind-registry .appr-btn-deny:hover {
+  background: var(--bg-inset);
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
+/* Subtle pulse on the danger glow so the card actively pulls attention
+   while it's pending. Stops once the user interacts. */
+@keyframes appr-registry-pulse {
+  0%, 100% { box-shadow: var(--shadow-lg), 0 0 0 1px var(--danger), 0 0 28px color-mix(in srgb, var(--danger) 22%, transparent); }
+  50%      { box-shadow: var(--shadow-lg), 0 0 0 1px var(--danger), 0 0 42px color-mix(in srgb, var(--danger) 40%, transparent); }
+}
+.approval.kind-registry { animation: slide-in var(--dur-base) var(--ease-out), appr-registry-pulse 2.8s ease-in-out infinite; }
+
 /* ---- advanced details disclosure ---- */
 .approval .appr-advanced {
   margin-top: 2px;
