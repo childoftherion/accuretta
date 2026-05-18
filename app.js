@@ -49,7 +49,11 @@
     if (!host) {
       host = document.createElement("div");
       host.id = "toast-host";
-      document.body.appendChild(host);
+      // Prefer the composer-wrap as the anchor so toasts pop above the
+      // prompt box and slide up "from behind" it. Falls back to body for
+      // pages that don't have a composer.
+      const anchor = document.querySelector(".composer-wrap") || document.body;
+      anchor.appendChild(host);
     }
     if (key && _toasts.has(key)) {
       try { _toasts.get(key).remove(); } catch {}
@@ -2302,13 +2306,24 @@
         const hadTools = toolStack && toolStack.children.length > 0;
         bubble.classList.remove("hidden");
         bubble.classList.add("quiet");
+        // All three empty-state branches render as: leading info icon +
+        // italic message text. The CSS for .bubble.quiet handles the flex
+        // layout, padding, and accent-tinted icon — see .quiet-icon there.
         if (thinking && thinking.length > 40) {
           const tail = thinking.length > 900 ? "…" + thinking.slice(-900) : thinking;
-          bubble.innerHTML = `<div style="margin-bottom:6px;opacity:0.7;font-size:11px;">(model spent its whole budget thinking — here's the tail)</div><pre style="white-space:pre-wrap;font-family:inherit;margin:0;">${esc(tail)}</pre>`;
+          bubble.innerHTML =
+            `<i class="quiet-icon ph ph-info"></i>` +
+            `<div class="quiet-text">` +
+              `<div style="margin-bottom:6px;opacity:0.85;font-size:12px;">model spent its whole budget thinking — here's the tail</div>` +
+              `<pre style="white-space:pre-wrap;font-family:inherit;margin:0;font-style:normal;">${esc(tail)}</pre>` +
+            `</div>`;
         } else {
-          bubble.textContent = hadTools
-            ? "(model ended turn without a reply — ask it what it found, or try again)"
-            : "(no response — try raising Max reply tokens in Settings)";
+          const msg = hadTools
+            ? "model ended turn without a reply — ask it what it found, or try again"
+            : "No response — try raising Max reply tokens in Settings.";
+          bubble.innerHTML =
+            `<i class="quiet-icon ph ph-info"></i>` +
+            `<span class="quiet-text">${esc(msg)}</span>`;
         }
       }
     }
@@ -2362,8 +2377,37 @@
       /<\|end_of_text\|>/gi,
       /\[\/?INST\]/gi,
       /<s>|<\/s>/gi,
+      // Orphan tool_call tags. The bridge's tool_call extractor only strips
+      // MATCHED <tool_call>...</tool_call> pairs; if the model emits a stray
+      // opener / closer without a partner, it bleeds into the visible reply.
+      // Gemma + some other tunes do this routinely after their last real
+      // tool call, leaving artifacts like a lone "</tool_call>" or "</".
+      /<\/?tool_call>/gi,
+      /<\/?function(?:=\w+)?>/gi,
+      // Quote-wrapper special tokens. Gemma 4's native tool-call dialect
+      // uses <|"|> as a STRING DELIMITER (not a quote replacement) — the
+      // bridge's TOOL_CALL_GEMMA_RE parser consumes valid <|tool_call>…
+      // blocks before this filter runs, so anything that reaches here is
+      // an orphan / partial emit. Strip both quote-token variants so the
+      // visible bubble is clean.
+      /<\|"\|>/g,
+      /<\|'\|>/g,
+      // Gemma 4 tool-call wrapper tokens. Same reasoning: valid calls are
+      // already parsed and extracted by the bridge; only stray openers /
+      // closers / partial bodies would reach the visible content path.
+      /<\|tool_call>(?:call\s*:)?/gi,
+      /<tool_call\|>/gi,
+      /<\|tool_response>(?:response\s*:)?/gi,
+      /<tool_response\|>/gi,
     ];
     for (const re of junk) { thinking = thinking.replace(re, ""); content = content.replace(re, ""); }
+    // Trailing partial-tag stripper. Catches the case where the stream cuts
+    // mid-tag — `<`, `</`, `</to`, `</tool_call` (no closing `>`), `</think`
+    // etc. — and any leading whitespace before it. Scoped to known tag
+    // names so we don't accidentally eat legitimate trailing `<` characters
+    // in prose like "use the < operator".
+    content = content.replace(/\s*<\/?(?:tool_call|tool|call|think|thinking|reasoning|function|im_start|im_end)\w*\s*$/i, "");
+    content = content.replace(/\s*<\/\s*$/, "");  // bare "</" with nothing after
     return { thinking: thinking.trim(), content };
   }
   function updateThinkLine(row, running, label) {
@@ -2468,6 +2512,14 @@
           enhanceCodeBlocks(bubble);
         }
         if (ctx.row) updateThinkLine(ctx.row, false);
+      } else if (bubble.innerHTML && !bubble.classList.contains("hidden")) {
+        // Content was stripped to empty (e.g. model emitted only a partial
+        // </tool_call> that splitThinking's junk filters cleaned out).
+        // Reset the bubble + re-hide so the end-of-stream empty-bubble
+        // fallback can fire ("model ended turn without a reply…") instead
+        // of leaving stale partial characters from before the strip.
+        bubble.innerHTML = "";
+        bubble.classList.add("hidden");
       }
       scrollToBottom();
     } else if (evt.type === "tool_start") {
@@ -4490,6 +4542,123 @@
     $("#drawer-scrim").classList.remove("open");
     $("#settings-drawer").classList.remove("open");
   }
+
+  // ---------- Command history drawer ----------
+  // PowerShell command audit log. Backend logs every _run_powershell call
+  // to data/cmd_history.jsonl (with chat_id, exit code, stdout/stderr, and
+  // duration); this drawer fetches /api/cmd-history on open and renders
+  // each entry as a collapsed row + click-to-expand detail. Reusing the
+  // same scrim mechanism as Settings keeps the open/close UX consistent.
+  async function openCmdHistory() {
+    $("#cmd-history-scrim").classList.add("open");
+    $("#cmd-history-drawer").classList.add("open");
+    await loadCmdHistory();
+  }
+  function closeCmdHistory() {
+    $("#cmd-history-scrim").classList.remove("open");
+    $("#cmd-history-drawer").classList.remove("open");
+  }
+  async function loadCmdHistory() {
+    const body = $("#cmd-history-body");
+    const countEl = $("#cmd-history-count");
+    if (!body) return;
+    body.innerHTML = `<div class="cmd-history-empty">Loading…</div>`;
+    try {
+      const r = await api("/api/cmd-history?limit=300");
+      const entries = Array.isArray(r?.entries) ? r.entries : [];
+      if (countEl) countEl.textContent = entries.length ? `${entries.length} entries` : "0 entries";
+      renderCmdHistory(entries);
+    } catch (e) {
+      body.innerHTML = `<div class="cmd-history-empty">Failed to load history: ${esc(e.message || String(e))}</div>`;
+      if (countEl) countEl.textContent = "—";
+    }
+  }
+  function renderCmdHistory(entries) {
+    const body = $("#cmd-history-body");
+    if (!body) return;
+    if (!entries.length) {
+      body.innerHTML = `<div class="cmd-history-empty">No PowerShell commands recorded yet.<br><br><span style="font-size:11px;">Anything the agent runs via <code>run_powershell</code> shows up here.</span></div>`;
+      return;
+    }
+    const chatsMap = (state.chats && state.chats.chats) || {};
+    const chevSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+    body.innerHTML = entries.map((e, idx) => {
+      const okClass = e.spawn_error ? "fail" : (e.timed_out ? "warn" : (e.ok ? "ok" : "fail"));
+      const exitLabel = e.spawn_error ? "ERR" : (e.timed_out ? "TIME" : (e.ok ? "OK" : `EXIT ${e.exit ?? "?"}`));
+      const cmdPreview = String(e.command || "").split("\n")[0].slice(0, 240);
+      // ts comes from the bridge as milliseconds (Python int(time.time() * 1000));
+      // relTime expects seconds, so divide.
+      const when = e.ts ? relTime(Math.floor(e.ts / 1000)) : "—";
+      const chatLabel = e.chat_id ? (chatsMap[e.chat_id]?.title || e.chat_id.slice(0, 8)) : "—";
+      const stdoutPre = e.stdout && e.stdout.trim()
+        ? `<pre class="cmd-detail-pre">${esc(e.stdout)}</pre>`
+        : `<pre class="cmd-detail-pre empty">(empty)</pre>`;
+      const stderrPre = e.stderr && e.stderr.trim()
+        ? `<pre class="cmd-detail-pre stderr">${esc(e.stderr)}</pre>`
+        : `<pre class="cmd-detail-pre empty">(empty)</pre>`;
+      const dur = e.duration_ms != null ? `${e.duration_ms.toLocaleString()} ms` : "—";
+      const noteLine = e.timed_out ? "<b>Timed out</b> · " : (e.spawn_error ? "<b>Spawn error</b> · " : "");
+      return `<div class="cmd-row" data-idx="${idx}">
+  <div class="cmd-row-summary">
+    <span class="cmd-row-time">${esc(when)}</span>
+    <span class="cmd-row-exit ${okClass}">${esc(exitLabel)}</span>
+    <span class="cmd-row-cmd" title="${esc(cmdPreview)}">${esc(cmdPreview)}</span>
+    <span class="cmd-row-chev">${chevSvg}</span>
+  </div>
+  <div class="cmd-row-detail">
+    <div class="cmd-detail-section">
+      <div class="cmd-detail-label">Full command<button class="cmd-detail-copy" data-copy="cmd">Copy</button></div>
+      <pre class="cmd-detail-pre" data-cmd>${esc(e.command || "")}</pre>
+    </div>
+    <div class="cmd-detail-section">
+      <div class="cmd-detail-label">stdout<button class="cmd-detail-copy" data-copy="stdout">Copy</button></div>
+      ${stdoutPre}
+    </div>
+    <div class="cmd-detail-section">
+      <div class="cmd-detail-label">stderr<button class="cmd-detail-copy" data-copy="stderr">Copy</button></div>
+      ${stderrPre}
+    </div>
+    <div class="cmd-detail-meta">
+      ${noteLine}<span><b>Duration:</b> ${esc(dur)}</span>
+      <span><b>Chat:</b> ${esc(chatLabel)}</span>
+    </div>
+  </div>
+</div>`;
+    }).join("");
+    // wire row expand + copy buttons (delegated)
+    body.querySelectorAll(".cmd-row-summary").forEach(sum => {
+      sum.addEventListener("click", () => sum.parentElement.classList.toggle("expanded"));
+    });
+    body.querySelectorAll(".cmd-detail-copy").forEach(btn => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const what = btn.dataset.copy;
+        const row = btn.closest(".cmd-row");
+        if (!row) return;
+        const idx = Number(row.dataset.idx);
+        const e = entries[idx];
+        let text = "";
+        if (what === "cmd") text = e.command || "";
+        else if (what === "stdout") text = e.stdout || "";
+        else if (what === "stderr") text = e.stderr || "";
+        if (!text) { toast("nothing to copy", "warn", 1500); return; }
+        navigator.clipboard.writeText(text).then(
+          () => { toast("copied", "ok", 1500); },
+          () => { toast("clipboard failed", "error", 2000); },
+        );
+      });
+    });
+  }
+  async function clearCmdHistory() {
+    if (!confirm("Clear all PowerShell command history? This can't be undone.")) return;
+    try {
+      await api("/api/cmd-history", { method: "DELETE" });
+      toast("history cleared", "ok", 1500);
+      await loadCmdHistory();
+    } catch (e) {
+      toast("clear failed: " + (e.message || e), "error");
+    }
+  }
   function populateSettingsForm() {
     const s = state.settings;
     const fill = (id, v) => { const el = $(id); if (el) el.value = v ?? ""; };
@@ -5214,6 +5383,11 @@
     $("#btn-settings").addEventListener("click", openSettings);
     $("#btn-close-settings").addEventListener("click", closeSettings);
     $("#drawer-scrim").addEventListener("click", closeSettings);
+    $("#btn-cmd-history")?.addEventListener("click", openCmdHistory);
+    $("#btn-close-cmd-history")?.addEventListener("click", closeCmdHistory);
+    $("#cmd-history-scrim")?.addEventListener("click", closeCmdHistory);
+    $("#btn-cmd-history-refresh")?.addEventListener("click", loadCmdHistory);
+    $("#btn-cmd-history-clear")?.addEventListener("click", clearCmdHistory);
     const openFaq = () => { $("#faq-scrim").classList.add("open"); $("#faq-modal").classList.add("open"); };
     const closeFaq = () => { $("#faq-scrim").classList.remove("open"); $("#faq-modal").classList.remove("open"); };
     $("#btn-faq")?.addEventListener("click", openFaq);

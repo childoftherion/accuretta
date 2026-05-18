@@ -174,6 +174,12 @@ SYSTEM_CONTEXT_FILE = DATA / "ACCURETTA.md"
 MEMORIES_FILE = DATA / "memories.jsonl"
 MEMORIES_MAX_INJECT = 15          # how many to load into every system prompt
 MEMORIES_TEXT_CAP = 220           # per-entry char cap — token-efficient
+# PowerShell command history — append-only JSON Lines, one row per command
+# that hits _run_powershell. Surfaced via /api/cmd-history and the History
+# drawer in the UI. Kept rolling: anything past CMD_HISTORY_MAX gets trimmed
+# on each write so the file never grows unbounded.
+CMD_HISTORY_FILE = DATA / "cmd_history.jsonl"
+CMD_HISTORY_MAX = 2000
 IGNORE_FILE_NAME = ".accurettaignore"
 
 # per-chat ephemeral desktop kill switch.  lives in memory only — restarting
@@ -1424,18 +1430,72 @@ def tool_read_file(args: dict) -> dict:
     # the PDF is scanned/image-only and has no text layer at all.
     if path.lower().endswith(".pdf"):
         return _extract_pdf_text(path)
+    # Line-based pagination. The previous implementation just returned the
+    # first 64KB with truncated=true, which gave the model no way to access
+    # the rest — and models would loop on read_file thinking that "trying
+    # again" might somehow get fresh bytes (it doesn't; same call, same
+    # response). The fix has two parts:
+    #   1. Accept an `offset` arg (0-indexed starting line). Default 0.
+    #   2. When the response is truncated, emit a hint that explicitly says
+    #      "retrying with the same args returns the SAME chunk — use
+    #      offset=N to read further."
+    # 64KB byte cap stays in place so a single read can never blow context;
+    # offset just lets the model walk through a large file chunk by chunk.
+    offset = max(0, int(args.get("offset") or 0))
+    BYTE_CAP = 64 * 1024
     try:
-        raw = Path(path).read_bytes()
-        if len(raw) > 64 * 1024:
-            raw = raw[: 64 * 1024]
-            truncated = True
-        else:
-            truncated = False
         try:
-            text = raw.decode("utf-8")
+            full_text = Path(path).read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            text = raw.decode("latin-1", errors="replace")
-        return {"path": path, "content": text, "truncated": truncated, "size": os.path.getsize(path)}
+            full_text = Path(path).read_bytes().decode("latin-1", errors="replace")
+        total_size = len(full_text.encode("utf-8", errors="replace"))
+        lines = full_text.splitlines(keepends=True)
+        total_lines = len(lines)
+        if offset >= total_lines and total_lines > 0:
+            return {
+                "path": path,
+                "content": "",
+                "offset": offset,
+                "total_lines": total_lines,
+                "size": total_size,
+                "note": (
+                    f"offset {offset} is past EOF — file has {total_lines} lines "
+                    f"(0-indexed: 0..{total_lines - 1}). Nothing to read here."
+                ),
+            }
+        # Walk lines from offset, accumulating until we hit BYTE_CAP. Always
+        # include at least one line even if it's larger than the cap (so a
+        # giant single-line minified file still returns something).
+        chunk_parts: list[str] = []
+        byte_count = 0
+        end = offset
+        for i in range(offset, total_lines):
+            line_bytes = len(lines[i].encode("utf-8", errors="replace"))
+            if byte_count + line_bytes > BYTE_CAP and chunk_parts:
+                break
+            chunk_parts.append(lines[i])
+            byte_count += line_bytes
+            end = i + 1
+        chunk = "".join(chunk_parts)
+        truncated = end < total_lines
+        out: dict = {
+            "path": path,
+            "content": chunk,
+            "offset": offset,
+            "lines_returned": end - offset,
+            "total_lines": total_lines,
+            "size": total_size,
+            "truncated": truncated,
+        }
+        if truncated:
+            out["hint"] = (
+                f"Showing lines {offset}-{end - 1} of {total_lines} "
+                f"(stopped at {BYTE_CAP // 1024}KB chunk cap). "
+                f"To read the rest, call read_file again with offset={end}. "
+                f"Calling with the SAME args will return the SAME chunk — "
+                f"the file is fixed on disk; retrying won't get different bytes."
+            )
+        return out
     except Exception as e:
         return {"error": str(e)}
 
@@ -1600,7 +1660,63 @@ def _emit_tool_stream(name: str, text: str) -> None:
             pass
 
 
+_cmd_history_lock = threading.Lock()
+
+
+def _append_cmd_history(entry: dict) -> None:
+    """Append a single PowerShell-call record to cmd_history.jsonl, then trim
+    the file to CMD_HISTORY_MAX lines if it's grown past that. Failures are
+    swallowed — command logging must never block a tool call from returning."""
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        with _cmd_history_lock:
+            with open(CMD_HISTORY_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            # Cheap rotation: rewrite the file if it's too long. Reads the
+            # whole file (it's capped, so a few hundred KB at worst) and
+            # keeps the trailing CMD_HISTORY_MAX entries.
+            try:
+                with open(CMD_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                if len(lines) > CMD_HISTORY_MAX + 200:  # only rotate when meaningfully over
+                    keep = lines[-CMD_HISTORY_MAX:]
+                    with open(CMD_HISTORY_FILE, "w", encoding="utf-8") as f:
+                        f.writelines(keep)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _read_cmd_history(limit: int = 200, chat_id: str = "") -> list[dict]:
+    """Return the last `limit` history entries, newest first. Optionally
+    filter to entries that ran in a specific chat."""
+    if not CMD_HISTORY_FILE.exists():
+        return []
+    out: list[dict] = []
+    try:
+        with _cmd_history_lock:
+            with open(CMD_HISTORY_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+    except Exception:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if chat_id and entry.get("chat_id") != chat_id:
+            continue
+        out.append(entry)
+    out.reverse()
+    return out[:limit]
+
+
 def _run_powershell(cmd: str, timeout: int = 120, max_stdout: int = 16000) -> dict:
+    t_start = time.time()
     try:
         proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
@@ -1608,7 +1724,19 @@ def _run_powershell(cmd: str, timeout: int = 120, max_stdout: int = 16000) -> di
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except Exception as e:
-        return {"error": str(e)}
+        err = {"error": str(e)}
+        _append_cmd_history({
+            "ts": int(t_start * 1000),
+            "chat_id": _get_current_chat(),
+            "command": cmd,
+            "exit": -1,
+            "ok": False,
+            "duration_ms": int((time.time() - t_start) * 1000),
+            "stdout": "",
+            "stderr": str(e),
+            "spawn_error": True,
+        })
+        return err
 
     out_lines: list[str] = []
     err_lines: list[str] = []
@@ -1631,6 +1759,17 @@ def _run_powershell(cmd: str, timeout: int = 120, max_stdout: int = 16000) -> di
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
+        _append_cmd_history({
+            "ts": int(t_start * 1000),
+            "chat_id": _get_current_chat(),
+            "command": cmd,
+            "exit": -1,
+            "ok": False,
+            "duration_ms": int((time.time() - t_start) * 1000),
+            "stdout": "".join(out_lines)[-max_stdout:],
+            "stderr": "".join(err_lines)[-4000:],
+            "timed_out": True,
+        })
         return {"error": f"timeout after {timeout}s"}
 
     t_out.join(timeout=5)
@@ -1638,12 +1777,23 @@ def _run_powershell(cmd: str, timeout: int = 120, max_stdout: int = 16000) -> di
 
     stdout = "".join(out_lines)[-max_stdout:]
     stderr = "".join(err_lines)[-4000:]
-    return {
+    result = {
         "ok": proc.returncode == 0,
         "exit": proc.returncode,
         "stdout": stdout,
         "stderr": stderr,
     }
+    _append_cmd_history({
+        "ts": int(t_start * 1000),
+        "chat_id": _get_current_chat(),
+        "command": cmd,
+        "exit": proc.returncode,
+        "ok": result["ok"],
+        "duration_ms": int((time.time() - t_start) * 1000),
+        "stdout": stdout,
+        "stderr": stderr,
+    })
+    return result
 
 
 def tool_run_powershell(args: dict) -> dict:
@@ -5559,10 +5709,16 @@ TOOLS: dict[str, dict] = {
         "fn": tool_list_directory,
     },
     "read_file": {
-        "description": "Read a file from the workspace. Works on text, code, markdown, and binary files (returns best-effort decoded text). PDFs are auto-extracted to plain text page-by-page (requires pypdf); scanned image-only PDFs return a notice instead of garbage.",
+        "description": "Read a file from the workspace. Returns up to a 64KB chunk per call. For larger files, use the `offset` parameter (line number) to paginate — the response includes `total_lines` and a hint with the next offset to call. Calling read_file with identical args returns the SAME chunk; use offset to advance. Works on text, code, markdown, and binary files (returns best-effort decoded text). PDFs are auto-extracted to plain text page-by-page (requires pypdf); scanned image-only PDFs return a notice instead of garbage.",
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {
+                    "type": "integer",
+                    "description": "0-indexed starting line. Default 0. To read the next chunk of a truncated response, pass the previous response's `offset + lines_returned` (or just follow the `hint` field).",
+                },
+            },
             "required": ["path"],
         },
         "fn": tool_read_file,
@@ -6704,12 +6860,75 @@ def _resolve_tool_name(name: str) -> str:
     return name
 
 
+# Per-turn tool-call history. Reset at the top of run_chat_turn so each
+# user message gets a fresh counter; checked inside invoke_tool to break
+# infinite loops where the model repeats the SAME tool with the SAME args
+# (typical pattern: misreads a truncated response as a transient failure
+# and retries 20+ times). threading.local keeps concurrent chats isolated.
+_tool_call_history = threading.local()
+TOOL_REPEAT_LIMIT = 3  # 4th identical call gets refused with a clear hint.
+
+# Per-turn context — chat_id and other thread-local state that needs to be
+# reachable from deep inside tool implementations without threading them
+# through every function signature. _run_powershell reads chat_id from here
+# when it logs an entry to cmd_history.jsonl so the History drawer can show
+# which chat each command came from.
+_chat_ctx = threading.local()
+
+
+def _reset_tool_call_history() -> None:
+    _tool_call_history.calls = {}
+
+
+def _set_current_chat(chat_id: str) -> None:
+    _chat_ctx.chat_id = chat_id
+
+
+def _get_current_chat() -> str:
+    return getattr(_chat_ctx, "chat_id", "") or ""
+
+
+def _record_tool_call(canon: str, args: dict) -> int:
+    """Records (canon, args) under a per-thread counter. Returns the new count."""
+    sig = canon + ":" + json.dumps(args or {}, sort_keys=True, default=str)
+    history = getattr(_tool_call_history, "calls", None)
+    if history is None:
+        history = {}
+        _tool_call_history.calls = history
+    history[sig] = history.get(sig, 0) + 1
+    return history[sig]
+
+
 def invoke_tool(name: str, args: dict) -> dict:
     canon = _resolve_tool_name(name)
     t = TOOLS.get(canon)
     if not t:
         # Surface the available names so a repair-retry round can fix a typo.
         return {"error": f"unknown tool: {name}", "available": sorted(TOOLS.keys())}
+    # Loop-breaker. The 4th identical call (same tool, same args) within a
+    # single turn returns a refusal explaining WHY retrying won't help. This
+    # is the backstop for any tool where the model gets stuck in a "must
+    # have been a glitch, try again" pattern — read_file truncation is the
+    # most common trigger but it can happen on list_directory, etc. too.
+    count = _record_tool_call(canon, args or {})
+    if count > TOOL_REPEAT_LIMIT:
+        suggestions = []
+        if canon == "read_file":
+            suggestions.append("for large files, use `offset` to read the next chunk (see the `hint` field in the truncated response)")
+        if canon == "list_directory":
+            suggestions.append("if you need a deeper level, pass the subdirectory as `path`")
+        suggestion_blob = (". " + "; ".join(suggestions)) if suggestions else ""
+        return {
+            "error": (
+                f"refused: {canon} has been called {count} times this turn with the "
+                f"SAME arguments. Tool outputs are deterministic — repeating won't get "
+                f"different bytes back. Either change the arguments{suggestion_blob}, or "
+                f"end the turn and tell the user what you found so far."
+            ),
+            "repeat_count": count,
+            "tool": canon,
+            "loop_breaker": True,
+        }
     try:
         return t["fn"](args or {})
     except Exception as e:
@@ -6752,11 +6971,22 @@ TOOL_CALL_XMLTAG_RE = re.compile(
 TOOL_PARAM_XMLTAG_RE = re.compile(
     r"<parameter=([a-zA-Z0-9_\-\.]+)>\s*([\s\S]*?)\s*</parameter>",
     re.IGNORECASE)
+# Gemma 4 native tool-call dialect. Format:
+#   <|tool_call>call:NAME{key:value,key:<|"|>string<|"|>,key:42}<tool_call|>
+# where <|"|> is Gemma's special-token string delimiter (not a JSON quote).
+# Asymmetric opener / closer is intentional — that's how Google spec'd it.
+# Closer is forgiving so a truncated emit (model cut off before <tool_call|>)
+# still parses up to end-of-string or the next opener.
+# Spec: https://ai.google.dev/gemma/docs/capabilities/text/function-calling-gemma4
+TOOL_CALL_GEMMA_RE = re.compile(
+    r"<\|tool_call>\s*call\s*:\s*([\w.\-]+)\s*\{([\s\S]*?)\}\s*"
+    r"(?:<tool_call\|>|(?=<\|tool_call>)|$)",
+    re.IGNORECASE)
 # Heuristic: model emitted tool-call syntax but no parser matched it.
 # When this fires with zero parsed calls, the reply is almost certainly
 # a hallucination from a chat-template mismatch.
 TOOL_SYNTAX_HINT_RE = re.compile(
-    r"<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|```tool_call",
+    r"<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|<\|tool_call>|```tool_call",
     re.IGNORECASE)
 
 
@@ -6788,8 +7018,46 @@ def repair_tool_args(raw) -> dict:
     s = str(raw).strip()
     if not s:
         return {}
+    # Gemma fine-tunes (and some other ChatML-confused merges) wrap string
+    # values in <|"|> instead of plain " — leak from training data where
+    # the special-token vocabulary bled into content. Normalize before
+    # parse so the JSON becomes valid. Same for the single-quote variant.
+    s = s.replace('<|"|>', '"').replace("<|'|>", "'")
     s = re.sub(r"^```(?:json)?\s*\n?", "", s)
     s = re.sub(r"\n?\s*```\s*$", "", s)
+    # Unquoted string values after a colon. Gemma sometimes emits
+    # `"query":Casemiro Manchester United news today}` with no opening or
+    # closing quote around the value. Detect this when the char after the
+    # colon is a letter (not a JSON primitive opener `{ [ " 0-9 t f n -`)
+    # and wrap the run up to the next structural char in quotes. Conservative
+    # — only triggers on alphabetic starts, and won't touch values that are
+    # already legal JSON primitives.
+    def _quote_unquoted_values(text: str) -> str:
+        # Match a JSON key followed by ":" then an unquoted alphabetic run
+        # up to the next , } or ] (respecting whitespace around them).
+        # The run may include spaces / punctuation since model-emitted bare
+        # values often look like full sentences. Escape internal " and \.
+        pattern = re.compile(
+            r'("[A-Za-z_][\w-]*"\s*:\s*)'        # key + colon
+            r'([A-Za-z][^,\}\]\n\r]*?)'           # alphabetic-start value
+            r'(\s*[,\}\]])'                        # trailing structural
+        )
+        def repl(m):
+            key_part = m.group(1)
+            value = m.group(2).strip()
+            trailing = m.group(3)
+            # Skip if value is a JSON primitive that just happens to be
+            # alphabetic (true / false / null).
+            if value.lower() in ("true", "false", "null"):
+                return m.group(0)
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            return f'{key_part}"{escaped}"{trailing}'
+        # Run twice — first pass may leave nested issues that the second
+        # catches once the outer structure is well-formed.
+        out = pattern.sub(repl, text)
+        out = pattern.sub(repl, out)
+        return out
+    s = _quote_unquoted_values(s)
     try:
         v = json.loads(s)
         return v if isinstance(v, dict) else {"value": v}
@@ -6834,6 +7102,52 @@ def repair_tool_args(raw) -> dict:
             except Exception:
                 pass
     return {}
+
+
+def _find_balanced_json_objects(text: str) -> list[tuple[int, int]]:
+    """Scan `text` for balanced top-level JSON objects. Returns (start, end)
+    byte positions of each top-level `{...}` span. String contents (inside
+    "...") are respected so braces in string values don't shift the depth
+    counter. Used by extract_tool_calls's bare-JSON fallback for models
+    that emit raw {"name":...,"arguments":...} without a <tool_call> wrap."""
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        closed_at = -1
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        closed_at = j
+                        break
+            j += 1
+        if closed_at >= 0:
+            spans.append((i, closed_at + 1))
+            i = closed_at + 1
+        else:
+            i += 1
+    return spans
 
 
 def extract_tool_calls(text: str) -> list[dict]:
@@ -6911,6 +7225,61 @@ def extract_tool_calls(text: str) -> list[dict]:
                         else:
                             args[k] = v
         _add({"name": name, "arguments": args})
+
+    # 6. Gemma 4 native dialect: <|tool_call>call:NAME{k:v,k:<|"|>str<|"|>}<tool_call|>
+    # Body is NOT JSON — it's Gemma's own key:value mini-syntax with <|"|> as
+    # the string delimiter. Convert it to a JSON object by:
+    #   a) substituting <|"|> → "
+    #   b) wrapping the body in {} and feeding through _js_to_json (which
+    #      quotes unquoted identifier keys)
+    # Then parse normally.
+    for m in TOOL_CALL_GEMMA_RE.finditer(text):
+        name = m.group(1)
+        body = (m.group(2) or "").strip()
+        # Map Gemma's string-delimiter token to a real " character.
+        body = body.replace('<|"|>', '"').replace("<|'|>", "'")
+        args: dict = {}
+        # Try as a JSON object first (after wrapping in braces). _js_to_json
+        # handles the unquoted-key case that Gemma's body always has.
+        candidate = "{" + body + "}"
+        try:
+            args = json.loads(candidate)
+        except Exception:
+            try:
+                args = json.loads(_js_to_json(candidate))
+            except Exception:
+                # Last resort: hand the body to repair_tool_args wrapped in
+                # braces so its full repair chain (unquoted values etc.) gets
+                # a swing at it.
+                args = repair_tool_args(candidate) or {}
+        if not isinstance(args, dict):
+            args = {}
+        _add({"name": name, "arguments": args})
+
+    # 7. Bare JSON tool call (no wrapper) — LAST-CHANCE fallback. Some
+    # fine-tunes and chat-template-confused merges emit raw
+    # {"name":"...","arguments":{...}} right in the assistant turn without
+    # any <tool_call> tags. Only fires when parsers 1-6 found nothing AND
+    # the JSON blob carries BOTH "name" and "arguments" / "parameters" keys
+    # — keeps false positives down on models that casually quote tool-call
+    # examples in prose. Balanced-brace scan respects string contents so
+    # braces inside string values don't break span detection.
+    if not calls and ('"name"' in text or "'name'" in text):
+        for s, e in _find_balanced_json_objects(text):
+            chunk = text[s:e]
+            if '"name"' not in chunk and "'name'" not in chunk:
+                continue
+            parsed = repair_tool_args(chunk)
+            if not isinstance(parsed, dict):
+                continue
+            nm = parsed.get("name") or parsed.get("tool")
+            if not nm:
+                continue
+            if "arguments" not in parsed and "parameters" not in parsed:
+                continue
+            if "parameters" in parsed and "arguments" not in parsed:
+                parsed["arguments"] = parsed.pop("parameters")
+            _add(parsed)
 
     return calls
 
@@ -7330,6 +7699,13 @@ def build_system_prompt(include_tools: bool, chat_mode: str = "auto") -> str:
 
     is_ide = (chat_mode == "ide") or (chat_mode == "auto" and not include_tools)
 
+    # Today's date — injected into every system prompt so the model doesn't
+    # hallucinate from its training cutoff when the user asks "what's today's
+    # date" or makes time-relative requests ("yesterday's news", "this week").
+    # Cheap to compute; rounds the model's awareness up to the actual day.
+    _today_str = time.strftime("%A, %B %d, %Y")
+    parts.append(f"current date: {_today_str}")
+
     # === CORE PROMPT (compact, always present) ===
     if is_ide:
         # IDE prompt. Tools ARE available (so "save that to disk" works), but
@@ -7491,6 +7867,14 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
 
     _chat_emitters[chat_id] = emit
     cancel_ev = _register_cancel(chat_id)
+    # Fresh tool-call counter for this turn. The counter is checked by
+    # invoke_tool and trips when the same call repeats 4+ times — see
+    # _record_tool_call / TOOL_REPEAT_LIMIT for the loop-breaker logic.
+    _reset_tool_call_history()
+    # Stash chat_id thread-locally so deep tool callers (e.g. _run_powershell
+    # logging into cmd_history.jsonl) can tag entries with the originating
+    # chat without threading the id through every function signature.
+    _set_current_chat(chat_id)
     try:
         try:
             max_tool_rounds = int(settings.get("max_tool_rounds") or 60)
@@ -8191,6 +8575,16 @@ class Handler(BaseHTTPRequestHandler):
                     shutil.rmtree(VERSIONS_DIR / cid, ignore_errors=True)
                     return self._send_json(200, {"ok": True})
                 return self._send_json(404, {"error": "not found"})
+            if p == "/api/cmd-history":
+                # Wipe the cmd history file. No partial / per-chat delete for
+                # now — simpler that the only "clear" action is "clear all".
+                try:
+                    with _cmd_history_lock:
+                        if CMD_HISTORY_FILE.exists():
+                            CMD_HISTORY_FILE.unlink()
+                except Exception as e:
+                    return self._send_json(500, {"error": str(e)})
+                return self._send_json(200, {"ok": True, "cleared": True})
             return self._send_json(404, {"error": "not found"})
         except Exception as e:
             traceback.print_exc()
@@ -8283,6 +8677,23 @@ class Handler(BaseHTTPRequestHandler):
             })
         if p == "/api/memories":
             return self._send_json(200, {"memories": _load_memories(), "path": str(MEMORIES_FILE)})
+        if p == "/api/cmd-history":
+            # GET ?limit=200&chat_id=XYZ — newest entries first. Optional
+            # chat_id filter scopes the list to one conversation; omit it
+            # for the global view.
+            ch_qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = int(ch_qs.get("limit", ["200"])[0])
+            except Exception:
+                limit = 200
+            limit = max(1, min(limit, 2000))
+            chat_id = (ch_qs.get("chat_id", [""])[0] or "").strip()
+            return self._send_json(200, {
+                "entries": _read_cmd_history(limit=limit, chat_id=chat_id),
+                "limit": limit,
+                "chat_id": chat_id,
+                "cap": CMD_HISTORY_MAX,
+            })
         if p.startswith("/api/desktop/chat-state/"):
             # GET the per-chat desktop-disabled flag
             cid = p.split("/", 4)[4]

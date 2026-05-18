@@ -25,6 +25,24 @@
 </head>
 <body>
 
+<!-- ====== SPLASH / INTRO ======
+     Half-second branded intro that covers the first render so the user
+     never sees the unstyled-flash window. Hardcoded dark bg so it looks
+     right before the user's theme has even loaded. JS at the end of body
+     fades it out after the squares finish their wave. -->
+<div class="splash" id="splash" role="status" aria-label="Loading Accuretta">
+  <div class="splash-stack">
+    <div class="splash-row">
+      <img class="splash-logo" src="/logo-mark-dark.png" alt="" aria-hidden="true">
+      <span class="splash-wordmark">accuretta</span>
+    </div>
+    <div class="splash-bars" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span>
+    </div>
+  </div>
+</div>
+
 <div class="app preview-collapsed" id="app">
 
   <!-- ====== LEFT SIDEBAR (desktop) / MOBILE SESSIONS SCREEN ====== -->
@@ -106,6 +124,7 @@
       </div>
       <div class="actions">
         <button class="iconbtn" id="btn-session-desktop" title="Desktop automation for this chat only" hidden><i class="ph ph-desktop"></i></button>
+        <button class="iconbtn" id="btn-cmd-history" title="PowerShell command history"><i class="ph ph-terminal-window"></i></button>
         <button class="iconbtn" id="btn-palette" title="Switch session (⌘K / Ctrl+K)"><i class="ph ph-magnifying-glass"></i></button>
         <button class="iconbtn" id="btn-theme" title="Theme"><i class="ph ph-moon"></i></button>
         <button class="iconbtn" id="btn-toggle-preview" title="Toggle preview"><i class="ph ph-browser"></i></button>
@@ -166,7 +185,7 @@
             <div class="composer-foot-actions">
               <button class="model-pill" id="model-pill" title="Click to change model"><span class="model-pill-name">select model</span><i class="ph ph-caret-down model-pill-caret"></i></button>
               <div class="model-pill-menu" id="model-pill-menu" role="listbox" aria-label="Pick a model"></div>
-              <button class="btn danger hidden" id="btn-stop"><i class="ph ph-stop-circle"></i><span>Stop</span></button>
+              <button class="btn accent hidden" id="btn-stop" title="Stop streaming"><i class="ph-fill ph-stop"></i><span>Stop</span></button>
               <button class="btn accent" id="btn-send" title="Send (⌘⏎)"><i class="ph-bold ph-arrow-up"></i><span>Send</span></button>
             </div>
           </div>
@@ -616,6 +635,40 @@
   </div>
 </aside>
 
+<!-- ====== COMMAND HISTORY DRAWER ======
+     Lists every PowerShell command the agent has run. Same drawer mechanism
+     as Settings — scrim + slide-in panel. Populated on open by hitting
+     /api/cmd-history. Each row collapses by default; click to expand
+     stdout / stderr / duration / chat. -->
+<div class="drawer-scrim" id="cmd-history-scrim"></div>
+<aside class="drawer cmd-history-drawer" id="cmd-history-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <i class="ph ph-terminal-window"></i>
+    <h3>Command history</h3>
+    <span class="cmd-history-count" id="cmd-history-count"></span>
+    <button class="iconbtn cmd-history-refresh" id="btn-cmd-history-refresh" title="Refresh"><i class="ph ph-arrow-clockwise"></i></button>
+    <button class="iconbtn cmd-history-clear" id="btn-cmd-history-clear" title="Clear all history"><i class="ph ph-trash"></i></button>
+    <button class="iconbtn" id="btn-close-cmd-history" title="Close"><i class="ph ph-x"></i></button>
+  </div>
+  <div class="drawer-body cmd-history-body" id="cmd-history-body">
+    <div class="cmd-history-empty">No commands recorded yet.</div>
+  </div>
+</aside>
+
 <script src="/app.js"></script>
+<script>
+  // Splash fade-out timer. Lives inline (not in app.js) so it fires
+  // independently of when app.js finishes loading — the splash hides on
+  // a fixed schedule regardless of bridge state. The wave animation is
+  // ~280ms last-square-delay + ~200ms tail; we start the fade right at
+  // the tail so the bars never look stalled, then yank the element from
+  // the DOM after the fade so nothing intercepts clicks behind it.
+  (function () {
+    var s = document.getElementById('splash');
+    if (!s) return;
+    setTimeout(function () { s.classList.add('hide'); }, 480);
+    setTimeout(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 780);
+  })();
+</script>
 </body>
 </html>

@@ -8,6 +8,100 @@
 html, body { margin: 0; padding: 0; height: 100vh; overflow: hidden; background: var(--bg); color: var(--fg); }
 button { font-family: inherit; }
 
+/* ============================================================
+   SPLASH / INTRO
+   Half-second branded intro that covers the first paint so the user
+   never sees an unstyled-flash window. Hardcoded dark background so it
+   looks correct before the user's saved theme has even been applied
+   by app.js (saved theme lives in settings, fetched after first paint).
+   The squares animate left-to-right as a loading-style wave; total
+   visible time is ~480ms wave + ~300ms fade = ~780ms.
+   ============================================================ */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0a0c;
+  opacity: 1;
+  transition: opacity 280ms ease-out;
+}
+.splash.hide {
+  opacity: 0;
+  pointer-events: none;
+}
+.splash-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  /* gentle drift-in so the logo doesn't just pop on */
+  animation: splash-rise 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.splash-row {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+.splash-logo {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  /* faint outer glow picks up the brand purple */
+  filter: drop-shadow(0 0 24px rgba(155, 126, 232, 0.35));
+}
+.splash-wordmark {
+  font-family: var(--font-display, 'Space Mono', ui-monospace, monospace);
+  font-size: 52px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #ECEAE5;
+  line-height: 1;
+}
+.splash-bars {
+  display: flex;
+  gap: 7px;
+}
+.splash-bars span {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  background: rgba(155, 126, 232, 0.18);
+  opacity: 0;
+  animation: splash-pulse 460ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+/* Sequential left-to-right delay — 35ms step, 8 squares = ~245ms wave */
+.splash-bars span:nth-child(1) { animation-delay:   0ms; }
+.splash-bars span:nth-child(2) { animation-delay:  35ms; }
+.splash-bars span:nth-child(3) { animation-delay:  70ms; }
+.splash-bars span:nth-child(4) { animation-delay: 105ms; }
+.splash-bars span:nth-child(5) { animation-delay: 140ms; }
+.splash-bars span:nth-child(6) { animation-delay: 175ms; }
+.splash-bars span:nth-child(7) { animation-delay: 210ms; }
+.splash-bars span:nth-child(8) { animation-delay: 245ms; }
+@keyframes splash-pulse {
+  0%   { opacity: 0.15; transform: translateY(2px) scale(0.85); background: rgba(155, 126, 232, 0.18); }
+  35%  { opacity: 1;    transform: translateY(0)   scale(1.18); background: #B8A3F2; }
+  100% { opacity: 0.6;  transform: translateY(0)   scale(1);    background: rgba(155, 126, 232, 0.55); }
+}
+@keyframes splash-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* Respect reduced-motion: skip the wave + drift, just show the logo
+   for the same duration before the fade kicks in. */
+@media (prefers-reduced-motion: reduce) {
+  .splash-stack { animation: none; }
+  .splash-bars span {
+    animation: none;
+    opacity: 0.55;
+    background: rgba(155, 126, 232, 0.55);
+  }
+}
+
 /* ---- desktop flex layout ---- */
 .app {
   display: flex;
@@ -384,31 +478,78 @@ button { font-family: inherit; }
 }
 
 /* toast host — bottom-right stack */
+/* ============================================================
+   TOASTS — slide-up-from-behind-the-composer
+   The toast-host lives INSIDE .composer-wrap (positioned absolutely
+   above its top edge). Each toast starts translated down into the
+   composer's visual area and animates upward to its resting spot
+   just above the composer. Composer has higher z-index so during
+   the overlap the toast is hidden behind it — the "emerging from
+   underneath the prompt box" effect.
+   ============================================================ */
 #toast-host {
-  position: fixed; right: 16px; bottom: 16px;
-  display: flex; flex-direction: column; gap: 8px;
-  z-index: 200; pointer-events: none;
-  max-width: calc(100vw - 32px);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column-reverse;  /* newest on top, older below */
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  pointer-events: none;
+  z-index: 1;                       /* below .composer (z-index: 2) */
+  max-width: min(560px, calc(100vw - 32px));
+  width: max-content;
 }
 .toast {
   pointer-events: auto;
-  padding: 9px 14px;
-  background: var(--bg-raised); color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px; line-height: 1.4;
-  box-shadow: var(--shadow-md);
-  animation: toast-in 0.18s var(--ease-out, ease-out);
-  display: flex; align-items: center; gap: 8px;
-  max-width: 360px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px 10px 16px;
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.22),
+    0 2px 8px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(14px);
+  max-width: min(560px, calc(100vw - 48px));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: toast-emerge 0.45s cubic-bezier(0.2, 0.85, 0.25, 1) both;
 }
-.toast.leaving { animation: toast-out 0.22s ease-in forwards; }
-.toast.info { border-left: 3px solid var(--accent); }
-.toast.ok   { border-left: 3px solid #5fa27e; }
-.toast.warn { border-left: 3px solid #d6a851; }
-.toast.err  { border-left: 3px solid #d66a5a; }
-@keyframes toast-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
-@keyframes toast-out { to { transform: translateY(8px); opacity: 0; } }
+.toast::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+  flex-shrink: 0;
+}
+.toast.info::before { background: var(--accent);  box-shadow: 0 0 0 3px var(--accent-subtle); }
+.toast.ok::before   { background: var(--success); box-shadow: 0 0 0 3px var(--success-subtle); }
+.toast.warn::before { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-subtle); }
+.toast.err::before  { background: var(--danger);  box-shadow: 0 0 0 3px var(--danger-subtle); }
+.toast.leaving { animation: toast-retreat 0.3s cubic-bezier(0.5, 0, 0.75, 0.25) forwards; }
+/* "Slide up from behind the composer". translateY(64px) puts the toast
+   inside the composer's vertical footprint at start; composer's higher
+   z-index hides it until the animation lifts it above the top edge. */
+@keyframes toast-emerge {
+  from { opacity: 0; transform: translateY(64px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+@keyframes toast-retreat {
+  to   { opacity: 0; transform: translateY(48px) scale(0.96); }
+}
 
 /* ============================================================
    Center: topbar + chat
@@ -578,11 +719,35 @@ button { font-family: inherit; }
   border-top-left-radius: 4px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.04);
 }
+/* Empty-state / model-didn't-answer bubble. Used for three cases:
+   1. Model returned zero tokens (raise Max reply tokens hint)
+   2. Model ran tools but never produced a visible reply
+   3. Model spent its whole budget thinking — we surface the tail
+   All three render as: accent-tinted info icon on the left + italic
+   muted text on the right. The bubble keeps a filled background and
+   a solid (not dashed) hairline so it reads as a real chat turn
+   rather than a UI placeholder. */
 .bubble.quiet {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   color: var(--fg-muted);
   font-style: italic;
-  background: transparent;
-  border-style: dashed;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-style: solid;
+}
+.bubble.quiet .quiet-icon {
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1.4;
+  flex-shrink: 0;
+  font-style: normal;
+  margin-top: 1px;
+}
+.bubble.quiet .quiet-text {
+  flex: 1;
+  min-width: 0;
 }
 .bubble p { margin: 0 0 8px; font-family: var(--font-sans) !important; }
 .bubble p:last-child { margin: 0; }
@@ -1150,6 +1315,15 @@ button { font-family: inherit; }
   overflow: hidden;
   flex-shrink: 1;
   transition: opacity 140ms ease-out, transform 140ms ease-out;
+  /* Right-edge fade so chips that overflow the max-width dissolve into the
+     background instead of getting chopped at a hard pixel boundary. The
+     mask fades to transparency (not a specific color), so whatever sits
+     behind the head — chat bubble, chat-inner, body — shows through and
+     the cutoff visually softens in every theme. The 28px fade region is
+     small enough to be invisible when chips fit, only readable as a
+     gradient once an overflowed chip's text crosses into it. */
+  -webkit-mask-image: linear-gradient(to right, black 0, black calc(100% - 28px), transparent 100%);
+          mask-image: linear-gradient(to right, black 0, black calc(100% - 28px), transparent 100%);
 }
 .tool-group-chips.chips-out { opacity: 0; transform: translateX(6px); }
 .tool-group-chips.chips-in  { opacity: 1; transform: translateX(0); }
@@ -1259,6 +1433,12 @@ button { font-family: inherit; }
   background: transparent;
   padding: 16px 20px 24px;
   display: flex; justify-content: center;
+  /* Anchor for #toast-host (which sits at bottom: 100% above the composer).
+     z-index here creates a fresh stacking context so the composer-vs-toast
+     layering below works regardless of what other positioned elements in
+     the chat area are doing. */
+  position: relative;
+  z-index: 1;
 }
 .app.sidebar-collapsed .composer { max-width: 980px; }
 .app.sidebar-collapsed.preview-collapsed .composer { max-width: 1080px; }
@@ -1273,6 +1453,11 @@ button { font-family: inherit; }
   backdrop-filter: blur(20px);
   display: flex; flex-direction: column; gap: 8px;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  /* z-index above the sibling #toast-host so emerging toasts (which start
+     translated down into the composer's vertical footprint) get visually
+     hidden behind the composer until they crest above its top edge. */
+  position: relative;
+  z-index: 2;
 }
 .composer:focus-within {
   transform: translateY(-2px);
@@ -1785,6 +1970,153 @@ button { font-family: inherit; }
 }
 .drawer-head h3 { font-family: var(--font-display); font-size: 18px; letter-spacing: -0.02em; flex: 1; margin: 0; }
 .drawer-body { padding: 16px 20px 24px; overflow-y: auto; overflow-x: hidden; flex: 1; }
+
+/* ============================================================
+   COMMAND HISTORY DRAWER
+   Slightly wider than Settings since command lines can be long.
+   Each row is a compact summary (time / exit pill / command preview);
+   click expands to the full payload (full cmd + stdout + stderr +
+   duration + chat). Uses the same flat-outline language as the rest
+   of the post-redesign UI — no shadow on rows, accent / success /
+   danger tints only on the status pill.
+   ============================================================ */
+.cmd-history-drawer { width: min(560px, 96vw); }
+.cmd-history-drawer .drawer-head { gap: 8px; }
+.cmd-history-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-inset);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.cmd-history-body { padding: 12px 16px 20px; display: flex; flex-direction: column; gap: 6px; }
+.cmd-history-empty {
+  text-align: center;
+  color: var(--fg-muted);
+  font-style: italic;
+  font-size: 12px;
+  padding: 40px 20px;
+}
+.cmd-row {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              background-color var(--dur-fast) var(--ease-out);
+}
+.cmd-row:hover { border-color: var(--border-strong); background: color-mix(in srgb, var(--fg) 3%, transparent); }
+.cmd-row.expanded { border-color: var(--border-strong); background: var(--bg-inset); }
+.cmd-row-summary {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.cmd-row-exit {
+  display: inline-flex; align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+  letter-spacing: 0.02em;
+}
+.cmd-row-exit.ok    { color: var(--success); border-color: color-mix(in srgb, var(--success) 50%, var(--border)); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.cmd-row-exit.fail  { color: var(--danger);  border-color: color-mix(in srgb, var(--danger)  50%, var(--border)); background: color-mix(in srgb, var(--danger)  12%, transparent); }
+.cmd-row-exit.warn  { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 50%, var(--border)); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.cmd-row-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+.cmd-row-cmd {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.cmd-row-chev {
+  color: var(--fg-faint);
+  display: inline-flex;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.cmd-row-chev svg { width: 14px; height: 14px; display: block; }
+.cmd-row.expanded .cmd-row-chev { transform: rotate(180deg); }
+.cmd-row-detail {
+  display: none;
+  padding: 0 12px 14px;
+  border-top: 1px solid var(--border);
+  margin-top: 0;
+}
+.cmd-row.expanded .cmd-row-detail { display: block; }
+.cmd-detail-section { margin-top: 12px; }
+.cmd-detail-label {
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  margin-bottom: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.cmd-detail-label .cmd-detail-copy {
+  margin-left: auto;
+  cursor: pointer;
+  color: var(--fg-faint);
+  background: none;
+  border: 0;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-family: var(--font-sans);
+  text-transform: none;
+  letter-spacing: 0;
+  border-radius: 4px;
+  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.cmd-detail-label .cmd-detail-copy:hover { color: var(--fg); background: var(--bg-raised); }
+.cmd-detail-pre {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+  color: var(--fg);
+}
+.cmd-detail-pre.stderr { color: var(--danger); }
+.cmd-detail-pre.empty {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+.cmd-detail-meta {
+  display: flex; flex-wrap: wrap; gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  padding-top: 4px;
+}
+.cmd-detail-meta b { color: var(--fg); font-weight: 600; }
+.cmd-history-refresh, .cmd-history-clear { font-size: 14px; }
+.cmd-history-clear:hover { color: var(--danger); }
 /* Settings drawer buttons: same flat outline language as the composer chips —
    transparent fill, hairline border, no raised shadow. Primary CTA (accent)
    keeps the filled accent but drops its shadow. Danger flips to an outline-
@@ -2439,9 +2771,10 @@ body.is-mobile { font-family: 'Geist', -apple-system, system-ui, sans-serif; }
   .composer-hint { display: none; }
   .btn { padding: 10px 16px; font-size: 13px; min-height: 42px; border-radius: 10px; }
   .btn.sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
-  /* Send button gets the prominent finger-sized action target */
-  #btn-send { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
-  #btn-stop { padding: 10px 14px; min-height: 44px; }
+  /* Send + Stop both get the prominent finger-sized action target.
+     Same shape (44px circle) since they share visual treatment. */
+  #btn-send,
+  #btn-stop { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
 
   /* sidebar becomes an overlay panel on mobile */
   .sidebar {
@@ -2912,7 +3245,14 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   display: inline-flex; align-items: center; gap: 8px;
   margin-left: auto;
 }
-.composer-foot #btn-send {
+/* Send and Stop share the exact same gradient-pill treatment — they
+   never appear on screen at the same time (Stop is .hidden while
+   idle, Send is .hidden while streaming), so making them visually
+   identical means the button just "morphs its icon" between modes
+   instead of swapping shape entirely. The only difference is the
+   glyph inside. */
+.composer-foot #btn-send,
+.composer-foot #btn-stop {
   width: 32px; height: 32px; padding: 0;
   border-radius: 999px;
   display: inline-flex; align-items: center; justify-content: center;
@@ -2934,7 +3274,8 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
               box-shadow var(--dur-fast) var(--ease-out),
               filter var(--dur-fast) var(--ease-out);
 }
-.composer-foot #btn-send:hover {
+.composer-foot #btn-send:hover,
+.composer-foot #btn-stop:hover {
   /* Brighten the gradient slightly on hover instead of swapping the
      whole color (cheaper than re-painting and stays on-brand). */
   filter: brightness(1.06);
@@ -2944,14 +3285,12 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
               0 4px 8px rgba(0, 0, 0, 0.10);
   transform: translateY(-1px);
 }
-.composer-foot #btn-send:active { transform: translateY(0) scale(0.96); filter: brightness(0.98); }
-.composer-foot #btn-send i { font-size: 14px; }
-.composer-foot #btn-send span { display: none; }
-.composer-foot #btn-stop {
-  height: 28px; padding: 0 12px;
-  border-radius: 999px;
-  font-size: 11px;
-}
+.composer-foot #btn-send:active,
+.composer-foot #btn-stop:active { transform: translateY(0) scale(0.96); filter: brightness(0.98); }
+.composer-foot #btn-send i,
+.composer-foot #btn-stop i { font-size: 14px; }
+.composer-foot #btn-send span,
+.composer-foot #btn-stop span { display: none; }
 
 /* topbar: a little more vertical space */
 .topbar { transition: background-color var(--dur-base) var(--ease-out); }
@@ -3019,8 +3358,8 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   .composer-foot { gap: 8px; padding-top: 4px; }
   .btn { padding: 10px 16px; font-size: 13px; min-height: 42px; border-radius: 10px; }
   .btn.sm { padding: 8px 12px; font-size: 12px; min-height: 36px; }
-  #btn-send { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
-  #btn-stop { padding: 10px 14px; min-height: 44px; }
+  #btn-send,
+  #btn-stop { padding: 10px 18px; font-size: 14px; min-height: 44px; flex: 1; justify-content: center; }
   .toolbar-overflow { width: 38px; height: 32px; }
   .toolbar-overflow i { font-size: 16px; }
   .composer-tools .model-pill { font-size: 11px; padding: 6px 12px; min-height: 32px; max-width: 160px; }
@@ -3459,9 +3798,11 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
   .composer-hint { display: none !important; }
   .composer-foot .model-pill { display: none !important; }
 
-  /* Send button: round accent circle to match the mock. We hide the
-     "Send" text label and let the up-arrow icon speak for itself. */
-  #btn-send {
+  /* Send + Stop: round accent circles. Same shape since they're never
+     visible together — Stop just morphs the icon when streaming. The
+     icon (up-arrow / filled stop square) is the only signal needed. */
+  #btn-send,
+  #btn-stop {
     flex: 0 0 44px !important;
     width: 44px; height: 44px; min-height: 44px;
     padding: 0 !important;
@@ -3469,10 +3810,10 @@ html, body, .app, .sidebar, .topbar, .composer, .composer-wrap, .preview,
     justify-content: center;
     align-items: center;
   }
-  #btn-send span { display: none !important; }
-  #btn-send i { font-size: 18px; }
-  /* Stop button keeps its label so it's unambiguous when streaming */
-  #btn-stop { padding: 10px 14px; min-height: 44px; }
+  #btn-send span,
+  #btn-stop span { display: none !important; }
+  #btn-send i,
+  #btn-stop i { font-size: 18px; }
 
   /* ---- kill the right-edge dark band ----
      Two causes, both fixed here:
