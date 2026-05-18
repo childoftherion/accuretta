@@ -4767,7 +4767,8 @@
     fill("#set-frequency", s.frequency_penalty ?? 0);
     $("#sw-thinking")?.classList.toggle("on", s.enable_thinking !== false);
     fill("#set-think-budget", s.thinking_budget ?? 2048);
-    $("#sw-dark").classList.toggle("on", s.theme === "dark");
+    const themeSel = $("#set-theme");
+    if (themeSel) themeSel.value = s.theme || "dark";
     $("#sw-web").classList.toggle("on", s.allow_web_preview !== false);
 
     // IDE toggles mirror back into the composer chips
@@ -4851,7 +4852,7 @@
       frequency_penalty: n("#set-frequency"),
       enable_thinking: $("#sw-thinking")?.classList.contains("on") !== false,
       thinking_budget: n("#set-think-budget"),
-      theme: $("#sw-dark").classList.contains("on") ? "dark" : "light",
+      theme: ($("#set-theme")?.value || "dark"),
       allow_web_preview: $("#sw-web").classList.contains("on"),
       desktop_enabled: $("#sw-desktop-enabled")?.classList.contains("on") || false,
       desktop_app_allowlist: ($("#set-desktop-allowlist")?.value || "")
@@ -4901,17 +4902,18 @@
   // first click from dark lands on the safer middle option instead of
   // jumping straight to bright white. nextTheme() handles the cycle and
   // accepts whatever string is in settings as the starting point.
-  const THEME_CYCLE = ["dark", "dim", "light"];
+  const THEME_CYCLE = ["dark", "dim", "soft", "light"];
   const THEME_ICONS = {
     dark:  "ph ph-moon",
     dim:   "ph ph-moon-stars",
+    soft:  "ph ph-cloud",
     light: "ph ph-sun",
   };
   function nextTheme(cur) {
     const idx = THEME_CYCLE.indexOf(cur);
     return THEME_CYCLE[(idx + 1) % THEME_CYCLE.length];
   }
-  // applyTheme accepts a theme STRING ("dark" | "dim" | "light"). For
+  // applyTheme accepts a theme STRING ("dark" | "dim" | "soft" | "light"). For
   // backward-compat with old callers that passed a boolean, we coerce:
   // true → "dark", false → "light". New code should pass the string.
   function applyTheme(theme) {
@@ -5394,7 +5396,11 @@
     $("#btn-close-faq")?.addEventListener("click", closeFaq);
     $("#faq-scrim")?.addEventListener("click", closeFaq);
     $("#btn-save-settings").addEventListener("click", collectAndSaveSettings);
-    $("#sw-dark").addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    $("#set-theme")?.addEventListener("change", e => {
+      const next = e.target.value;
+      applyTheme(next);
+      saveSettings({ theme: next });
+    });
     $("#sw-desktop-enabled")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     $("#btn-desktop-panic")?.addEventListener("click", async () => {
       try {

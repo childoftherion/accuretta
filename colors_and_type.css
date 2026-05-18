@@ -359,6 +359,74 @@
 }
 
 /* ============================================================
+   SOFT MODE — warm cream, low contrast, gentle on the eyes.
+   For long reading sessions where the stark light theme hurts.
+   Background is a warm paper tone (#FDF8F0) with soft brown-gray
+   text (#3D3530) — contrast ratio ~6.5:1 (WCAG AA compliant) but
+   feels much softer than the default light mode's near-black on
+   white. Ember accent stays because it reads warmly against cream.
+   ============================================================ */
+[data-theme="soft"],
+.soft {
+  /* Creamy, warm, genuinely easy on the eyes. Background is a rich
+     paper tone (#F2E6D5) — noticeably warmer and darker than light's
+     stark #F6F4EF. Text is a soft brown (#5A4A3A) at ~5.5:1 contrast:
+     fully readable but no longer "black on white". Everything feels
+     like reading on good book paper rather than staring at a screen. */
+  --bg:        #F2E6D5;  /* warm cream paper */
+  --bg-raised: #F8EDE0;
+  --bg-sunken: #E8D9C4;
+  --bg-inset:  #DDD0BC;
+
+  --fg:        #5A4A3A;  /* soft brown, not harsh black */
+  --fg-muted:  #8A7A6A;
+  --fg-subtle: #A89888;
+  --fg-faint:  #C4B8A8;
+  --fg-invert: var(--off-white);
+
+  --border:        #D8C8B0;
+  --border-strong: #C4B49C;
+  --border-subtle: #E8DCC8;
+
+  --accent:         var(--ember-2);
+  --accent-hover:   var(--ember-3);
+  --accent-subtle:  #F9E3CC;
+  --accent-fg:      #FFFFFF;
+
+  --success:  var(--mint-3);
+  --warning:  var(--lemon-3);
+  --danger:   var(--pink-3);
+  --info:     var(--lilac-3);
+
+  --success-subtle: var(--mint);
+  --warning-subtle: var(--lemon);
+  --danger-subtle:  var(--pink);
+  --info-subtle:    var(--lilac);
+
+  --shadow-xs: 0 1px 0 rgba(90,74,58,0.05);
+  --shadow-sm: 0 1px 2px rgba(90,74,58,0.06), 0 0 0 1px rgba(90,74,58,0.04);
+  --shadow-md: 0 4px 12px rgba(90,74,58,0.06), 0 0 0 1px rgba(90,74,58,0.04);
+  --shadow-lg: 0 12px 32px rgba(90,74,58,0.10), 0 0 0 1px rgba(90,74,58,0.04);
+  --shadow-pop: 0 20px 60px rgba(90,74,58,0.14), 0 0 0 1px rgba(90,74,58,0.05);
+
+  --shadow-inset: inset 0 1px 0 rgba(90,74,58,0.04), inset 0 0 0 1px rgba(90,74,58,0.04);
+
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.50),
+                       0 1px 1px rgba(90,74,58,0.08),
+                       0 2px 4px rgba(90,74,58,0.08),
+                       0 0 0 1px rgba(90,74,58,0.08);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.60),
+                       0 2px 5px rgba(90,74,58,0.10),
+                       0 5px 12px rgba(90,74,58,0.10),
+                       0 0 0 1px rgba(90,74,58,0.10);
+  --btn-shadow-active: inset 0 1px 3px rgba(90,74,58,0.15),
+                       0 0 0 1px rgba(90,74,58,0.08);
+
+  --btn-send-gradient: linear-gradient(135deg, #ff7eb6 0%, #ff5e9c 38%, #ff8d5a 100%);
+  --btn-send-glow:     0 6px 18px rgba(255, 110, 156, 0.24);
+}
+
+/* ============================================================
    BASE ELEMENTS
    ============================================================ */
 html, body {
