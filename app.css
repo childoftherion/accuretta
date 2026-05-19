@@ -274,11 +274,11 @@ button {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .brand .brand-mark-light {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .brand .brand-mark-dark {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-dark {
   display: inline-block;
 }
 
@@ -1285,6 +1285,13 @@ button {
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* nebula theme: matches the dark cosmic space and neon lavender user bubble. */
+[data-theme="nebula"] .avatar.user {
+  background: var(--bg-inset);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
 /* Agent avatar: the Accuretta split-A brand mark. The bubble row gets the
    raw glyph, no circular background — same convention as the old black-hole
    avatar. Two <img>s ship side-by-side and CSS hides whichever doesn't
@@ -1318,11 +1325,11 @@ button {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .avatar-mark-light {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .avatar-mark-dark {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-dark {
   display: block;
 }
 
@@ -1466,6 +1473,51 @@ button {
   color: var(--accent);
   background: rgba(0, 255, 196, 0.10);
   border-color: rgba(0, 255, 196, 0.20);
+}
+
+/* nebula theme user bubble matching the custom space violet and luminous purple-violet glow */
+[data-theme="nebula"] .bubble.user {
+  background: var(--bg-raised) !important;
+  color: var(--fg) !important;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent) !important;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 8%, transparent), var(--shadow-sm) !important;
+}
+
+[data-theme="nebula"] .bubble.user:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 15%, transparent), var(--shadow-md) !important;
+}
+
+[data-theme="nebula"] .bubble.user p,
+[data-theme="nebula"] .bubble.user strong,
+[data-theme="nebula"] .bubble.user em,
+[data-theme="nebula"] .bubble.user span {
+  color: var(--fg) !important;
+  -webkit-text-fill-color: var(--fg) !important;
+}
+
+[data-theme="nebula"] .bubble.user code,
+[data-theme="nebula"] .bubble.user pre {
+  background: rgba(167, 139, 250, 0.08) !important;
+  color: var(--accent) !important;
+}
+
+[data-theme="nebula"] .bubble.user .code-card-body {
+  color: var(--fg) !important;
+}
+
+[data-theme="nebula"] .bubble.user .code-card-body .code-line::before {
+  color: color-mix(in srgb, var(--fg) 40%, transparent);
+}
+
+[data-theme="nebula"] .bubble.user .cc-act {
+  color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+[data-theme="nebula"] .bubble.user .cc-act:hover {
+  color: var(--accent);
+  background: rgba(167, 139, 250, 0.10);
+  border-color: rgba(167, 139, 250, 0.20);
 }
 
 .bubble.user p,
@@ -1769,43 +1821,43 @@ button {
   color: var(--fg-muted);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-keyword {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-keyword {
   color: #C8A8FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-string {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-string {
   color: #B5E29B;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-number {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-number {
   color: #F4A261;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-comment {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-comment {
   color: var(--fg-faint);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-fn {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-fn {
   color: #7CC0FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-tag {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-tag {
   color: #C8A8FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-attr {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-attr {
   color: #F4B57A;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-var {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-var {
   color: #F4A261;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-decorator {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-decorator {
   color: #F4B57A;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .tok-punct {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-punct {
   color: var(--fg-muted);
 }
 
@@ -2916,9 +2968,9 @@ button {
     inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .chip.on,
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .toolbar-overflow-menu .chip.on,
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .preview-overflow-menu .chip.on {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .chip.on,
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .toolbar-overflow-menu .chip.on,
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .preview-overflow-menu .chip.on {
   color: var(--accent-hover);
 }
 
@@ -2943,7 +2995,7 @@ button {
 /* Beat the dark/dim .chip.on color override above — composer chips
    stay on the brighter --accent for the outline-tint look, not the
    even-darker --accent-hover. */
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .composer-tools>.chip.on {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .composer-tools>.chip.on {
   color: var(--accent);
 }
 
@@ -3120,7 +3172,7 @@ button {
   flex-shrink: 0;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .model-pill .model-pill-vision,
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .model-pill .model-pill-vision,
 .dark .model-pill .model-pill-vision {
   background: color-mix(in srgb, var(--mint-3) 22%, transparent);
   color: var(--mint);
@@ -4470,11 +4522,11 @@ button {
   50% { opacity: 0.45; }
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-pending {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending {
   color: #f0c44a;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-pending .pill-dot {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending .pill-dot {
   background: rgba(232, 178, 40, 0.18);
   color: #f0c44a;
 }
@@ -4489,11 +4541,11 @@ button {
   color: #2f7a3a;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-approved {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved {
   color: #95e0a8;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-approved .pill-dot {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved .pill-dot {
   background: rgba(106, 196, 154, 0.20);
   color: #95e0a8;
 }
@@ -4508,11 +4560,11 @@ button {
   color: #c44141;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-denied {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied {
   color: #ff9b9b;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .status-pill-soft.is-denied .pill-dot {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied .pill-dot {
   background: rgba(231, 108, 108, 0.18);
   color: #ff9b9b;
 }
@@ -7156,11 +7208,11 @@ body,
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .pycheck-banner.ok {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.ok {
   color: #95e0a8;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .pycheck-banner.err {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.err {
   color: #ff9b9b;
 }
 
@@ -7246,7 +7298,7 @@ body,
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]) .doc-preview-banner.err {
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .doc-preview-banner.err {
   color: #ff9b9b;
 }
 
@@ -7310,7 +7362,7 @@ body,
   height: 100%;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"]),
+:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]),
 .dark {
   .bubble.agent {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);

@@ -1720,7 +1720,7 @@
       { kind: "cmd", icon: "ph-gear-six", label: "Open Settings", action: () => { closePalette(); openSettings(); } },
       { kind: "cmd", icon: "ph-brain", label: "Open Long-term memory", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
       { kind: "cmd", icon: "ph-arrow-counter-clockwise", label: "Regenerate last reply", action: () => { closePalette(); regenerateLast(); } },
-      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / aurora / soft / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
+      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / aurora / nebula / soft / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
       { kind: "cmd", icon: "ph-browser", label: "Toggle preview pane", action: () => { closePalette(); app.classList.toggle("preview-collapsed"); } },
       { kind: "cmd", icon: "ph-camera", label: "Screenshot preview", action: () => { closePalette(); screenshotPreview(); } },
       { kind: "cmd", icon: "ph-package", label: "Export project", action: () => { closePalette(); exportProjectZip(); } },
@@ -5024,11 +5024,12 @@
   // first click from dark lands on the safer middle option instead of
   // jumping straight to bright white. nextTheme() handles the cycle and
   // accepts whatever string is in settings as the starting point.
-  const THEME_CYCLE = ["dark", "dim", "aurora", "soft", "light"];
+  const THEME_CYCLE = ["dark", "dim", "aurora", "nebula", "soft", "light"];
   const THEME_ICONS = {
     dark:   "ph ph-moon",
     dim:    "ph ph-moon-stars",
     aurora: "ph ph-sparkle",
+    nebula: "ph ph-planet",
     soft:   "ph ph-cloud",
     light:  "ph ph-sun",
   };

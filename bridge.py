@@ -10442,7 +10442,7 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
     # llama.cpp's own converter for MTP-capable arches. Reliable — no false
     # positives from filenames, no false negatives from non-canonical names.
     has_mtp = bool(profile.get("has_mtp", False))
-    if not has_mtp:
+    if not has_mtp and profile.get("metadata_source") != "gguf":
         # Fallback: filename / arch heuristic, for GGUFs that lost the metadata
         # during conversion or third-party repacks that didn't carry it through.
         name_blob = ((profile.get("name") or "") + " " + (profile.get("architecture") or "")).lower()
@@ -11036,11 +11036,35 @@ class LlamaProcess:
             spec_strategy = "ngram-mod" if bool(s.get("enable_speculative", True)) else "off"
             
         if spec_strategy == "draft-mtp" and model_path:
+            # Fall back to ngram-mod or off if the model has no MTP layers or is a known distilled model.
             model_lower = os.path.basename(model_path).lower()
             _EXCLUDE_MTP = ("distil", "distill", "distilled", "glm")
+            forced_fallback = False
             if any(e in model_lower for e in _EXCLUDE_MTP):
-                spec_strategy = "ngram-mod"
-                print(f"[llama] forcing spec_strategy='ngram-mod' fallback for distilled/GLM model: {os.path.basename(model_path)}")
+                forced_fallback = True
+            else:
+                try:
+                    gg = read_gguf_metadata(model_path)
+                    if gg.get("ok") and not gg.get("has_mtp"):
+                        forced_fallback = True
+                except Exception as e:
+                    print(f"[llama] failed to read GGUF metadata for MTP verification: {e}")
+            
+            if forced_fallback:
+                # Determine fallback: disable speculative decoding entirely for MoE,
+                # use ngram-mod speculative decoding for dense models.
+                is_moe = False
+                try:
+                    gg = read_gguf_metadata(model_path)
+                    if gg.get("ok"):
+                        is_moe = gg.get("expert_count", 0) > 1
+                    else:
+                        is_moe = any(x in model_lower for x in ("moe", "mixtral", "deepseek", "qwen-moe", "qwen_moe"))
+                except Exception:
+                    pass
+                
+                spec_strategy = "off" if is_moe else "ngram-mod"
+                print(f"[llama] forcing spec_strategy='{spec_strategy}' fallback for model lacking MTP layers: {os.path.basename(model_path)}")
                 
         no_warmup = bool(s.get("no_warmup", False))
         enable_metrics = bool(s.get("enable_metrics", False))
