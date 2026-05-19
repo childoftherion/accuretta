@@ -185,12 +185,16 @@
   --btn-send-glow:     0 6px 18px rgba(255, 110, 156, 0.32);
 
   /* ---- MOTION ---- */
-  --ease-out:    cubic-bezier(0.2, 0.8, 0.2, 1);
-  --ease-in-out: cubic-bezier(0.6, 0, 0.4, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --dur-fast:   120ms;
-  --dur-base:   200ms;
-  --dur-slow:   360ms;
+  --ease-out:     cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out:  cubic-bezier(0.6, 0, 0.4, 1);
+  --ease-spring:  cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-elastic: cubic-bezier(0.68, -0.6, 0.32, 1.6);
+  --ease-bounce:  cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  --ease-fluid:   cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast:     120ms;
+  --dur-base:     200ms;
+  --dur-slow:     360ms;
+  --dur-spring:   500ms;
 
   /* ---- Z LAYERS ---- */
   --z-base: 1;
@@ -354,6 +358,7 @@
    bg keep their flat color so we don't "double up" gradients. */
 [data-theme="dark"] body,
 [data-theme="dim"] body,
+[data-theme="aurora"] body,
 .dark body {
   background: var(--bg-gradient, var(--bg)) fixed;
 }
@@ -424,6 +429,61 @@
 
   --btn-send-gradient: linear-gradient(135deg, #ff7eb6 0%, #ff5e9c 38%, #ff8d5a 100%);
   --btn-send-glow:     0 6px 18px rgba(255, 110, 156, 0.24);
+}
+
+/* ============================================================
+   AURORA THEME — Deep boreal obsidian & vibrant northern lights cyan.
+   Vibrant, highly modern dark theme with luminous highlights.
+   ============================================================ */
+[data-theme="aurora"] {
+  --bg:        #0b1212;  /* polar night obsidian */
+  --bg-raised: #121e1e;  /* glass spruce card */
+  --bg-sunken: #070b0b;  /* deep frozen valley */
+  --bg-inset:  #1b2d2d;  /* interactive elements */
+
+  --bg-gradient: linear-gradient(180deg, #101c1c 0%, #0b1212 40%, #060808 100%);
+
+  --fg:        #e3f6f3;  /* frosted cyan */
+  --fg-muted:  #9abdb9;  /* aurora fog */
+  --fg-subtle: #6c918c;  /* pine needles */
+  --fg-faint:  #44605c;  /* boreal shade */
+  --fg-invert: #0b1212;
+
+  --border:        #182a2a;
+  --border-strong: #243e3e;
+  --border-subtle: #0f1c1c;
+
+  --accent:        #00ffc4;  /* luminous aurora */
+  --accent-hover:  #00e6b0;
+  --accent-subtle: rgba(0, 255, 196, 0.12);
+  --accent-fg:     #0b1212;
+
+  --success-subtle: rgba(106, 196, 154, 0.14);
+  --warning-subtle: rgba(232, 211, 112, 0.14);
+  --danger-subtle:  rgba(255, 106, 0, 0.14);
+  --info-subtle:    rgba(0, 255, 196, 0.14);
+
+  --shadow-xs: 0 1px 0 rgba(0,0,0,0.4);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.02);
+  --shadow-md: 0 4px 14px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03);
+  --shadow-lg: 0 14px 40px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-pop: 0 24px 70px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.05);
+
+  --shadow-inset: inset 0 1px 0 rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.02);
+
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.05),
+                       0 1px 1px rgba(0,0,0,0.40),
+                       0 2px 6px rgba(0,0,0,0.40),
+                       0 0 0 1px rgba(255,255,255,0.02);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.08),
+                       0 3px 8px rgba(0,0,0,0.50),
+                       0 8px 18px rgba(0,0,0,0.50),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  --btn-shadow-active: inset 0 1px 3px rgba(0,0,0,0.55),
+                       0 0 0 1px rgba(255,255,255,0.02);
+
+  --btn-send-gradient: linear-gradient(135deg, #00ffc4 0%, #00b4d8 50%, #7209b7 100%);
+  --btn-send-glow:     0 6px 22px rgba(0, 255, 196, 0.35);
 }
 
 /* ============================================================

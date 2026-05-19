@@ -1521,9 +1521,30 @@ def tool_write_file(args: dict) -> dict:
     if approval.get("decision") != "approve":
         return {"error": f"user denied write ({approval.get('status')})"}
     try:
+        old_text = ""
+        if os.path.isfile(path):
+            try:
+                old_text = Path(path).read_text(encoding="utf-8")
+            except Exception:
+                pass
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(content, encoding="utf-8")
-        return {"ok": True, "path": path, "bytes": len(content.encode("utf-8"))}
+        
+        import difflib
+        diff = list(difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            content.splitlines(keepends=True),
+            n=0
+        ))
+        added = 0
+        deleted = 0
+        for line in diff:
+            if line.startswith('+') and not line.startswith('+++'):
+                added += 1
+            elif line.startswith('-') and not line.startswith('---'):
+                deleted += 1
+                
+        return {"ok": True, "path": path, "bytes": len(content.encode("utf-8")), "added": added, "deleted": deleted}
     except Exception as e:
         return {"error": str(e)}
 
@@ -1611,12 +1632,28 @@ def tool_edit_file(args: dict) -> dict:
         return {"error": f"user denied edit ({approval.get('status')})"}
 
     try:
+        import difflib
+        diff = list(difflib.unified_diff(
+            text.splitlines(keepends=True),
+            modified.splitlines(keepends=True),
+            n=0
+        ))
+        added = 0
+        deleted = 0
+        for line in diff:
+            if line.startswith('+') and not line.startswith('+++'):
+                added += 1
+            elif line.startswith('-') and not line.startswith('---'):
+                deleted += 1
+
         Path(path).write_text(modified, encoding="utf-8")
         return {
             "ok": True,
             "path": path,
             "edits_applied": len(applied),
             "bytes": len(modified.encode("utf-8")),
+            "added": added,
+            "deleted": deleted,
         }
     except Exception as e:
         return {"error": str(e)}

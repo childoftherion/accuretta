@@ -30,6 +30,10 @@
     consoleOpen: false,
     consoleLogs: [],         // [{level, text, t}]
     tokTotal: 0,             // cumulative generated tokens for this session (client-side)
+    tokPromptTotal: 0,       // cumulative prompt tokens this session (for cost calc)
+    _streamOutEstimate: 0,   // live output token estimate during streaming (chars/4)
+    _streamPromptEstimate: 0,// live prompt token estimate during streaming
+    costProvider: "openai",  // selected provider for cost widget
     sessionDesktopDisabled: false,
     palette: { open: false, items: [], idx: 0 },
     _versionsExpanded: false,
@@ -45,6 +49,14 @@
   // simple toast system — bottom-right, auto-dismiss. keyed toasts replace each other.
   const _toasts = new Map();
   function toast(msg, kind = "info", ms = 3000, key = null) {
+    if (kind === "err" || kind === "error") {
+      triggerComposerStatus("error");
+    } else if (msg.includes("auto-tuned") || msg.includes("auto-tune")) {
+      triggerComposerStatus("autotuned");
+    } else if (msg.includes("loaded") || msg.includes("ready")) {
+      triggerComposerStatus("loaded");
+    }
+
     let host = document.getElementById("toast-host");
     if (!host) {
       host = document.createElement("div");
@@ -61,7 +73,7 @@
     }
     const el = document.createElement("div");
     el.className = `toast ${kind}`;
-    el.textContent = msg;
+    el.innerHTML = msg;
     host.appendChild(el);
     if (key) _toasts.set(key, el);
     setTimeout(() => {
@@ -69,6 +81,22 @@
       setTimeout(() => { try { el.remove(); } catch {} if (key && _toasts.get(key) === el) _toasts.delete(key); }, 250);
     }, ms);
     return el;
+  }
+
+  function triggerComposerStatus(status) {
+    const comp = document.querySelector(".composer");
+    if (!comp) return;
+    comp.classList.remove("status-loaded", "status-autotuned", "status-error");
+    if (status === "loaded") {
+      comp.classList.add("status-loaded");
+      setTimeout(() => comp.classList.remove("status-loaded"), 2200);
+    } else if (status === "autotuned") {
+      comp.classList.add("status-autotuned");
+      setTimeout(() => comp.classList.remove("status-autotuned"), 2200);
+    } else if (status === "error") {
+      comp.classList.add("status-error");
+      setTimeout(() => comp.classList.remove("status-error"), 5000);
+    }
   }
 
   const esc = (s) => String(s || "").replace(/[&<>"']/g, c => ({
@@ -1126,7 +1154,7 @@
       // Card layout: floating action cluster (top-right), gutter+body row.
       // Buttons live inline so the card has no separate header bar — that
       // was the source of the nested-card feel.
-      return `<pre class="code-card" data-lang="${esc(displayLang)}"><div class="code-card-actions"><button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i><span>Copy</span></button>${previewBtn}</div><code class="code-card-body">${lined}</code></pre>`;
+      return `<pre class="code-card" data-lang="${esc(displayLang)}"><div class="code-card-actions"><button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i></button>${previewBtn}</div><code class="code-card-body">${lined}</code></pre>`;
     });
 
     // restore short-term memory blocks as a small icon + italic body
@@ -1403,6 +1431,7 @@
 
     wireEvents();
     subscribeSSE();
+    initCostWidget();
 
     // Background self-correct: re-tune for the currently loaded model on every
     // boot so saved settings from old/buggy autotune runs heal themselves.
@@ -1564,10 +1593,13 @@
       state.mode = "agent";
       $$('[data-mode]').forEach(x => x.classList.toggle("on", x.dataset.mode === state.mode));
     }
-    // reset cumulative token counter when switching chats — it tracks the live
-    // session, not historical usage
     state.tokTotal = 0;
+    state.tokPromptTotal = 0;
+    state._streamOutEstimate = 0;
+    state._streamPromptEstimate = 0;
     renderTokTotal();
+    // NOTE: cost widget is NOT reset here — it tracks all-time savings,
+    // not per-chat. The all-time counters persist in localStorage.
     refreshSessionDesktopState();
     renderMessages();
     state._versionsExpanded = false;
@@ -1616,7 +1648,7 @@
       ? "Desktop automation OFF for this chat — click to re-enable"
       : "Desktop automation ON for this chat — click to disable";
     btn.innerHTML = state.sessionDesktopDisabled
-      ? '<i class="ph ph-monitor-x"></i>'
+      ? '<i class="ph ph-desktop"></i>'
       : '<i class="ph ph-desktop"></i>';
   }
 
@@ -1688,7 +1720,7 @@
       { kind: "cmd", icon: "ph-gear-six", label: "Open Settings", action: () => { closePalette(); openSettings(); } },
       { kind: "cmd", icon: "ph-brain", label: "Open Long-term memory", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
       { kind: "cmd", icon: "ph-arrow-counter-clockwise", label: "Regenerate last reply", action: () => { closePalette(); regenerateLast(); } },
-      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
+      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / aurora / soft / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
       { kind: "cmd", icon: "ph-browser", label: "Toggle preview pane", action: () => { closePalette(); app.classList.toggle("preview-collapsed"); } },
       { kind: "cmd", icon: "ph-camera", label: "Screenshot preview", action: () => { closePalette(); screenshotPreview(); } },
       { kind: "cmd", icon: "ph-package", label: "Export project", action: () => { closePalette(); exportProjectZip(); } },
@@ -2185,6 +2217,8 @@
     $("#btn-send").classList.toggle("hidden", on);
     $("#btn-stop").classList.toggle("hidden", !on);
     $("#composer-input").disabled = false; // always allow typing next message
+    const comp = document.querySelector(".composer");
+    if (comp) comp.classList.toggle("status-thinking", on);
   }
 
   function stopStreaming() {
@@ -2442,9 +2476,14 @@
     if (evt.type === "delta") {
       const newBuf = ctx.getBuf() + evt.content;
       ctx.setBuf(newBuf);
-      // Throttled gauge update during streaming
+      // Throttled gauge + cost update during streaming
       if (!state._lastGaugeUpdate || Date.now() - state._lastGaugeUpdate > 500) {
         renderCtxGauge();
+        // Live cost estimate: count streaming output tokens incrementally (chars/4).
+        // Uses delta content length, not buf length, because buf resets between
+        // agent rounds but the estimate should accumulate across the full turn.
+        state._streamOutEstimate += Math.round(evt.content.length / 4);
+        renderCostWidget();
         state._lastGaugeUpdate = Date.now();
       }
       // Live tok/s in the bubble meta — stash the start time on the agentRow
@@ -2498,7 +2537,7 @@
             const lang = (openFenceMatch[1] || "code").toLowerCase();
             const lines = (openFenceMatch[2].match(/\n/g) || []).length + 1;
             const kb = (fenceBodyLen / 1024).toFixed(1);
-            bubble.innerHTML = `<div style="opacity:0.7;font-size:13px;padding:8px 4px;"><i class="ph ph-code"></i> writing ${esc(lang)} — ${lines} lines, ${kb} KB so far…</div>`;
+            bubble.innerHTML = `<div class="code-progress"><i class="ph ph-code code-progress-icon"></i><span class="code-progress-text">writing <strong>${esc(lang)}</strong> — ${lines} lines, ${kb} KB so far…</span></div>`;
             bubble._lastProgressAt = now;
           }
         } else {
@@ -2536,6 +2575,16 @@
       // the live activity line is always visible at the top.
       updateToolGroupActivity(group, evt);
       updateToolGroupHead(toolStack);
+      // Update the think line to show what the agent is actually doing
+      if (row) {
+        const label = toolLabel(evt.name, evt.arguments);
+        updateThinkLine(row, true, label);
+      }
+      // Estimate tokens for the tool call itself — the model generated
+      // the tool name + JSON arguments, which aren't in content deltas.
+      const argsLen = evt.arguments ? JSON.stringify(evt.arguments).length : 0;
+      state._streamOutEstimate += Math.round((evt.name.length + argsLen) / 4);
+      renderCostWidget();
       scrollToBottom();
     } else if (evt.type === "tool_stream") {
       const cards = Array.from(toolStack.querySelectorAll(".tool-line.running"));
@@ -2564,6 +2613,34 @@
         const iconHtml = customIcon || `<i class="ph ${isErr ? "ph-x-circle" : "ph-check"}"></i>`;
         const label = toolResultLabel(evt.name, evt.result);
         card.innerHTML = `${iconHtml}<span>${esc(label)}</span>`;
+        if (!isErr && (evt.name === "edit_file" || evt.name === "write_file")) {
+          const added = (evt.result && evt.result.added) || 0;
+          const deleted = (evt.result && evt.result.deleted) || 0;
+          if (added > 0 || deleted > 0) {
+            const filename = folderLeafName(evt.result.path || "");
+            const msg = `<span style="color:#00ff88;font-weight:600;">+${added}</span>, <span style="color:#ff3b30;font-weight:600;">-${deleted}</span> <span style="opacity:0.4;margin:0 4px;">|</span> <span style="font-weight:500;">${esc(filename)}</span>`;
+            toast(msg, "ok", 4000);
+          }
+          // On mobile: inject a preview card for .html files written by the agent
+          const filePath = (evt.result && evt.result.path) || "";
+          if (isMobile() && /\.html?$/i.test(filePath)) {
+            const wsRoot = (state.workspace && state.workspace.folders && state.workspace.folders[0]) || "";
+            if (wsRoot) {
+              const rel = filePath.replace(/\\/g, "/").replace(wsRoot.replace(/\\/g, "/"), "").replace(/^\//, "");
+              injectMobilePreviewCard({
+                filename: folderLeafName(filePath),
+                size: evt.result.bytes || 0,
+                url: wsFileUrl(wsRoot, rel),
+              });
+            } else {
+              // No workspace root — try blob URL with the content if available
+              injectMobilePreviewCard({
+                filename: folderLeafName(filePath),
+                size: evt.result.bytes || 0,
+              });
+            }
+          }
+        }
         // web_search: refresh the head's chip strip so sources show inline
         // without stacking. Each new search REPLACES the chip set with a quick
         // fade — that's the "rotating sources" behavior the user asked for.
@@ -2635,7 +2712,25 @@
       }
       if (Number.isFinite(tok)) {
         state.tokTotal += tok;
+        // Clear streaming estimate — real values have arrived
+        state._streamOutEstimate = 0;
+        state._streamPromptEstimate = 0;
         renderTokTotal();
+      }
+      // accumulate prompt tokens for cost widget
+      const promptTok = evt.prompt_eval_count;
+      if (Number.isFinite(promptTok) && promptTok > 0) {
+        state.tokPromptTotal += promptTok;
+      }
+      // Persist to all-time counters
+      _accumulateAllTime(tok || 0, promptTok || 0);
+      renderCostWidget();
+      // In agent mode the model may do multiple rounds (tool calls + re-inference).
+      // Each round emits stats. Reset the stream start so the next round's
+      // live tok/s display starts fresh, not from the first round's timestamp.
+      if (ctx.row) {
+        ctx.row._streamStart = null;
+        ctx.row._lastTpsUpdate = null;
       }
       // stash for the final message object
       state._lastMsgTokens = tok;
@@ -2652,6 +2747,21 @@
         tokens: state._lastMsgTokens || 0,
         prompt_tokens: state._lastMsgPromptTokens || 0,
       };
+      // Fallback: if stats event never fired (some llama-server versions
+      // don't emit timings/usage), use the streaming char estimate so the
+      // cost widget isn't stuck at $0.00 after generation.
+      if (!state._lastMsgTokens && full.length > 0) {
+        const fallbackTok = Math.max(1, Math.round(full.length / 4));
+        state.tokTotal += fallbackTok;
+        msg.tokens = fallbackTok;
+        // Clear streaming estimate since we've committed the fallback
+        state._streamOutEstimate = 0;
+        state._streamPromptEstimate = 0;
+        // Persist fallback to all-time counters
+        _accumulateAllTime(fallbackTok, 0);
+        renderTokTotal();
+        renderCostWidget();
+      }
       state.messages.push(msg);
       state._lastMsgTokens = 0;
       state._lastMsgPromptTokens = 0;
@@ -2784,9 +2894,17 @@
     $("#preview-size").textContent = humanBytes((html || "").length);
     renderPreview();
     renderVersions();
-    // auto-open preview pane if collapsed
+    // auto-open preview pane if collapsed (desktop only)
     if (app.classList.contains("preview-collapsed") && !isMobile()) {
       app.classList.remove("preview-collapsed");
+    }
+    // On mobile: inject a tappable artifact card in the chat
+    if (isMobile() && html) {
+      injectMobilePreviewCard({
+        filename: v ? `v${String(v.n).padStart(2, "0")} preview` : "preview",
+        size: html.length,
+        html,
+      });
     }
   }
 
@@ -3000,6 +3118,10 @@
   // page can only ever load assets that live inside the same workspace root.
   function previewWorkspaceHtml(root, rel, displayName) {
     if (!root || !rel) return;
+    if (isMobile()) {
+      window.open(wsFileUrl(root, rel), "_blank");
+      return;
+    }
     // make sure preview pane is open
     const app = document.getElementById("app");
     if (app && app.classList.contains("preview-collapsed")) {
@@ -4077,32 +4199,29 @@
         expired:  '<i class="ph-fill ph-hourglass"></i>',
       };
       card.innerHTML = `
-        <div class="appr-head">
+        <div class="appr-accent-bar"></div>
+        <div class="appr-head" data-appr-child>
           <span class="appr-head-icon">${headerIcon}</span>
           <span class="appr-head-title">${esc(a.title || "Action")}</span>
+          <span class="appr-head-tag">${esc(String(kind).toUpperCase())}</span>
           <span class="status-pill-soft is-pending" data-status-pill>
             <span class="pill-dot">${pillSvg.pending}</span>
             <span class="pill-label">Pending</span>
           </span>
-          <span class="appr-head-tag">${esc(String(kind).toUpperCase())}</span>
         </div>
-        <div class="appr-sub">${esc(sub)}</div>
-        ${detailsHtml ? `<div class="appr-section-label">Details</div>${detailsHtml}` : ""}
-        <div class="appr-section-label">Command preview</div>
-        <pre class="appr-cmd"><code>${cmdPreview}</code></pre>
-        <div class="appr-info">
+        <div class="appr-sub" data-appr-child>${esc(sub)}</div>
+        <pre class="appr-cmd" data-appr-child><code>${cmdPreview}</code></pre>
+        ${detailsHtml ? `<div data-appr-child>${detailsHtml}</div>` : ""}
+        <div class="appr-info-line" data-appr-child>
           <span class="appr-info-icon">${APPR_SVG.info}</span>
-          <div class="appr-info-body">
-            <div class="appr-info-title">What does this mean?</div>
-            <div class="appr-info-desc">${esc(info)}</div>
-          </div>
+          <span>${esc(info)}</span>
         </div>
-        <div class="appr-actions">
+        <div class="appr-actions" data-appr-child>
           <button class="appr-btn appr-btn-deny" data-act="deny">${APPR_SVG.x}<span>Deny</span></button>
           <button class="appr-btn appr-btn-approve" data-act="approve">${APPR_SVG.check}<span>Approve</span></button>
         </div>
-        <details class="appr-advanced">
-          <summary><span class="appr-advanced-chevron">${APPR_SVG.chevron}</span><span>Advanced details</span></summary>
+        <details class="appr-advanced" data-appr-child>
+          <summary><span class="appr-advanced-chevron">${APPR_SVG.chevron}</span><span>Advanced</span></summary>
           <pre class="appr-advanced-body">${esc(a.command || "(no raw command)")}</pre>
         </details>`;
       // Morph the status pill in place before the card slides out so the
@@ -4902,12 +5021,13 @@
   // first click from dark lands on the safer middle option instead of
   // jumping straight to bright white. nextTheme() handles the cycle and
   // accepts whatever string is in settings as the starting point.
-  const THEME_CYCLE = ["dark", "dim", "soft", "light"];
+  const THEME_CYCLE = ["dark", "dim", "aurora", "soft", "light"];
   const THEME_ICONS = {
-    dark:  "ph ph-moon",
-    dim:   "ph ph-moon-stars",
-    soft:  "ph ph-cloud",
-    light: "ph ph-sun",
+    dark:   "ph ph-moon",
+    dim:    "ph ph-moon-stars",
+    aurora: "ph ph-sparkle",
+    soft:   "ph ph-cloud",
+    light:  "ph ph-sun",
   };
   function nextTheme(cur) {
     const idx = THEME_CYCLE.indexOf(cur);
@@ -4977,6 +5097,114 @@
     if (!el) return;
     el.textContent = `${state.tokTotal.toLocaleString()} tok`;
   }
+
+  // ---------- cost savings widget ----------
+  // Pricing: $ per 1M tokens — top-tier model from each provider.
+  // Uses highest published rate so the "saved" number is conservative.
+  // Updated May 2026. Keys are brand names, not model names.
+  const CLOUD_PRICING = {
+    "openai":    { label: "OpenAI",    input: 30.00, output: 180.00 },  // GPT-5.5 Pro
+    "anthropic": { label: "Anthropic", input:  5.00, output:  25.00 },  // Claude Opus
+    "google":    { label: "Google",    input:  4.00, output:  18.00 },  // Gemini 3.1 Pro (>200K ctx)
+    "xai":       { label: "xAI",       input:  2.00, output:   6.00 },  // Grok 4.20
+    "deepseek":  { label: "DeepSeek",  input:  1.74, output:   3.48 },  // V4 Pro (standard)
+    "mistral":   { label: "Mistral",   input:  2.00, output:   5.00 },  // Magistral Medium
+  };
+
+  function calcCost(provider) {
+    const p = CLOUD_PRICING[provider];
+    if (!p) return 0;
+    // Use all-time persistent totals + any live streaming estimate
+    const promptTok = state._allTimeTokIn + (state._streamPromptEstimate || 0);
+    const outTok = state._allTimeTokOut + (state._streamOutEstimate || 0);
+    const inCost  = (promptTok / 1_000_000) * p.input;
+    const outCost = (outTok / 1_000_000) * p.output;
+    return inCost + outCost;
+  }
+
+  // Persist all-time token totals to localStorage
+  function _persistAllTimeTok() {
+    try {
+      localStorage.setItem("accuretta:all-tok-out", String(state._allTimeTokOut));
+      localStorage.setItem("accuretta:all-tok-in", String(state._allTimeTokIn));
+    } catch {}
+  }
+
+  function renderCostWidget() {
+    const el = $("#cost-amount");
+    if (!el) return;
+    const cost = calcCost(state.costProvider);
+    el.textContent = cost < 0.005 ? "$0.00" : "$" + cost.toFixed(2);
+    el.classList.toggle("zero", cost < 0.005);
+    // Update the "saved vs" label with provider name
+    const label = $("#cost-widget .cost-widget-label");
+    if (label) {
+      const p = CLOUD_PRICING[state.costProvider];
+      label.textContent = `saved vs ${p ? p.label : state.costProvider}`;
+    }
+  }
+
+  function initCostWidget() {
+    // Restore persisted provider selection
+    const saved = localStorage.getItem("accuretta:cost-provider");
+    if (saved && CLOUD_PRICING[saved]) state.costProvider = saved;
+    // Restore all-time persistent token totals
+    state._allTimeTokOut = parseInt(localStorage.getItem("accuretta:all-tok-out") || "0", 10) || 0;
+    state._allTimeTokIn  = parseInt(localStorage.getItem("accuretta:all-tok-in")  || "0", 10) || 0;
+    // Wire up dropdown
+    const sel = $("#cost-select");
+    if (sel) {
+      sel.value = state.costProvider;
+      sel.addEventListener("change", () => {
+        state.costProvider = sel.value;
+        localStorage.setItem("accuretta:cost-provider", state.costProvider);
+        renderCostWidget();
+      });
+    }
+    renderCostWidget();
+  }
+
+  // Call after each confirmed token accumulation to update all-time counters
+  function _accumulateAllTime(outTok, inTok) {
+    if (outTok > 0) state._allTimeTokOut += outTok;
+    if (inTok > 0)  state._allTimeTokIn += inTok;
+    _persistAllTimeTok();
+  }
+
+  // ---------- mobile preview card ----------
+  // On mobile, the preview pane is hidden. Instead we inject a tappable
+  // artifact card into the chat that opens the generated HTML in a new tab.
+  // Accepts either raw HTML string (blob URL) or a wsfs URL for workspace files.
+  function injectMobilePreviewCard(opts) {
+    if (!isMobile()) return;
+    const { filename, size, url, html } = opts || {};
+    const name = filename || "index.html";
+    const sizeText = size ? humanBytes(size) : "";
+    const card = document.createElement("div");
+    card.className = "mobile-preview-card";
+    card.innerHTML = `
+      <div class="mobile-preview-card-icon"><i class="ph ph-browser"></i></div>
+      <div class="mobile-preview-card-body">
+        <div class="mobile-preview-card-title">${esc(name)}</div>
+        <div class="mobile-preview-card-meta">Tap to preview${sizeText ? " · " + sizeText : ""}</div>
+      </div>
+      <div class="mobile-preview-card-arrow"><i class="ph ph-arrow-square-out"></i></div>`;
+    card.addEventListener("click", () => {
+      if (url) {
+        window.open(url, "_blank");
+      } else if (html) {
+        const blob = new Blob([html], { type: "text/html" });
+        window.open(URL.createObjectURL(blob), "_blank");
+      }
+    });
+    // Insert into the chat flow at the end of the current messages
+    const chatInner = $("#chat-inner");
+    if (chatInner) {
+      chatInner.appendChild(card);
+      scrollToBottom(true);
+    }
+  }
+
   // Shorten a GGUF filename like "qwen2.5-coder-32b-instruct-q4_k_m.gguf"
   // into a clean, capitalized display label like "Qwen2.5 Coder 32B".
   // Tries to keep the family name, the optional 'coder/instruct/chat' tag,
@@ -5650,8 +5878,23 @@
       renderPreview();
     });
     $("#btn-open-new").addEventListener("click", () => {
-      if (!state.activeVersion) return;
-      window.open(`/api/versions/${state.chatId}/${state.activeVersion}`, "_blank");
+      // 1. Saved version — serve from the versions API
+      if (state.activeVersion) {
+        window.open(`/api/versions/${state.chatId}/${state.activeVersion}`, "_blank");
+        return;
+      }
+      // 2. Workspace file preview (agent mode write_file) — open via wsfs URL
+      const wp = state.workspacePreview;
+      if (wp && wp.root && wp.rel) {
+        window.open(wsFileUrl(wp.root, wp.rel), "_blank");
+        return;
+      }
+      // 3. Live model-generated HTML not yet saved as a version
+      if (state.currentHtml) {
+        const blob = new Blob([state.currentHtml], { type: "text/html" });
+        window.open(URL.createObjectURL(blob), "_blank");
+        return;
+      }
     });
     $("#btn-close-preview").addEventListener("click", () => app.classList.add("preview-collapsed"));
 
