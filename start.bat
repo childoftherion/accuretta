@@ -54,7 +54,7 @@ REM   set values: chrome | firefox | edge | brave | opera | vivaldi | none
 REM
 REM set ACCURETTA_BROWSER=chrome
 REM set ACCURETTA_BROWSER=firefox
-REM set ACCURETTA_BROWSER=edge
+set ACCURETTA_BROWSER=edge
 REM set ACCURETTA_BROWSER=brave
 REM set ACCURETTA_BROWSER=none
 REM

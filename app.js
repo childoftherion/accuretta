@@ -2367,10 +2367,11 @@
   // only shows the final answer. Accumulate thinking text into the think line.
   function splitThinking(buf) {
     // tags observed: <think>, <thinking>, <reasoning>, and <|thinking|>…<|/thinking|>.
+    // bracketed reasoning tags: [thought], [thinking], [reasoning], [scratchpad]…
     // many local models (Qwen/DeepSeek/Nemotron) emit bare </think> with no opening tag,
     // sometimes multiple times between tool rounds. rule: everything up to the LAST closing
     // reasoning tag is thinking; everything after is the visible answer.
-    const closeRe = /<\/(?:think|thinking|reasoning)>|<\|\/thinking\|>/gi;
+    const closeRe = /<\/(?:think|thinking|reasoning)>|<\|\/thinking\|>|\[\/(?:thought|thinking|reasoning|scratchpad)\]/gi;
     let lastClose = -1;
     let m;
     while ((m = closeRe.exec(buf)) !== null) lastClose = m.index + m[0].length;
@@ -2382,7 +2383,7 @@
       content = buf.slice(lastClose);
     } else {
       // no closing tag yet — if an opening tag is present, everything from it is in-flight thinking
-      const openIdx = buf.search(/<(?:think|thinking|reasoning)>|<\|thinking\|>/i);
+      const openIdx = buf.search(/<(?:think|thinking|reasoning)>|<\|thinking\|>|\[(?:thought|thinking|reasoning|scratchpad)\]/i);
       if (openIdx >= 0) {
         content = buf.slice(0, openIdx);
         thinking = buf.slice(openIdx);
@@ -2390,7 +2391,7 @@
         content = buf;
       }
     }
-    const stripTags = /<\/?(?:think|thinking|reasoning)>|<\|\/?thinking\|>/gi;
+    const stripTags = /<\/?(?:think|thinking|reasoning)>|<\|\/?thinking\|>|\[\/?(?:thought|thinking|reasoning|scratchpad)\]/gi;
     thinking = thinking.replace(stripTags, "").trim();
     content = content.replace(stripTags, "");
     // strip model-specific content delimiters that leak into output:
@@ -2441,7 +2442,9 @@
     // names so we don't accidentally eat legitimate trailing `<` characters
     // in prose like "use the < operator".
     content = content.replace(/\s*<\/?(?:tool_call|tool|call|think|thinking|reasoning|function|im_start|im_end)\w*\s*$/i, "");
+    content = content.replace(/\s*\[\/?(?:thought|thinking|reasoning|scratchpad)\w*\s*$/i, "");
     content = content.replace(/\s*<\/\s*$/, "");  // bare "</" with nothing after
+    content = content.replace(/\s*\[\/?\s*$/, ""); // bare "[" or "[/" with nothing after
     return { thinking: thinking.trim(), content };
   }
   function updateThinkLine(row, running, label) {

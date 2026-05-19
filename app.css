@@ -3628,6 +3628,97 @@ button {
   pointer-events: auto;
 }
 
+/* ============================================================
+   Setup wizard overlay
+   ============================================================ */
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 18, 0.7);
+  backdrop-filter: blur(8px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.setup-card {
+  width: min(480px, 92vw);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  padding: 28px 32px 24px;
+  color: var(--fg);
+}
+
+.setup-header h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.setup-sub {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.setup-step label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.setup-step select,
+.setup-step input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.setup-step select:focus,
+.setup-step input:focus {
+  border-color: var(--accent);
+}
+
+.setup-step .hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.setup-footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.setup-footer .btn {
+  min-width: 120px;
+}
+
 .drawer {
   position: fixed;
   top: 0;
@@ -7400,4 +7491,173 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ============================================================
+   Smart Setup Wizard UI Extensions
+   ============================================================ */
+.setup-scanner-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+  transition: all var(--dur-base) var(--ease-out);
+}
+
+.setup-scanner-card.success {
+  border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+  background: color-mix(in srgb, var(--success) 6%, var(--bg-raised));
+}
+
+.setup-scanner-card.downloading {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-raised));
+}
+
+.setup-scanner-card .header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.setup-scanner-card .header i.pulse-icon {
+  font-size: 20px;
+  color: var(--accent);
+  animation: setupPulse 1.8s infinite ease-in-out;
+}
+
+.setup-scanner-card .header i.success-icon {
+  font-size: 22px;
+  color: var(--success);
+  animation: checkmarkBounce 0.5s var(--ease-elastic) forwards;
+}
+
+.setup-scanner-card .title {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.setup-scanner-card .desc {
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.4;
+}
+
+.setup-download-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.setup-download-bar {
+  width: 100%;
+  height: 8px;
+  background: var(--bg-inset);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid var(--border);
+}
+
+.setup-download-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 100%);
+  border-radius: 999px;
+  transition: width 0.3s ease;
+  position: relative;
+}
+
+.setup-download-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: setupShimmer 1.5s infinite linear;
+}
+
+.setup-download-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.btn-installer-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  width: 100%;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  border: 1px solid var(--accent);
+  color: var(--accent-hover);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-out);
+}
+
+.btn-installer-download:hover {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(142, 114, 209, 0.2);
+}
+
+.setup-wizard-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.setup-wizard-badge.success {
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+@keyframes setupPulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.05); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+@keyframes setupShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes checkmarkBounce {
+  0% { transform: scale(0.3); opacity: 0; }
+  50% { transform: scale(1.1); }
+  70% { transform: scale(0.9); }
+  100% { transform: scale(1); opacity: 1; }
 }

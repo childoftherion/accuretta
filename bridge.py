@@ -174,6 +174,67 @@ SYSTEM_CONTEXT_FILE = DATA / "ACCURETTA.md"
 MEMORIES_FILE = DATA / "memories.jsonl"
 MEMORIES_MAX_INJECT = 15          # how many to load into every system prompt
 MEMORIES_TEXT_CAP = 220           # per-entry char cap — token-efficient
+
+
+def safe_exists(path: str | Path | None) -> bool:
+    """Check if a path exists without raising OSError on malformed Windows inputs."""
+    if not path:
+        return False
+    try:
+        return Path(path).exists()
+    except Exception:
+        return False
+
+
+def safe_is_dir(path: str | Path | None) -> bool:
+    """Check if a path is a directory without raising OSError on malformed Windows inputs."""
+    if not path:
+        return False
+    try:
+        return Path(path).is_dir()
+    except Exception:
+        return False
+
+
+def safe_rglob_files(root_dir: str | Path, pattern: str, max_depth: int = 3) -> list[Path]:
+    """Safely recursively list files matching pattern under root_dir with strict depth limits and ignore-lists."""
+    if not root_dir:
+        return []
+    try:
+        root_path = Path(root_dir)
+        if not safe_exists(root_path) or not safe_is_dir(root_path):
+            return []
+    except Exception:
+        return []
+
+    ignored_dirs = {
+        ".git", "node_modules", "venv", ".venv", "__pycache__", 
+        "appdata/local/temp", "temp", "tmp", "$recycle.bin", 
+        "system volume information", "build", "dist"
+    }
+    
+    results: list[Path] = []
+    
+    def _scan(dir_path: Path, current_depth: int):
+        if current_depth > max_depth:
+            return
+        try:
+            for child in dir_path.iterdir():
+                try:
+                    if child.is_dir():
+                        if child.name.lower() not in ignored_dirs:
+                            _scan(child, current_depth + 1)
+                    elif child.is_file():
+                        if fnmatch.fnmatch(child.name.lower(), pattern.lower()):
+                            results.append(child)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+            
+    _scan(root_path, 1)
+    return results
+
 # PowerShell command history — append-only JSON Lines, one row per command
 # that hits _run_powershell. Surfaced via /api/cmd-history and the History
 # drawer in the UI. Kept rolling: anything past CMD_HISTORY_MAX gets trimmed
@@ -8479,6 +8540,170 @@ def read_version(chat_id: str, vid: str) -> str | None:
     return p.read_text(encoding="utf-8")
 
 
+# ---- Llama-Server 1-Click Bootstrapper -------------------------------------
+import zipfile
+
+# Thread-safe global state for the installer downloader
+DOWNLOAD_LOCK = threading.Lock()
+DOWNLOAD_STATE = {
+    "status": "idle",       # idle, downloading, extracting, done, failed
+    "bytes_written": 0,
+    "bytes_total": 0,
+    "speed": "0 KB/s",
+    "error_msg": ""
+}
+
+def detect_hardware_specs() -> dict:
+    """Detect GPU hardware availability on Windows to suggest the best build."""
+    gpu_name = "Generic CPU"
+    recommended_build = "CPU" # CPU, Vulkan, CUDA
+    is_nvidia = False
+
+    try:
+        # Check via nvidia-smi command first
+        res = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], 
+                             capture_output=True, text=True, timeout=2)
+        if res.returncode == 0 and res.stdout.strip():
+            gpu_name = res.stdout.strip().split("\n")[0]
+            recommended_build = "CUDA"
+            is_nvidia = True
+    except Exception:
+        pass
+
+    if not is_nvidia:
+        try:
+            # Query via WMI on Windows
+            res = subprocess.run(["wmic", "path", "win32_VideoController", "get", "name"], 
+                                 capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout.strip():
+                lines = [l.strip() for l in res.stdout.strip().split("\n")[1:] if l.strip()]
+                if lines:
+                    gpu_name = lines[0]
+                    # AMD, Nvidia or Intel GPUs get Vulkan
+                    lower_name = gpu_name.lower()
+                    if "nvidia" in lower_name:
+                        recommended_build = "CUDA"
+                    elif any(kw in lower_name for kw in ["amd", "radeon", "intel", "arc"]):
+                        recommended_build = "Vulkan"
+        except Exception:
+            pass
+
+    return {
+        "gpu_name": gpu_name,
+        "recommended_build": recommended_build
+    }
+
+
+def download_and_extract_llama(build_type: str):
+    """Downloads and extracts the correct llama-server package inside a background thread."""
+    global DOWNLOAD_STATE
+    
+    # Map to release b4600 assets (which contains mtmd.dll, llama-server.exe, and full speculation decoding)
+    urls = {
+        "CUDA": "https://github.com/ggerganov/llama.cpp/releases/download/b4600/llama-b4600-bin-win-cublas-cu12.2.0-x64.zip",
+        "Vulkan": "https://github.com/ggerganov/llama.cpp/releases/download/b4600/llama-b4600-bin-win-vulkan-x64.zip",
+        "CPU": "https://github.com/ggerganov/llama.cpp/releases/download/b4600/llama-b4600-bin-win-llvm-x64.zip"
+    }
+    
+    url = urls.get(build_type, urls["CPU"])
+    dest_dir = ROOT / "bin" / "llama"
+    temp_zip = ROOT / "bin" / "temp_llama.zip"
+
+    try:
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATE.update({
+                "status": "downloading",
+                "bytes_written": 0,
+                "bytes_total": 0,
+                "speed": "0 KB/s",
+                "error_msg": ""
+            })
+
+        # Ensure directory structure
+        os.makedirs(dest_dir, exist_ok=True)
+        os.makedirs(ROOT / "bin", exist_ok=True)
+
+        req = urllib.request.Request(
+            url, 
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AccurettaBootstrapper/1.0"}
+        )
+
+        with urllib.request.urlopen(req) as response:
+            total_size = int(response.info().get("Content-Length", 0))
+            with DOWNLOAD_LOCK:
+                DOWNLOAD_STATE["bytes_total"] = total_size
+
+            chunk_size = 128 * 1024
+            bytes_written = 0
+            start_time = time.time()
+            last_calc_time = start_time
+            last_bytes_written = 0
+
+            with open(temp_zip, "wb") as f:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+                    
+                    now = time.time()
+                    # Calculate live speed every 0.5s
+                    if now - last_calc_time >= 0.5:
+                        duration = now - last_calc_time
+                        bytes_diff = bytes_written - last_bytes_written
+                        speed_val = bytes_diff / duration
+                        
+                        if speed_val > 1024 * 1024:
+                            speed_str = f"{speed_val / (1024 * 1024):.1f} MB/s"
+                        else:
+                            speed_str = f"{speed_val / 1024:.1f} KB/s"
+                            
+                        last_calc_time = now
+                        last_bytes_written = bytes_written
+                        
+                        with DOWNLOAD_LOCK:
+                            DOWNLOAD_STATE.update({
+                                "bytes_written": bytes_written,
+                                "speed": speed_str
+                            })
+                            
+            # Ensure full count represents at download finish
+            with DOWNLOAD_LOCK:
+                DOWNLOAD_STATE["bytes_written"] = total_size
+
+        # Unzipping phase
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATE["status"] = "extracting"
+
+        with zipfile.ZipFile(temp_zip, "r") as z:
+            z.extractall(dest_dir)
+
+        # Cleanup downloaded zip file
+        try:
+            os.remove(temp_zip)
+        except Exception:
+            pass
+
+        # Update settings to point to the newly downloaded llama-server binary
+        llama_exe = dest_dir / "llama-server.exe"
+        if safe_exists(llama_exe):
+            s = get_settings()
+            s["llama_bin"] = str(llama_exe.resolve())
+            save_json(SETTINGS_FILE, s)
+            broadcast_event({"type": "settings:update"})
+
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATE["status"] = "done"
+
+    except Exception as e:
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_STATE.update({
+                "status": "failed",
+                "error_msg": str(e)
+            })
+
+
 # ---- HTTP handler ----------------------------------------------------------
 
 MIME = {
@@ -8879,10 +9104,77 @@ class Handler(BaseHTTPRequestHandler):
             except PermissionError:
                 return self._send_json(403, {"error": "permission denied"})
             return self._send_json(200, {"path": str(target_resolved), "entries": entries})
+        if p == "/api/setup/sysinfo":
+            info = detect_hardware_specs()
+            return self._send_json(200, info)
+        if p == "/api/setup/download-status":
+            with DOWNLOAD_LOCK:
+                return self._send_json(200, DOWNLOAD_STATE)
+        if p == "/api/setup/detect":
+            # Scan for llama-server.exe in common locations and list available models.
+            # Returns data for the initial setup wizard so new users don't have to
+            # manually edit settings.json.
+            s = get_settings()
+            mdir = (s.get("models_dir") or "").strip()
+            
+            # Detect llama-server paths
+            llama_paths = []
+            explicit = (s.get("llama_bin") or "").strip()
+            if explicit and safe_exists(explicit):
+                llama_paths.append({"path": explicit, "found": True, "label": "Custom path (settings)"})
+                
+            # Auto-detect via find_llama_bin
+            auto = find_llama_bin()
+            if auto and not any(lp["path"] == auto for lp in llama_paths):
+                llama_paths.append({"path": auto, "found": True, "label": "Auto-detected"})
+                
+            # Scan common fallback locations
+            home = Path.home()
+            candidates = [
+                (home / ".unsloth/llama.cpp/build/bin/Release/llama-server.exe", "Unstable build (Release)"),
+                (home / ".unsloth/llama.cpp/build/bin/llama-server.exe", "Unstable build"),
+                (home / ".docker/bin/inference/llama-server.exe", "Docker inference"),
+                (home / "llama.cpp/build/bin/Release/llama-server.exe", "llama.cpp Release"),
+                (home / "llama.cpp/llama-server.exe", "llama.cpp root"),
+                (Path("C:/llama.cpp/build/bin/Release/llama-server.exe"), "C:/llama.cpp Release"),
+                (Path("C:/llama.cpp/llama-server.exe"), "C:/llama.cpp root"),
+            ]
+            for c, label in candidates:
+                if safe_exists(c) and not any(lp["path"] == str(c) for lp in llama_paths):
+                    llama_paths.append({"path": str(c), "found": True, "label": label})
+                    
+            # List models in the configured directory if any
+            models = []
+            if mdir and safe_exists(mdir):
+                models = scan_gguf_dir(mdir)
+                
+            # If no models found in configured directory or models_dir is empty,
+            # scan other drives/common folders to auto-suggest models
+            auto_models = find_all_gguf_files()
+            if not models and auto_models:
+                models = auto_models
+                # Suggest a default models_dir from the parent folder of the newest found model.
+                if not mdir:
+                    best_model_path = auto_models[0]["path"]
+                    try:
+                        mdir = str(Path(best_model_path).parent.resolve())
+                    except Exception:
+                        pass
+                        
+            return self._send_json(200, {
+                "llama_paths": llama_paths,
+                "models_dir": mdir,
+                "models": models,
+                "settings": s,
+            })
         return self._send_json(404, {"error": "not found"})
 
     def _handle_api_post(self, p: str, parsed):
         body = self._read_json()
+        if p == "/api/setup/download-llama":
+            build_type = body.get("build_type", "CPU")
+            threading.Thread(target=download_and_extract_llama, args=(build_type,), daemon=True).start()
+            return self._send_json(200, {"success": True})
         if p == "/api/settings":
             cur = get_settings()
             cur.update({k: v for k, v in body.items() if k in DEFAULT_SETTINGS})
@@ -9044,7 +9336,7 @@ class Handler(BaseHTTPRequestHandler):
             target = (body.get("path") or "").strip()
             if not target:
                 return self._send_json(400, {"error": "path required"})
-            if not Path(target).exists():
+            if not safe_exists(target):
                 return self._send_json(400, {"error": f"file not found: {target}"})
             res = _llama.start(target)
             if res.get("ok"):
@@ -10161,6 +10453,10 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
             "deepseek-r1", "deepseek_r1", "deepseekr1",
         )
         has_mtp = any(h in name_blob for h in _MTP_HINTS)
+        if has_mtp:
+            _EXCLUDE_MTP = ("distil", "distill", "distilled", "glm")
+            if any(e in name_blob for e in _EXCLUDE_MTP):
+                has_mtp = False
     if has_mtp:
         out["spec_strategy"] = "draft-mtp"
         nextn = int(profile.get("nextn_predict_layers", 0) or 0)
@@ -10193,18 +10489,62 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
 
 
 def find_llama_bin() -> str:
-    """Locate llama-server.exe — settings override > env > PATH > known dirs."""
+    """Locate llama-server.exe — settings override > env > PATH > known dirs > recursive scan."""
     s = get_settings()
     explicit = (s.get("llama_bin") or "").strip()
-    if explicit and Path(explicit).exists():
+    if explicit and safe_exists(explicit):
         return explicit
     env = (os.environ.get("ACCURETTA_LLAMA_BIN") or "").strip()
-    if env and Path(env).exists():
+    if env and safe_exists(env):
         return env
     found = shutil.which("llama-server.exe") or shutil.which("llama-server")
     if found:
         return found
+    
     home = Path.home()
+    search_roots = [
+        ROOT,
+        home / "Downloads",
+        home / "Desktop",
+        home / "Documents",
+        Path("C:/llama.cpp"),
+    ]
+    
+    # Scan other drive letters for common top-level llama folders
+    if os.name == "nt":
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = Path(f"{letter}:\\")
+            if safe_exists(drive):
+                for candidate_folder in ["llama.cpp", "llama", "bin"]:
+                    cand = drive / candidate_folder
+                    if safe_exists(cand) and safe_is_dir(cand):
+                        search_roots.append(cand)
+                        
+    seen_roots = set()
+    valid_roots = []
+    for r in search_roots:
+        try:
+            r_abs = str(r.resolve())
+            if r_abs not in seen_roots and safe_exists(r) and safe_is_dir(r):
+                seen_roots.add(r_abs)
+                valid_roots.append(r)
+        except Exception:
+            continue
+            
+    pattern = "llama-server.exe" if os.name == "nt" else "llama-server"
+    for root in valid_roots:
+        depth = 3
+        try:
+            matches = safe_rglob_files(root, pattern, max_depth=depth)
+            if matches:
+                # Prioritize Release builds
+                for m in matches:
+                    if "release" in str(m).lower():
+                        return str(m.resolve())
+                return str(matches[0].resolve())
+        except Exception:
+            continue
+            
     candidates = [
         home / ".unsloth/llama.cpp/build/bin/Release/llama-server.exe",
         home / ".unsloth/llama.cpp/build/bin/llama-server.exe",
@@ -10215,9 +10555,11 @@ def find_llama_bin() -> str:
         Path("C:/llama.cpp/llama-server.exe"),
     ]
     for c in candidates:
-        if c.exists():
+        if safe_exists(c):
             return str(c)
+            
     return ""
+
 
 
 def _parse_llama_port() -> int:
@@ -10235,7 +10577,7 @@ def find_mmproj_for(model_path: str) -> str:
     if not model_path:
         return ""
     mp = Path(model_path)
-    if not mp.exists():
+    if not safe_exists(mp):
         return ""
     candidates: list[Path] = []
     search_dirs = [mp.parent]
@@ -10275,23 +10617,120 @@ def scan_gguf_dir(root: str) -> list[dict]:
     """List .gguf files under root (recursive). Returns [{name,path,size,modified_at}]."""
     if not root:
         return []
-    rp = Path(root)
-    if not rp.exists() or not rp.is_dir():
+    try:
+        files = safe_rglob_files(root, "*.gguf", max_depth=6)
+    except Exception:
         return []
     out = []
-    for p in rp.rglob("*.gguf"):
+    for p in files:
         try:
             st = p.stat()
+            out.append({
+                "name": p.name,
+                "path": str(p.resolve()),
+                "size": st.st_size,
+                "modified_at": int(st.st_mtime),
+            })
         except Exception:
             continue
-        out.append({
-            "name": p.name,
-            "path": str(p.resolve()),
-            "size": st.st_size,
-            "modified_at": int(st.st_mtime),
-        })
     out.sort(key=lambda m: m["name"].lower())
     return out
+
+
+def find_all_gguf_files() -> list[dict]:
+    """Scan common locations for .gguf files to offer frictionless onboarding.
+    Returns list of dicts: [{name, path, size, modified_at}].
+    """
+    s = get_settings()
+    mdir = (s.get("models_dir") or "").strip()
+    
+    search_roots = []
+    
+    # 1. Configured models_dir
+    if mdir and safe_exists(mdir) and safe_is_dir(mdir):
+        search_roots.append(Path(mdir))
+        
+    # 2. Home directories
+    home = Path.home()
+    for sub in ["models", "Downloads", "Desktop", "Documents"]:
+        search_roots.append(home / sub)
+        
+    # 3. LM Studio locations
+    search_roots.append(home / ".lmstudio" / "models")
+    search_roots.append(home / ".cache" / "lm-studio" / "models")
+    
+    # 4. HuggingFace hub cache
+    search_roots.append(home / ".cache" / "huggingface" / "hub")
+    
+    # 5. Ollama models
+    search_roots.append(home / ".ollama" / "models")
+    
+    # 6. AccuTEST workspace (ROOT) and sibling folders (ROOT.parent)
+    search_roots.append(ROOT)
+    if ROOT.parent and ROOT.parent != ROOT:
+        search_roots.append(ROOT.parent)
+        
+    # 7. Top-level folders named MODELS or models on all available drives
+    if os.name == "nt":
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = Path(f"{letter}:\\")
+            if safe_exists(drive):
+                # Smart candidate directories on non-OS/other drives
+                for folder in [
+                    "MODELS", "models", 
+                    "llama.cpp", "llama", 
+                    "LM Studio", "LM-Studio", "lmstudio", 
+                    "Ollama", "ollama", 
+                    "Downloads", "Documents", "Desktop"
+                ]:
+                    cand = drive / folder
+                    if safe_exists(cand) and safe_is_dir(cand):
+                        search_roots.append(cand)
+    else:
+        for folder in ["/models", "/MODELS"]:
+            if safe_exists(folder) and safe_is_dir(folder):
+                search_roots.append(Path(folder))
+
+    # De-duplicate and validate search roots
+    seen_roots = set()
+    valid_roots = []
+    for r in search_roots:
+        try:
+            r_abs = str(r.resolve())
+            if r_abs not in seen_roots and safe_exists(r) and safe_is_dir(r):
+                seen_roots.add(r_abs)
+                valid_roots.append(r)
+        except Exception:
+            continue
+            
+    # Scan for *.gguf in all valid roots
+    all_files = []
+    seen_files = set()
+    
+    for root in valid_roots:
+        try:
+            found = safe_rglob_files(root, "*.gguf", max_depth=6)
+            for p in found:
+                p_abs = str(p.resolve())
+                if p_abs not in seen_files:
+                    seen_files.add(p_abs)
+                    try:
+                        st = p.stat()
+                        all_files.append({
+                            "name": p.name,
+                            "path": p_abs,
+                            "size": st.st_size,
+                            "modified_at": int(st.st_mtime),
+                        })
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+            
+    # Sort models by modified_at descending (newest first)
+    all_files.sort(key=lambda m: (-m["modified_at"], m["name"].lower()))
+    return all_files
+
 
 
 class LlamaProcess:
@@ -10552,7 +10991,7 @@ class LlamaProcess:
         bin_path = find_llama_bin()
         if not bin_path:
             return {"ok": False, "error": "llama-server.exe not found. Set llama_bin in Settings or install llama.cpp."}
-        if not model_path or not Path(model_path).exists():
+        if not model_path or not safe_exists(model_path):
             return {"ok": False, "error": f"model not found: {model_path}"}
 
         s = get_settings()
@@ -10595,6 +11034,14 @@ class LlamaProcess:
             spec_strategy = "off"
         elif spec_strategy not in ("off", "ngram-mod", "draft-mtp"):
             spec_strategy = "ngram-mod" if bool(s.get("enable_speculative", True)) else "off"
+            
+        if spec_strategy == "draft-mtp" and model_path:
+            model_lower = os.path.basename(model_path).lower()
+            _EXCLUDE_MTP = ("distil", "distill", "distilled", "glm")
+            if any(e in model_lower for e in _EXCLUDE_MTP):
+                spec_strategy = "ngram-mod"
+                print(f"[llama] forcing spec_strategy='ngram-mod' fallback for distilled/GLM model: {os.path.basename(model_path)}")
+                
         no_warmup = bool(s.get("no_warmup", False))
         enable_metrics = bool(s.get("enable_metrics", False))
         extra_args_raw = (s.get("llama_extra_args") or "").strip()
@@ -10604,7 +11051,7 @@ class LlamaProcess:
         # next to the model. Empty string means "text-only model" — chat
         # handler will fall back to the side-vision describe_image() path.
         mmproj_path = (s.get("mmproj_path") or "").strip()
-        if mmproj_path and not Path(mmproj_path).exists():
+        if mmproj_path and not safe_exists(mmproj_path):
             print(f"[llama] WARN mmproj_path set but missing: {mmproj_path} — ignoring")
             mmproj_path = ""
         if not mmproj_path and bool(s.get("mmproj_auto", True)):
@@ -10664,8 +11111,8 @@ class LlamaProcess:
             cmd += [
                 "--spec-type", "ngram-mod",
                 "--spec-ngram-mod-n-match", "24",
-                "--draft-min", "48",
-                "--draft-max", "64",
+                "--spec-draft-n-min", "48",
+                "--spec-draft-n-max", "64",
             ]
         elif spec_strategy == "draft-mtp":
             # Multi-token prediction draft. Requires the model to have MTP heads
@@ -10823,8 +11270,9 @@ def main():
                 save_json(SETTINGS_FILE, s_initial)
         except Exception:
             pass
-    elif last_model and Path(last_model).exists():
-        print(f"  spawning llama-server with {Path(last_model).name} ...")
+    elif last_model and safe_exists(last_model):
+        model_name = os.path.basename(last_model)
+        print(f"  spawning llama-server with {model_name} ...")
         res = _llama.start(last_model, wait=True, wait_seconds=120)
         if res.get("ok"):
             print(f"  llama-server: ready (pid {res.get('pid')})")
@@ -10958,4 +11406,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        try:
+            with open("crash_log.txt", "w", encoding="utf-8") as f:
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        raise

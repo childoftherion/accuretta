@@ -198,13 +198,21 @@ A few things that will save you a long debugging session:
 
 ## Quick start
 
+Accuretta now comes with a polished setup wizard that scans your hardware, downloads the recommended llama.cpp binaries automatically, and autotunes your selected models for optimal performance.
+
+<p align="center">
+  <img src="media/setup_process.png" alt="Accuretta Quick Setup Wizard" width="780" />
+</p>
+
 1. Install Python 3.10 or newer.
 2. Install dependencies: `pip install -r requirements.txt`
-3. Have `llama-server` (or `llama-server.exe` on Windows) somewhere on disk. Use the CUDA build for NVIDIA, the Vulkan build for everything else, or the CPU build if you are brave.
-4. Have at least one GGUF model file on disk. Anything llama.cpp can load. A 23B Q4 in the GLM 4.7 family or a Qwen 3 series instruct in the 7B to 32B range is a good starting point on consumer hardware.
-5. Double click `start.bat` (Windows) or run `python bridge.py` from the repo root.
-6. Open the printed URL in your browser. The default is `http://localhost:8787`.
-7. Open Settings, point it at your models folder and llama-server binary, pick a model, and chat.
+3. Have at least one GGUF model file in a folder on your computer.
+4. Double click `start.bat` (Windows) or run `python bridge.py` in your terminal.
+5. Open the printed URL in your browser (default is `http://localhost:8787`).
+6. The setup wizard will automatically open to guide you through:
+   * **System Hardware Scan**: Accuretta detects your GPU and hardware capabilities.
+   * **1-Click Binary Downloader**: Links or downloads the official llama.cpp binary built specifically for your hardware (CUDA for NVIDIA, Vulkan for AMD/Intel, or LLVM CPU).
+   * **Model Selection & Auto-Tune**: Select your model and Accuretta automatically suggests and applies optimal parameters (such as optimal context size, GPU offload layers, and cache quantization) before spawning the backend.
 
 The first session creates a `data/` folder next to `bridge.py` that holds your chats, settings, workspace pointers, and memories. Back it up if you care about it. Delete it if you want a clean slate.
 

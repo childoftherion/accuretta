@@ -678,6 +678,47 @@
   </div>
 </aside>
 
+<!-- Setup wizard modal — shown on first load when settings are blank -->
+<div class="setup-overlay" id="setup-overlay">
+  <div class="setup-card">
+    <div class="setup-header">
+      <h2>Quick Setup</h2>
+      <p class="setup-sub">Select your llama-server and model to get started.</p>
+      
+      <div class="setup-scanner-card" id="setup-scanner-card">
+        <div class="header">
+          <i class="ph ph-spinner-gap pulse-icon spin" id="setup-scanner-icon" style="font-size: 20px; display: inline-block;"></i>
+          <div class="title" id="setup-scanner-title">Scanning System Specs &amp; Files…</div>
+        </div>
+        <div class="desc" id="setup-scanner-desc">
+          Checking GPU hardware and searching for local llama-server binaries to minimize setup friction.
+        </div>
+      </div>
+    </div>
+    <div class="setup-body">
+      <div class="setup-step" id="step-llama">
+        <label>llama-server.exe</label>
+        <select id="setup-llama-path"><option value="">— scanning… —</option></select>
+        <span class="hint">Auto-detected from common locations, or set manually in Settings later.</span>
+      </div>
+      <div class="setup-step" id="step-model">
+        <label>Chat model (.gguf)</label>
+        <select id="setup-model-path"><option value="">— no models found —</option></select>
+        <span class="hint">Pick a GGUF model from your models directory.</span>
+      </div>
+      <div class="setup-step" id="step-models-dir">
+        <label>Models directory</label>
+        <input type="text" id="setup-models-dir" placeholder="e.g. D:\\MODELS" />
+        <span class="hint">Where your .gguf files live. Leave blank to use the default.</span>
+      </div>
+    </div>
+    <div class="setup-footer">
+      <button class="btn accent sm" id="setup-save">Save &amp; Start</button>
+      <button class="btn sm" id="setup-skip">Skip — I'll configure later</button>
+    </div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 <script>
   // Splash fade-out timer. Lives inline (not in app.js) so it fires
@@ -691,6 +732,279 @@
     if (!s) return;
     setTimeout(function () { s.classList.add('hide'); }, 480);
     setTimeout(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 780);
+  })();
+
+  // Setup wizard — auto-detect llama-server and models on load.
+  (function () {
+    var overlay = document.getElementById('setup-overlay');
+    if (!overlay) return;
+
+    // Hide immediately if already skipped or completed in this session
+    if (localStorage.getItem('accuretta:settings') === '1') {
+      overlay.style.display = 'none';
+    }
+
+    var llamaSel = document.getElementById('setup-llama-path');
+    var modelSel = document.getElementById('setup-model-path');
+    var mdirInput = document.getElementById('setup-models-dir');
+    var scannerCard = document.getElementById('setup-scanner-card');
+    var scannerIcon = document.getElementById('setup-scanner-icon');
+    var scannerTitle = document.getElementById('setup-scanner-title');
+    var scannerDesc = document.getElementById('setup-scanner-desc');
+
+    var sysinfo = { gpu_name: "Generic CPU", recommended_build: "CPU" };
+    var downloadInterval = null;
+
+    // 1. Fetch system info
+    fetch('/api/setup/sysinfo')
+      .then(function(r) { return r.json(); })
+      .then(function(info) {
+        sysinfo = info;
+        runDetection();
+      })
+      .catch(function() {
+        runDetection();
+      });
+
+    // 2. Fetch and run scanner detection
+    function runDetection() {
+      fetch('/api/setup/detect')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          // If backend settings are already configured, auto-hide setup wizard
+          var hasBin = data.settings && data.settings.llama_bin && data.settings.llama_bin.trim() !== "";
+          var hasDir = data.settings && data.settings.models_dir && data.settings.models_dir.trim() !== "";
+          if (hasBin && hasDir && localStorage.getItem('accuretta:settings') !== 'force') {
+            overlay.style.display = 'none';
+            return;
+          }
+
+          // Populate llama-server paths dropdown
+          llamaSel.innerHTML = '';
+          if (data.llama_paths && data.llama_paths.length) {
+            data.llama_paths.forEach(function(p) {
+              var opt = document.createElement('option');
+              opt.value = p.path;
+              opt.textContent = p.label + ' (' + p.path.split(/[\\/]/).pop() + ')';
+              llamaSel.appendChild(opt);
+            });
+
+            // Transition scanning card to success state
+            scannerCard.className = 'setup-scanner-card success';
+            scannerIcon.className = 'ph ph-check-circle success-icon';
+            scannerIcon.classList.remove('spin');
+            scannerTitle.textContent = 'System Ready: llama-server detected';
+            scannerDesc.innerHTML = 'We\'ve automatically detected a working <code>llama-server.exe</code> on your computer.<br><strong>Build Mode:</strong> ' + sysinfo.gpu_name;
+          } else {
+            // No llama-server detected - show one-click installer card
+            llamaSel.innerHTML = '<option value="">No local llama-server configured</option>';
+            
+            scannerCard.className = 'setup-scanner-card';
+            scannerIcon.className = 'ph ph-warning pulse-icon';
+            scannerIcon.classList.remove('spin');
+            scannerTitle.textContent = 'Action Required: Missing llama-server';
+            
+            scannerDesc.innerHTML = 'We couldn\'t locate a local <code>llama-server.exe</code>. To run models locally, you need Llama.cpp.<br>' +
+              '<div style="margin-top: 8px;"><strong>Detected Hardware:</strong> <span class="setup-wizard-badge success">' + sysinfo.gpu_name + '</span></div>' +
+              '<button class="btn-installer-download" id="btn-setup-download" style="margin-top: 12px;">' +
+                '<i class="ph ph-download-simple"></i> Install Recommended ' + sysinfo.recommended_build + ' Build (1-Click)' +
+              '</button>';
+
+            document.getElementById('btn-setup-download').addEventListener('click', startDownload);
+          }
+
+          // Populate models dropdown
+          modelSel.innerHTML = '';
+          if (data.models && data.models.length) {
+            data.models.forEach(function(m) {
+              var opt = document.createElement('option');
+              opt.value = m.path;
+              opt.textContent = m.name + ' (' + (m.size / (1024*1024)).toFixed(0) + ' MB)';
+              modelSel.appendChild(opt);
+            });
+          } else {
+            modelSel.innerHTML = '<option value="">No GGUF models found — place in models folder</option>';
+          }
+
+          // Pre-fill models directory
+          if (data.models_dir) mdirInput.value = data.models_dir;
+        })
+        .catch(function() {
+          llamaSel.innerHTML = '<option value="">Error detecting environment</option>';
+        });
+    }
+
+    // 3. One-Click Downloader Trigger
+    function startDownload() {
+      fetch('/api/setup/download-llama', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ build_type: sysinfo.recommended_build })
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res.success) {
+          // Switch UI state to downloading
+          scannerCard.className = 'setup-scanner-card downloading';
+          scannerIcon.className = 'ph ph-spinner-gap pulse-icon spin';
+          scannerTitle.textContent = 'Installing llama-server…';
+          scannerDesc.innerHTML = 'Fetching official pre-compiled package for <code>' + sysinfo.gpu_name + '</code>. Please wait.' +
+            '<div class="setup-download-container" id="download-progress-container">' +
+              '<div class="setup-download-bar">' +
+                '<div class="setup-download-fill" id="download-progress-fill" style="width: 0%;"></div>' +
+              '</div>' +
+              '<div class="setup-download-meta">' +
+                '<span id="download-progress-percent">0%</span>' +
+                '<span id="download-progress-speed">0 KB/s</span>' +
+              '</div>' +
+            '</div>';
+
+          // Begin polling status
+          if (downloadInterval) clearInterval(downloadInterval);
+          downloadInterval = setInterval(pollDownloadStatus, 400);
+        }
+      });
+    }
+
+    // 4. Poll Download Status
+    function pollDownloadStatus() {
+      fetch('/api/setup/download-status')
+        .then(function(r) { return r.json(); })
+        .then(function(status) {
+          var fill = document.getElementById('download-progress-fill');
+          var percent = document.getElementById('download-progress-percent');
+          var speed = document.getElementById('download-progress-speed');
+
+          if (status.status === 'downloading') {
+            var pct = 0;
+            if (status.bytes_total > 0) {
+              pct = Math.round((status.bytes_written / status.bytes_total) * 100);
+            }
+            if (fill) fill.style.width = pct + '%';
+            if (percent) percent.textContent = pct + '% (' + (status.bytes_written / (1024*1024)).toFixed(1) + 'MB of ' + (status.bytes_total / (1024*1024)).toFixed(1) + 'MB)';
+            if (speed) speed.textContent = status.speed;
+          } else if (status.status === 'extracting') {
+            if (fill) fill.style.width = '95%';
+            if (percent) percent.textContent = 'Extracting binaries…';
+            if (speed) speed.textContent = 'Decompressing zip';
+          } else if (status.status === 'done') {
+            clearInterval(downloadInterval);
+            
+            scannerCard.className = 'setup-scanner-card success';
+            scannerIcon.className = 'ph ph-check-circle success-icon';
+            scannerIcon.classList.remove('spin');
+            scannerTitle.textContent = 'Installation Complete!';
+            scannerDesc.innerHTML = 'The recommended <code>llama-server.exe</code> has been successfully configured locally inside <code>./bin/llama/</code>.<br>Click <strong>Save &amp; Start</strong> to launch!';
+            
+            // Refresh selections to load the brand new binary
+            runDetection();
+          } else if (status.status === 'failed') {
+            clearInterval(downloadInterval);
+            scannerCard.className = 'setup-scanner-card';
+            scannerIcon.className = 'ph ph-warning-circle';
+            scannerTitle.textContent = 'Installation Failed';
+            scannerDesc.innerHTML = 'An error occurred during installation: <code style="color: var(--danger);">' + status.error_msg + '</code><br>' +
+              '<button class="btn-installer-download" id="btn-setup-download" style="margin-top: 12px;">' +
+                '<i class="ph ph-arrow-counter-clockwise"></i> Try Again' +
+              '</button>';
+            document.getElementById('btn-setup-download').addEventListener('click', startDownload);
+          }
+        });
+    }
+
+    // Save button - performs dynamic auto-tuning on the chosen model before storing settings
+    document.getElementById('setup-save').addEventListener('click', function() {
+      var saveBtn = document.getElementById('setup-save');
+      var originalText = saveBtn.textContent;
+      
+      // Visual feedback: disable to prevent double clicks and show loading state
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Auto-tuning & Saving...';
+
+      var settings = {};
+      var modelPath = modelSel.value;
+      
+      // Store basic user choices
+      if (llamaSel.value) settings.llama_bin = llamaSel.value;
+      if (modelPath) { 
+        settings.model_path = modelPath;
+        // Strip path and extension to get a friendly model identifier for chat APIs
+        settings.model = modelPath.split(/[\\/]/).pop().replace(/\.gguf$/i, "");
+      }
+      if (mdirInput.value) settings.models_dir = mdirInput.value;
+
+      // Start by fetching suggested optimal settings from the auto-tune system
+      var tunePromise = Promise.resolve({});
+      if (modelPath) {
+        tunePromise = fetch('/api/llama/auto-tune', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model_path: modelPath, vram_gb: 0 }) // vram_gb = 0 triggers automatic GPU/CPU VRAM detection
+        })
+        .then(function(res) {
+          if (!res.ok) throw new Error('Auto-tune response not ok');
+          return res.json();
+        })
+        .then(function(data) {
+          return data.suggested || {};
+        })
+        .catch(function(err) {
+          console.warn("Auto-tune in onboarding failed:", err);
+          return {}; // Graceful fallback: continue with native defaults
+        });
+      }
+
+      // Chain the settings storage and model load operations
+      tunePromise.then(function(suggested) {
+        // Merge suggested hardware settings into target settings payload
+        if (suggested.num_ctx != null) settings.num_ctx = Number(suggested.num_ctx);
+        if (suggested.num_gpu != null) settings.num_gpu = Number(suggested.num_gpu);
+        if (suggested.num_batch != null) settings.num_batch = Number(suggested.num_batch);
+        if (suggested.kv_cache_type) settings.kv_cache_type = suggested.kv_cache_type;
+        if (suggested.n_cpu_moe != null) settings.n_cpu_moe = Number(suggested.n_cpu_moe);
+        if (suggested.n_ubatch != null) settings.n_ubatch = Number(suggested.n_ubatch);
+        if (suggested.flash_attn != null) settings.flash_attn = !!suggested.flash_attn;
+        if (suggested.spec_strategy) settings.spec_strategy = String(suggested.spec_strategy);
+        if (suggested.no_warmup != null) settings.no_warmup = !!suggested.no_warmup;
+        if (suggested.enable_metrics != null) settings.enable_metrics = !!suggested.enable_metrics;
+
+        // Persist the combined settings via the API
+        return fetch('/api/settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(settings)
+        });
+      })
+      .then(function() {
+        if (modelPath) {
+          // Trigger model load to spawn llama-server with the new settings
+          return fetch('/api/models/load', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path: modelPath })
+          });
+        }
+      })
+      .then(function() {
+        // Close setup overlay and transition user to the main chat interface
+        overlay.style.display = 'none';
+        localStorage.setItem('accuretta:settings', '1');
+        location.reload();
+      })
+      .catch(function(err) {
+        console.error("Save & Start failed:", err);
+        // Reset UI state in case of unexpected errors so user can try again
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalText;
+        location.reload();
+      });
+    });
+
+    // Skip button
+    document.getElementById('setup-skip').addEventListener('click', function() {
+      overlay.style.display = 'none';
+      localStorage.setItem('accuretta:settings', '1');
+    });
   })();
 </script>
 </body>
