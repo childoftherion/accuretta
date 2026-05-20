@@ -1593,13 +1593,24 @@
       state.mode = "agent";
       $$('[data-mode]').forEach(x => x.classList.toggle("on", x.dataset.mode === state.mode));
     }
-    state.tokTotal = 0;
-    state.tokPromptTotal = 0;
+    let chatPromptTok = 0;
+    let chatOutTok = 0;
+    if (chat && chat.messages) {
+      for (const m of chat.messages) {
+        if (Number.isFinite(m.prompt_tokens)) {
+          chatPromptTok += m.prompt_tokens;
+        }
+        if (Number.isFinite(m.tokens)) {
+          chatOutTok += m.tokens;
+        }
+      }
+    }
+    state.tokTotal = chatOutTok;
+    state.tokPromptTotal = chatPromptTok;
     state._streamOutEstimate = 0;
     state._streamPromptEstimate = 0;
     renderTokTotal();
-    // NOTE: cost widget is NOT reset here — it tracks all-time savings,
-    // not per-chat. The all-time counters persist in localStorage.
+    renderCostWidget();
     refreshSessionDesktopState();
     renderMessages();
     state._versionsExpanded = false;
@@ -5115,12 +5126,21 @@
     "mistral":   { label: "Mistral",   input:  2.00, output:   5.00 },  // Magistral Medium
   };
 
-  function calcCost(provider) {
+  function calcCost(provider, scope = "alltime") {
     const p = CLOUD_PRICING[provider];
     if (!p) return 0;
-    // Use all-time persistent totals + any live streaming estimate
-    const promptTok = state._allTimeTokIn + (state._streamPromptEstimate || 0);
-    const outTok = state._allTimeTokOut + (state._streamOutEstimate || 0);
+    
+    let promptTok = 0;
+    let outTok = 0;
+    
+    if (scope === "session") {
+      promptTok = state.tokPromptTotal + (state._streamPromptEstimate || 0);
+      outTok = state.tokTotal + (state._streamOutEstimate || 0);
+    } else {
+      promptTok = state._allTimeTokIn + (state._streamPromptEstimate || 0);
+      outTok = state._allTimeTokOut + (state._streamOutEstimate || 0);
+    }
+    
     const inCost  = (promptTok / 1_000_000) * p.input;
     const outCost = (outTok / 1_000_000) * p.output;
     return inCost + outCost;
@@ -5135,11 +5155,21 @@
   }
 
   function renderCostWidget() {
-    const el = $("#cost-amount");
-    if (!el) return;
-    const cost = calcCost(state.costProvider);
-    el.textContent = cost < 0.005 ? "$0.00" : "$" + cost.toFixed(2);
-    el.classList.toggle("zero", cost < 0.005);
+    const elSession = $("#cost-amount-session");
+    const elAllTime = $("#cost-amount-alltime");
+    
+    if (elSession) {
+      const sessionCost = calcCost(state.costProvider, "session");
+      elSession.textContent = sessionCost < 0.005 ? "$0.00" : "$" + sessionCost.toFixed(2);
+      elSession.classList.toggle("zero", sessionCost < 0.005);
+    }
+    
+    if (elAllTime) {
+      const allTimeCost = calcCost(state.costProvider, "alltime");
+      elAllTime.textContent = allTimeCost < 0.005 ? "$0.00" : "$" + allTimeCost.toFixed(2);
+      elAllTime.classList.toggle("zero", allTimeCost < 0.005);
+    }
+    
     // Update the "saved vs" label with provider name
     const label = $("#cost-widget .cost-widget-label");
     if (label) {
