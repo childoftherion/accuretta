@@ -1,13 +1,47 @@
-requests>=2.31.0
-pillow>=10.0.0
-psutil>=5.9.0
+# ==============================================================================
+# Accuretta Dependencies
+# ==============================================================================
+# The core bridge application runs entirely on Python's built-in standard
+# library. All third-party packages are optional and imported dynamically 
+# inside try/except blocks to allow the application to degrade gracefully.
+# ==============================================================================
 
-# firmware analysis tools (optional — bridge degrades gracefully if absent)
-# binwalk intentionally NOT used: pip "binwalk" package is broken/unrelated
-# to the real firmware tool. Signature scanning is implemented in-process.
-PySquashfsImage>=0.9
-pyelftools>=0.30
-# capstone: pure-Python multi-arch disassembler (MIPS/ARM/x86/PPC).
-# Powers disasm_at — without it the model can't read function bodies in
-# stripped router binaries.
-capstone>=5.0.0
+# ------------------------------------------------------------------------------
+# Core Recommended / Image Handling
+# ------------------------------------------------------------------------------
+pillow>=10.0.0            # Image manipulation and fallback OCR / screenshots
+
+# ------------------------------------------------------------------------------
+# Desktop Automation (Optional)
+# ------------------------------------------------------------------------------
+pyautogui>=0.9.54         # Lets the agent take screenshots and drive the mouse/keyboard
+pygetwindow>=0.0.9        # Window enumeration and targeting support for screenshots
+
+# ------------------------------------------------------------------------------
+# Firmware Analysis Tools (Optional)
+# ------------------------------------------------------------------------------
+PySquashfsImage>=0.9      # Squashfs image extraction for scanning router firmware
+pyelftools>=0.30          # ELF parsing and triage of firmware native binaries
+capstone>=5.0.0           # Pure-Python multi-architecture disassembler (MIPS/ARM/x86/PPC)
+
+# ------------------------------------------------------------------------------
+# APK & Android Static Analysis (Optional)
+# ------------------------------------------------------------------------------
+androguard>=3.4.0         # Full manifest parsing, cert analysis, and permissions scan
+
+# ------------------------------------------------------------------------------
+# Binary Analysis & Triage (Optional)
+# ------------------------------------------------------------------------------
+pefile>=2023.2.7          # Fast, pure-Python PE header triage and analysis
+yara-python>=4.3.0        # Pattern matching engine for scanning files with YARA rules
+
+# ------------------------------------------------------------------------------
+# Native Binary Analysis (Optional)
+# ------------------------------------------------------------------------------
+pyghidra>=1.4.0           # Decompile and analyze native libraries in-process via Ghidra
+
+# ------------------------------------------------------------------------------
+# Document Parsing (Optional)
+# ------------------------------------------------------------------------------
+pypdf>=3.0.0              # Standard PDF text extraction
+pdfplumber>=0.10.0        # Advanced PDF table extraction and layout preservation

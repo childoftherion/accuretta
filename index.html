@@ -18,7 +18,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <!-- PWA manifest — picks up app-icon-192 + app-icon-512 from the same dir. -->
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/app.css?v=6">
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" defer></script>
@@ -48,22 +48,23 @@
   <!-- ====== LEFT SIDEBAR (desktop) / MOBILE SESSIONS SCREEN ====== -->
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <!-- Two images, one per theme variant. CSS hides whichever doesn't
-           match [data-theme] on <html>. The src is set even on the hidden
-           one so the toggle is instant — no fetch/decode lag mid-flip. -->
-      <img class="brand-mark brand-mark-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
-      <img class="brand-mark brand-mark-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
-      <span>accuretta</span>
-      <span class="v" id="brand-v">v0.5.0</span>
-    </div>
-    <div class="side-actions">
-      <button class="btn accent sm" id="btn-new-chat"><i class="ph ph-plus"></i>New session</button>
-      <button class="iconbtn" id="btn-toggle-sidebar" title="Collapse sidebar"><i class="ph ph-sidebar-simple"></i></button>
+      <div class="brand-row">
+        <!-- Two images, one per theme variant. CSS hides whichever doesn't
+             match [data-theme] on <html>. -->
+        <img class="brand-mark brand-mark-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
+        <img class="brand-mark brand-mark-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
+        <span class="brand-title">Accuretta</span>
+        <span class="v" id="brand-v">v0.5.0</span>
+        <span class="grow"></span>
+        <button class="iconbtn" id="btn-toggle-sidebar" title="Collapse sidebar"><i class="ph ph-sidebar-simple"></i></button>
+      </div>
+      <span class="brand-subtitle">Your model. Your machine.</span>
     </div>
 
     <div class="section-head">
       <span>Sessions</span>
       <span class="grow"></span>
+      <button class="iconbtn" id="btn-new-chat" title="New session"><i class="ph ph-plus"></i></button>
     </div>
     <div class="chatlist" id="chatlist"></div>
 
@@ -85,7 +86,14 @@
       <!-- cost savings widget — shows what this session and all-time would cost on cloud AI -->
       <div class="cost-widget" id="cost-widget">
         <div class="cost-widget-head">
-          <span class="cost-widget-label">saved vs</span>
+          <span class="cost-widget-label">Saved Vs Average API Cost</span>
+          <span class="cost-widget-amount" id="cost-amount">$0.00</span>
+        </div>
+        <div class="cost-breakdown">
+          <div class="cost-row"><span class="cost-row-label">Saved this session</span><span class="cost-row-val" id="cost-session">$0.00</span></div>
+          <div class="cost-row"><span class="cost-row-label">All time saved</span><span class="cost-row-val" id="cost-alltime">$0.00</span></div>
+        </div>
+        <div class="cost-pills">
           <select class="cost-select" id="cost-select">
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
@@ -94,16 +102,6 @@
             <option value="deepseek">DeepSeek</option>
             <option value="mistral">Mistral</option>
           </select>
-        </div>
-        <div class="cost-savings-rows">
-          <div class="cost-savings-row">
-            <span class="cost-row-label">This Chat</span>
-            <span class="cost-widget-amount" id="cost-amount-session">$0.00</span>
-          </div>
-          <div class="cost-savings-row">
-            <span class="cost-row-label">All Time</span>
-            <span class="cost-widget-amount" id="cost-amount-alltime">$0.00</span>
-          </div>
         </div>
       </div>
       <div class="ctx-gauge" id="ctx-gauge" title="working memory used">
@@ -118,11 +116,8 @@
       <div class="side-meta-row">
         <span class="tok-total" id="tok-total" title="Total generated tokens this session">0 tok</span>
         <div class="side-socials" aria-label="Social links">
-          <button type="button" class="side-social" id="btn-theme-side" title="Toggle light / dark theme" aria-label="Toggle theme">
-            <i class="ph ph-moon" id="btn-theme-side-icon" style="font-size:13px;line-height:1;"></i>
-          </button>
-          <a class="side-social" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" title="Search for local models here" aria-label="Hugging Face">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12.025 1.13c-5.77 0-10.449 4.647-10.449 10.378 0 1.112.178 2.181.503 3.185.064-.222.203-.444.416-.577a.96.96 0 0 1 .524-.15c.293 0 .584.124.84.284.278.173.48.408.71.694.226.282.458.611.684.951v-.014c.017-.324.106-.622.264-.874s.403-.487.762-.543c.3-.047.596.06.787.203s.31.313.4.467c.15.257.212.468.233.542.01.026.653 1.552 1.657 2.54.616.605 1.01 1.223 1.082 1.912.055.537-.096 1.059-.38 1.572.637.121 1.294.187 1.967.187.657 0 1.298-.063 1.921-.178-.287-.517-.44-1.041-.384-1.581.07-.69.465-1.307 1.081-1.913 1.004-.987 1.647-2.513 1.657-2.539.021-.074.083-.285.233-.542.09-.154.208-.323.4-.467a1.08 1.08 0 0 1 .787-.203c.359.056.604.29.762.543s.247.55.265.874v.015c.225-.34.457-.67.683-.952.23-.286.432-.52.71-.694.257-.16.547-.284.84-.285a.97.97 0 0 1 .524.151c.228.143.373.388.43.625l.006.04a10.3 10.3 0 0 0 .534-3.273c0-5.731-4.678-10.378-10.449-10.378M8.327 6.583a1.5 1.5 0 0 1 .713.174 1.487 1.487 0 0 1 .617 2.013c-.183.343-.762-.214-1.102-.094-.38.134-.532.914-.917.71a1.487 1.487 0 0 1 .69-2.803m7.486 0a1.487 1.487 0 0 1 .689 2.803c-.385.204-.536-.576-.916-.71-.34-.12-.92.437-1.103.094a1.487 1.487 0 0 1 .617-2.013 1.5 1.5 0 0 1 .713-.174m-10.68 1.55a.96.96 0 1 1 0 1.921.96.96 0 0 1 0-1.92m13.838 0a.96.96 0 1 1 0 1.92.96.96 0 0 1 0-1.92M8.489 11.458c.588.01 1.965 1.157 3.572 1.164 1.607-.007 2.984-1.155 3.572-1.164.196-.003.305.12.305.454 0 .886-.424 2.328-1.563 3.202-.22-.756-1.396-1.366-1.63-1.32q-.011.001-.02.006l-.044.026-.01.008-.03.024q-.018.017-.035.036l-.032.04a1 1 0 0 0-.058.09l-.014.025q-.049.088-.11.19a1 1 0 0 1-.083.116 1.2 1.2 0 0 1-.173.18q-.035.029-.075.058a1.3 1.3 0 0 1-.251-.243 1 1 0 0 1-.076-.107c-.124-.193-.177-.363-.337-.444-.034-.016-.104-.008-.2.022q-.094.03-.216.087-.06.028-.125.063l-.13.074q-.067.04-.136.086a3 3 0 0 0-.135.096 3 3 0 0 0-.26.219 2 2 0 0 0-.12.121 2 2 0 0 0-.106.128l-.002.002a2 2 0 0 0-.09.132l-.001.001a1.2 1.2 0 0 0-.105.212q-.013.036-.024.073c-1.139-.875-1.563-2.317-1.563-3.203 0-.334.109-.457.305-.454m.836 10.354c.824-1.19.766-2.082-.365-3.194-1.13-1.112-1.789-2.738-1.789-2.738s-.246-.945-.806-.858-.97 1.499.202 2.362c1.173.864-.233 1.45-.685.64-.45-.812-1.683-2.896-2.322-3.295s-1.089-.175-.938.647 2.822 2.813 2.562 3.244-1.176-.506-1.176-.506-2.866-2.567-3.49-1.898.473 1.23 2.037 2.16c1.564.932 1.686 1.178 1.464 1.53s-3.675-2.511-4-1.297c-.323 1.214 3.524 1.567 3.287 2.405-.238.839-2.71-1.587-3.216-.642-.506.946 3.49 2.056 3.522 2.064 1.29.33 4.568 1.028 5.713-.624m5.349 0c-.824-1.19-.766-2.082.365-3.194 1.13-1.112 1.789-2.738 1.789-2.738s.246-.945.806-.858.97 1.499-.202 2.362c-1.173.864.233 1.45.685.64.451-.812 1.683-2.896 2.322-3.295s1.089-.175.938.647-2.822 2.813-2.562 3.244 1.176-.506 1.176-.506 2.866-2.567 3.49-1.898-.473 1.23-2.037 2.16c-1.564.932-1.686 1.178-1.464 1.53s3.675-2.511 4-1.297c.323 1.214-3.524 1.567-3.287 2.405.238.839 2.71-1.587 3.216-.642.506.946-3.49 2.056-3.522 2.064-1.29.33-4.568 1.028-5.713-.624"/></svg>
+          <a class="side-social" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" title="You can download local models here" aria-label="Hugging Face">
+            <svg viewBox="0 0 120 120" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M37.5 55c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zm45 0c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zM60 3C28.5 3 3 28.5 3 60s25.5 57 57 57 57-25.5 57-57S91.5 3 60 3zm0 104c-25.9 0-47-21.1-47-47S34.1 13 60 13s47 21.1 47 47-21.1 47-47 47zm24.5-32.5c-2.8 4.8-8 12.5-24.5 12.5s-21.7-7.7-24.5-12.5c-1.1-1.9.4-4.2 2.6-4 6.2.6 13.1 2 21.9 2s15.7-1.4 21.9-2c2.2-.2 3.7 2.1 2.6 4z"/></svg>
           </a>
           <a class="side-social" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" title="@NoJetsNextDoor on X" aria-label="X / Twitter">
             <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
@@ -132,8 +127,12 @@
           </a>
         </div>
       </div>
-      <button class="btn ghost sm" id="btn-faq" title="About Accuretta"><i class="ph ph-question"></i>FAQ</button>
-      <button class="btn ghost sm" id="btn-settings"><i class="ph ph-gear-six"></i>Settings</button>
+      <div class="side-foot-actions" style="display: flex; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted);">
+        <button class="iconbtn" id="btn-theme-side" title="Toggle light / dark theme"><i class="ph ph-moon" id="btn-theme-side-icon"></i></button>
+        <button class="iconbtn" id="btn-faq" title="FAQ / About"><i class="ph ph-question"></i></button>
+        <span class="grow"></span>
+        <button class="iconbtn" id="btn-settings" title="Settings"><i class="ph ph-gear-six"></i></button>
+      </div>
     </div>
   </aside>
 
@@ -143,6 +142,7 @@
   <div class="center">
     <div class="topbar">
       <button class="iconbtn" id="btn-toggle-sidebar-m" title="Sidebar"><i class="ph ph-list"></i></button>
+      <button class="iconbtn" id="btn-back-chevron" title="Back"><i class="ph ph-caret-left"></i></button>
       <div class="path">
         <i class="ph ph-chat-circle-dots"></i>
         <span class="em" id="chat-title">new session</span>
@@ -170,6 +170,8 @@
       <button class="mm-item" data-mm="settings"><i class="ph ph-gear-six"></i>Settings</button>
       <button class="mm-item" data-mm="faq"><i class="ph ph-question"></i>FAQ</button>
     </div>
+
+    <div class="status-line" id="status-line"></div>
 
     <div class="chat">
       <div class="chat-scroll" id="chat-scroll">
@@ -212,8 +214,8 @@
             <div class="composer-foot-actions">
               <button class="model-pill" id="model-pill" title="Click to change model"><span class="model-pill-name">select model</span><i class="ph ph-caret-down model-pill-caret"></i></button>
               <div class="model-pill-menu" id="model-pill-menu" role="listbox" aria-label="Pick a model"></div>
-              <button class="btn accent hidden" id="btn-stop" title="Stop streaming"><i class="ph-fill ph-stop"></i><span>Stop</span></button>
-              <button class="btn accent" id="btn-send" title="Send (⌘⏎)"><i class="ph-bold ph-arrow-up"></i><span>Send</span></button>
+              <button class="btn accent hidden" id="btn-stop" title="Stop streaming"><i class="ph-fill ph-stop"></i></button>
+              <button class="btn accent" id="btn-send" title="Send (⌘⏎)"><i class="ph-bold ph-arrow-up"></i></button>
             </div>
           </div>
         </div>
@@ -265,23 +267,42 @@
     </div>
 
     <div class="preview-body" id="preview-body">
-      <div class="preview-empty" id="preview-empty">
-        <i class="ph ph-layout"></i>
-        <div class="h">nothing to render.</div>
-        <div class="s">ask the agent to build a page.<br>e.g. "build a pricing page with three tiers."</div>
-      </div>
-      <div class="preview-stage" id="preview-stage">
-        <iframe class="preview-frame hidden" id="preview-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
-      </div>
-      <pre class="code-view hidden" id="code-view"></pre>
-      <div class="console-pane hidden" id="console-pane">
-        <div class="console-head">
-          <i class="ph ph-terminal"></i><span>Preview console</span>
-          <span class="grow"></span>
-          <button class="iconbtn sm" id="btn-console-clear" title="Clear"><i class="ph ph-trash"></i></button>
-          <button class="iconbtn sm" id="btn-console-close" title="Hide"><i class="ph ph-x"></i></button>
+      <div id="preview-top-pane">
+        <div class="preview-empty" id="preview-empty">
+          <i class="ph ph-layout"></i>
+          <div class="h">nothing to render.</div>
+          <div class="s">ask the agent to build a page.<br>e.g. "build a pricing page with three tiers."</div>
         </div>
-        <div class="console-body" id="console-body"></div>
+        <div class="preview-stage" id="preview-stage">
+          <iframe class="preview-frame hidden" id="preview-frame" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+        </div>
+        <pre class="code-view hidden" id="code-view"></pre>
+      </div>
+
+      <div id="preview-v-resizer" title="Drag to resize console pane"></div>
+
+      <div id="terminal-bottom-pane">
+        <div class="term-tabs-header">
+          <button class="term-tab active" data-tab="terminal"><i class="ph ph-terminal-window"></i>Terminal</button>
+          <button class="term-tab" data-tab="pycheck"><i class="ph ph-check-square"></i>Python check</button>
+          <button class="term-tab" data-tab="agentlog"><i class="ph ph-activity"></i>Agent log</button>
+          <span class="grow"></span>
+          <button class="iconbtn sm" id="btn-term-clear" title="Clear active console"><i class="ph ph-trash"></i></button>
+        </div>
+        <div class="term-tabs-body">
+          <div class="term-tab-pane active" id="term-pane-terminal">
+            <pre class="term-pre" id="term-console-pre"><code>$ <span class="term-cursor"></span></code></pre>
+          </div>
+          <div class="term-tab-pane hidden" id="term-pane-pycheck">
+            <div class="pycheck-pane" id="pycheck-pane">
+              <div class="pycheck-banner pending" id="pycheck-banner">No python check run yet. Run check from a .py file in the workspace.</div>
+              <pre class="pycheck-code" id="pycheck-code"><code></code></pre>
+            </div>
+          </div>
+          <div class="term-tab-pane hidden" id="term-pane-agentlog">
+            <pre class="term-pre" id="term-agent-log-pre"><code>[system] session started<br></code></pre>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -599,6 +620,8 @@
         <option value="nebula">Nebula</option>
         <option value="soft">Soft</option>
         <option value="light">Light</option>
+        <option value="aurora">Aurora</option>
+        <option value="nebula">Nebula</option>
       </select>
     </div>
 

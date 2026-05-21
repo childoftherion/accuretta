@@ -103,6 +103,11 @@
   --bg-sunken: var(--off-white-2);
   --bg-inset:  var(--off-white-3);
 
+  /* ---- GLASSMORPHISM ---- */
+  --glass-bg:       rgba(251, 250, 246, 0.75);
+  --glass-border:   rgba(20, 20, 18, 0.06);
+  --glass-blur:     16px;
+
   --fg:        var(--off-black);
   --fg-muted:  var(--gray-50);
   --fg-subtle: var(--gray-40);
@@ -113,9 +118,9 @@
   --border-strong:  var(--gray-20);
   --border-subtle:  var(--gray-05);
 
-  --accent:         var(--ember-2);
-  --accent-hover:   var(--ember-3);
-  --accent-subtle:  #F9E3CC;
+  --accent:         #007AFF;
+  --accent-hover:   #0063D1;
+  --accent-subtle:  #D6E8FF;
   --accent-fg:      #FFFFFF;
 
   --success:  var(--mint-3);
@@ -181,8 +186,8 @@
   /* Send-button gradient — warm pink → coral, with the inherited accent
      as the rest fill on dark. Used as `background-image` so the existing
      `background-color: var(--accent)` stays as a fallback. */
-  --btn-send-gradient: linear-gradient(135deg, #ff7eb6 0%, #ff5e9c 38%, #ff8d5a 100%);
-  --btn-send-glow:     0 6px 18px rgba(255, 110, 156, 0.32);
+  --btn-send-gradient: linear-gradient(135deg, #007AFF 0%, #0063D1 50%, #004AAD 100%);
+  --btn-send-glow:     0 6px 18px rgba(0, 122, 255, 0.32);
 
   /* ---- MOTION ---- */
   --ease-out:     cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -221,6 +226,9 @@
   --bg-raised: #222227;
   --bg-sunken: #141417;
   --bg-inset:  #2a2a30;
+
+  --glass-bg:       rgba(34, 34, 39, 0.7);
+  --glass-border:   rgba(255, 255, 255, 0.05);
 
   /* Subtle vertical gradient applied to body — page eases from a
      slightly lighter top down to the base, which gives the "off-black
@@ -295,6 +303,9 @@
   --bg-raised: #403d37;
   --bg-sunken: #2c2924;
   --bg-inset:  #4a4640;
+
+  --glass-bg:       rgba(64, 61, 55, 0.72);
+  --glass-border:   rgba(255, 255, 255, 0.05);
 
   --bg-gradient: linear-gradient(180deg, #3b3832 0%, #36332e 38%, #2f2c27 100%);
 
@@ -384,6 +395,9 @@
   --bg-sunken: #E8D9C4;
   --bg-inset:  #DDD0BC;
 
+  --glass-bg:       rgba(248, 237, 224, 0.75);
+  --glass-border:   rgba(90, 74, 58, 0.08);
+
   --fg:        #5A4A3A;  /* soft brown, not harsh black */
   --fg-muted:  #8A7A6A;
   --fg-subtle: #A89888;
@@ -442,6 +456,11 @@
   --bg-sunken: #070b0b;  /* deep frozen valley */
   --bg-inset:  #1b2d2d;  /* interactive elements */
 
+  --glass-bg:       rgba(18, 30, 30, 0.65);
+  --glass-border:   rgba(0, 255, 196, 0.08);
+  --ambient-orb-1:  radial-gradient(circle, rgba(0, 255, 196, 0.08) 0%, transparent 70%);
+  --ambient-orb-2:  radial-gradient(circle, rgba(0, 180, 216, 0.05) 0%, transparent 70%);
+
   --bg-gradient: linear-gradient(180deg, #101c1c 0%, #0b1212 40%, #060808 100%);
 
   --fg:        #e3f6f3;  /* frosted cyan */
@@ -497,6 +516,11 @@
   --bg-raised: #131221;  /* raised nebula glass panel */
   --bg-sunken: #050409;  /* sunken starlight well */
   --bg-inset:  #1d1b32;  /* dark violet interactive fields */
+
+  --glass-bg:       rgba(19, 18, 33, 0.62);
+  --glass-border:   rgba(192, 132, 252, 0.08);
+  --ambient-orb-1:  radial-gradient(circle, rgba(217, 70, 239, 0.08) 0%, transparent 70%);
+  --ambient-orb-2:  radial-gradient(circle, rgba(6, 182, 212, 0.05) 0%, transparent 70%);
 
   --bg-gradient: linear-gradient(180deg, #120e28 0%, #090810 40%, #050308 100%);
 

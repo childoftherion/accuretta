@@ -31,6 +31,7 @@
     consoleLogs: [],         // [{level, text, t}]
     tokTotal: 0,             // cumulative generated tokens for this session (client-side)
     tokPromptTotal: 0,       // cumulative prompt tokens this session (for cost calc)
+    totalGenDuration: 0,     // cumulative generation duration (seconds) across session
     _streamOutEstimate: 0,   // live output token estimate during streaming (chars/4)
     _streamPromptEstimate: 0,// live prompt token estimate during streaming
     costProvider: "openai",  // selected provider for cost widget
@@ -40,6 +41,7 @@
     _lastMsgTokens: 0,
     _lastMsgPromptTokens: 0,
     _ctxPoll: null,
+    touchedFiles: new Set(),
   };
 
   const app = $("#app");
@@ -1009,8 +1011,8 @@
 
     // extract code fences
     const fences = [];
-    text = text.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_m, lang, code) => {
-      fences.push({ lang: lang || "", code: maybeUnescapeJsonFence(code) });
+    text = text.replace(/```([^\n]+)?\n?([\s\S]*?)```/g, (_m, infoStr, code) => {
+      fences.push({ infoStr: infoStr || "", code: maybeUnescapeJsonFence(code) });
       return `\x00F${fences.length - 1}\x00`;
     });
 
@@ -1142,19 +1144,47 @@
     out = autolinkChatHtml(out);
 
     out = out.replace(/\x00F(\d+)\x00/g, (_, i) => {
-      const { lang, code } = fences[+i];
-      const langLabel = (lang || "").trim();
+      const { infoStr, code } = fences[+i];
+      const langLabel = (infoStr || "").trim().split(/\s+/)[0] || "";
       const displayLang = langLabel ? langLabel.toLowerCase() : "text";
       const highlighted = highlightCode(code, displayLang);
       const lined = wrapCodeLines(highlighted);
+      // Dynamic single-line detection for super compact visual density
+      const isSingleLine = code.trim().split('\n').length <= 1;
+      const singleClass = isSingleLine ? " single-line" : "";
+      
+      // Parse path=<filename> from infoStr
+      const pathMatch = (infoStr || "").match(/path=([^\s]+)/i);
+      const filename = pathMatch ? pathMatch[1] : "";
+      
       // Preview button only useful for HTML/SVG/XML — surface it conditionally.
       const previewBtn = /^(html|xml|svg)$/.test(displayLang)
         ? `<button type="button" class="cc-act cc-preview" title="Open this block in the preview pane"><i class="ph ph-monitor-play"></i><span>Preview</span></button>`
         : "";
+      
+      if (filename) {
+        return `
+          <div class="code-card-tabs-container" data-filename="${esc(filename)}">
+            <div class="code-card-tabs-header">
+              <div class="code-card-tab">
+                <span class="purple-dot"></span>
+                <span>${esc(filename)}</span>
+              </div>
+              <div class="code-card-tab-actions">
+                <button type="button" class="cc-act cc-open-file" title="Open in workspace pane" data-filename="${esc(filename)}"><i class="ph ph-folder-open"></i><span>Open file</span></button>
+                <button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i><span>Copy</span></button>
+                ${previewBtn}
+              </div>
+            </div>
+            <pre class="code-card has-header${singleClass}" data-lang="${esc(displayLang)}"><code class="code-card-body">${lined}</code></pre>
+          </div>
+        `.trim();
+      }
+      
       // Card layout: floating action cluster (top-right), gutter+body row.
       // Buttons live inline so the card has no separate header bar — that
       // was the source of the nested-card feel.
-      return `<pre class="code-card" data-lang="${esc(displayLang)}"><div class="code-card-actions"><button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i></button>${previewBtn}</div><code class="code-card-body">${lined}</code></pre>`;
+      return `<pre class="code-card${singleClass}" data-lang="${esc(displayLang)}"><div class="code-card-actions"><button type="button" class="cc-act cc-copy" title="Copy"><i class="ph ph-copy"></i></button>${previewBtn}</div><code class="code-card-body">${lined}</code></pre>`;
     });
 
     // restore short-term memory blocks as a small icon + italic body
@@ -1607,6 +1637,7 @@
     }
     state.tokTotal = chatOutTok;
     state.tokPromptTotal = chatPromptTok;
+    state.totalGenDuration = 0;
     state._streamOutEstimate = 0;
     state._streamPromptEstimate = 0;
     renderTokTotal();
@@ -1857,7 +1888,15 @@
       const { thinking, content } = splitThinking(visible);
       visible = content;
       if (thinking) {
-        thoughtChip = `<div class="think-line done" data-thinking="${esc(thinking)}"><i class="ph ph-check"></i><span>Thought for a moment</span></div>`;
+        thoughtChip = `
+          <div class="think-container done">
+            <div class="think-header" style="cursor: pointer;">
+              <i class="ph ph-caret-right think-caret"></i>
+              <i class="ph ph-check-circle think-check-icon done"></i>
+              <span class="think-title">Thought for a moment</span>
+            </div>
+            <div class="think-content hidden">${esc(thinking)}</div>
+          </div>`;
       }
     }
 
@@ -1936,9 +1975,31 @@
         return pre.textContent || "";
       };
 
-      // Modern code-card path — buttons emitted by renderMarkdown live inline.
-      const copyAct = pre.querySelector(".cc-copy");
-      const previewAct = pre.querySelector(".cc-preview");
+      // Modern code-card path — buttons emitted by renderMarkdown live inline or in tabs header.
+      const container = pre.closest(".code-card-tabs-container");
+      const copyAct = pre.querySelector(".cc-copy") || container?.querySelector(".cc-copy");
+      const previewAct = pre.querySelector(".cc-preview") || container?.querySelector(".cc-preview");
+      const openAct = container?.querySelector(".cc-open-file");
+
+      if (openAct) {
+        openAct.addEventListener("click", () => {
+          const filename = openAct.dataset.filename;
+          const rootFolder = (state.workspace && state.workspace.folders && state.workspace.folders[0]) || "";
+          if (!rootFolder) {
+            toast("No workspace folder configured", "warn", 2000);
+            return;
+          }
+          if (filename.endsWith(".html")) {
+            previewWorkspaceHtml(rootFolder, filename, filename);
+          } else if (filename.endsWith(".md")) {
+            previewWorkspaceMarkdown(rootFolder, filename, filename);
+          } else if (filename.endsWith(".py")) {
+            runPythonCheck(rootFolder, filename, filename);
+          } else {
+            previewWorkspaceSource(rootFolder, filename, filename);
+          }
+        });
+      }
 
       if (copyAct) {
         copyAct.addEventListener("click", async () => {
@@ -2039,7 +2100,14 @@
     agentRow.innerHTML = `
       ${AGENT_AVATAR_HTML}
       <div class="bubble-col">
-        <div class="think-line" data-label="Thinking"><i class="ph ph-brain"></i><span class="shimmer">Regenerating…</span></div>
+        <div class="think-container think-line">
+          <div class="think-header" style="cursor: pointer;">
+            <i class="ph ph-caret-right think-caret"></i>
+            <i class="ph ph-brain think-check-icon"></i>
+            <span class="think-title shimmer">Regenerating…</span>
+          </div>
+          <div class="think-content hidden"></div>
+        </div>
         <div class="tool-stack" id="tool-stack"></div>
         <div class="bubble agent hidden" id="stream-bubble"></div>
         <div class="bubble-meta streaming">${esc(state.settings.model)} · streaming<span class="typing"><span></span><span></span><span></span></span></div>
@@ -2195,7 +2263,14 @@
     agentRow.innerHTML = `
       ${AGENT_AVATAR_HTML}
       <div class="bubble-col">
-        <div class="think-line" data-label="Thinking"><i class="ph ph-brain"></i><span class="shimmer">Thinking…</span></div>
+        <div class="think-container think-line">
+          <div class="think-header" style="cursor: pointer;">
+            <i class="ph ph-caret-right think-caret"></i>
+            <i class="ph ph-brain think-check-icon"></i>
+            <span class="think-title shimmer">Thinking…</span>
+          </div>
+          <div class="think-content hidden"></div>
+        </div>
         <div class="tool-stack" id="tool-stack"></div>
         <div class="bubble agent hidden" id="stream-bubble"></div>
         <div class="bubble-meta streaming">${esc(state.settings.model)} · streaming<span class="typing"><span></span><span></span><span></span></span></div>
@@ -2230,6 +2305,8 @@
     $("#composer-input").disabled = false; // always allow typing next message
     const comp = document.querySelector(".composer");
     if (comp) comp.classList.toggle("status-thinking", on);
+    renderStatus(0, on ? "streaming" : "idle");
+    appendAgentLog(on ? "Agent streaming started." : "Agent streaming completed.");
   }
 
   function stopStreaming() {
@@ -2459,31 +2536,33 @@
     return { thinking: thinking.trim(), content };
   }
   function updateThinkLine(row, running, label) {
-    const line = row.querySelector(".think-line");
-    if (!line) return;
-    const span = line.querySelector("span");
-    const icon = line.querySelector("i");
-    // Stamp the start time on first running call so we can report "Thought
-    // for Xs" when it finishes. Stash on the DOM element — survives across
-    // the per-event ctx rebuild.
-    if (running && !line._thinkStart) {
-      line._thinkStart = Date.now();
+    const container = row.querySelector(".think-container");
+    if (!container) return;
+    const span = container.querySelector(".think-title");
+    const icon = container.querySelector(".think-check-icon");
+    
+    if (running && !container._thinkStart) {
+      container._thinkStart = Date.now();
     }
     if (!running) {
-      line.classList.add("done");
-      span.classList.remove("shimmer");
-      const elapsed = line._thinkStart ? Math.max(1, Math.round((Date.now() - line._thinkStart) / 1000)) : 0;
+      container.classList.add("done");
+      if (span) span.classList.remove("shimmer");
+      const elapsed = container._thinkStart ? Math.max(1, Math.round((Date.now() - container._thinkStart) / 1000)) : 0;
       const fmt = elapsed >= 60
         ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
         : `${elapsed}s`;
       const finalLabel = elapsed > 0
         ? `Thought for ${fmt}`
         : (label || "Thought for a moment");
-      span.textContent = finalLabel;
-      icon.className = "ph ph-check";
+      if (span) span.textContent = finalLabel;
+      if (icon) {
+        icon.className = "ph ph-check-circle think-check-icon done";
+      }
       return;
     }
-    if (label) span.textContent = label;
+    if (label) {
+      if (span) span.textContent = label;
+    }
   }
   function handleEvent(evt, ctx) {
     const { bubble, toolStack, toolCards, row } = ctx;
@@ -2510,6 +2589,7 @@
           ctx.row._lastTpsUpdate = Date.now();
           const approxTokens = Math.max(1, Math.round(newBuf.length / 4));
           const liveTps = (approxTokens / elapsed).toFixed(1);
+          renderStatus(liveTps, "streaming");
           const meta = ctx.row.querySelector(".bubble-meta.streaming");
           if (meta) {
             const dots = meta.querySelector(".typing");
@@ -2529,6 +2609,10 @@
         // first few words of current thinking snippet, shimmering
         const preview = thinking.split(/\s+/).slice(-12).join(" ");
         updateThinkLine(ctx.row, true, preview || "Thinking…");
+        const thinkContent = ctx.row.querySelector(".think-content");
+        if (thinkContent) {
+          thinkContent.textContent = thinking;
+        }
       }
       if (content.trim()) {
         bubble.classList.remove("hidden");
@@ -2576,6 +2660,14 @@
       }
       scrollToBottom();
     } else if (evt.type === "tool_start") {
+      if (evt.name === "run_powershell") {
+        const cmd = evt.arguments?.command || "";
+        appendTerminalText(`\n$ ${cmd}\n`, false);
+        appendAgentLog(`Command execution started: ${cmd}`);
+      } else {
+        const lbl = toolLabel(evt.name, evt.arguments);
+        appendAgentLog(`Tool started: ${evt.name} -> ${lbl}`);
+      }
       const { group, body } = getOrCreateToolGroup(toolStack);
       const card = document.createElement("div");
       card.className = "tool-line running";
@@ -2601,6 +2693,9 @@
       renderCostWidget();
       scrollToBottom();
     } else if (evt.type === "tool_stream") {
+      if (evt.name === "run_powershell") {
+        appendTerminalText(evt.text || "", false);
+      }
       const cards = Array.from(toolStack.querySelectorAll(".tool-line.running"));
       const card = cards.reverse().find(c => c.dataset.name === evt.name);
       if (card) {
@@ -2617,6 +2712,15 @@
         }
       }
     } else if (evt.type === "tool_result") {
+      if (evt.name === "run_powershell") {
+        const isErr = evt.result && evt.result.error;
+        const exitCode = evt.result && evt.result.exit_code !== undefined ? evt.result.exit_code : (isErr ? 1 : 0);
+        appendTerminalText(`\nCommand finished with exit code ${exitCode}\n`, isErr);
+        appendAgentLog(`Command execution finished: exit code ${exitCode}`);
+      } else {
+        const label = toolResultLabel(evt.name, evt.result);
+        appendAgentLog(`Tool finished: ${evt.name} -> ${label}`);
+      }
       const cards = Array.from(toolStack.querySelectorAll(".tool-line.running"));
       const card = cards.reverse().find(c => c.dataset.name === evt.name);
       if (card) {
@@ -2628,6 +2732,10 @@
         const label = toolResultLabel(evt.name, evt.result);
         card.innerHTML = `${iconHtml}<span>${esc(label)}</span>`;
         if (!isErr && (evt.name === "edit_file" || evt.name === "write_file")) {
+          if (evt.result && evt.result.path) {
+            state.touchedFiles.add(evt.result.path);
+            renderWorkspace();
+          }
           const added = (evt.result && evt.result.added) || 0;
           const deleted = (evt.result && evt.result.deleted) || 0;
           if (added > 0 || deleted > 0) {
@@ -2713,7 +2821,20 @@
     } else if (evt.type === "stats") {
       const tok = evt.eval_count;
       const dur = (evt.eval_duration || 0) / 1e9;
+      if (Number.isFinite(tok)) {
+        state.tokTotal += tok;
+        // Clear streaming estimate — real values have arrived
+        state._streamOutEstimate = 0;
+        state._streamPromptEstimate = 0;
+      }
+      if (dur > 0 && tok > 0) {
+        state.totalGenDuration = (state.totalGenDuration || 0) + dur;
+      }
+      if (Number.isFinite(tok)) {
+        renderTokTotal();
+      }
       const tps = dur > 0 ? (tok / dur).toFixed(1) : "—";
+      renderStatus(tps, "idle");
       const meta = bubble.parentElement.querySelector(".bubble-meta");
       if (meta) {
         meta.textContent = `${state.settings.model} · ${tok} tok · ${tps} tok/s`;
@@ -2723,13 +2844,6 @@
           dots.innerHTML = "<span></span><span></span><span></span>";
           meta.appendChild(dots);
         }
-      }
-      if (Number.isFinite(tok)) {
-        state.tokTotal += tok;
-        // Clear streaming estimate — real values have arrived
-        state._streamOutEstimate = 0;
-        state._streamPromptEstimate = 0;
-        renderTokTotal();
       }
       // accumulate prompt tokens for cost widget
       const promptTok = evt.prompt_eval_count;
@@ -3200,7 +3314,7 @@
   }
 
   // Run a server-side Python syntax check on a workspace .py file. Renders
-  // the result in a dedicated panel: ✓ or ✗ banner + the source with the
+  // the result in a dedicated panel in the bottom pane: ✓ or ✗ banner + the source with the
   // error line highlighted. Never executes the script.
   async function runPythonCheck(root, rel, displayName) {
     if (!root || !rel) return;
@@ -3208,27 +3322,16 @@
     if (app && app.classList.contains("preview-collapsed")) {
       app.classList.remove("preview-collapsed");
     }
-    // hide other views
-    document.getElementById("preview-empty")?.classList.add("hidden");
-    document.getElementById("preview-stage")?.classList.add("hidden");
-    document.getElementById("code-view")?.classList.add("hidden");
-    let pane = document.getElementById("pycheck-pane");
-    if (!pane) {
-      // lazy-create the panel so we don't bloat the empty initial DOM
-      pane = document.createElement("div");
-      pane.id = "pycheck-pane";
-      pane.className = "pycheck-pane";
-      pane.innerHTML = `
-        <div class="pycheck-banner" id="pycheck-banner">checking…</div>
-        <pre class="pycheck-code" id="pycheck-code"><code></code></pre>`;
-      document.getElementById("preview-body")?.appendChild(pane);
-    }
-    pane.classList.remove("hidden");
-    const banner = pane.querySelector("#pycheck-banner");
-    const codeEl = pane.querySelector("#pycheck-code code");
+    const banner = document.getElementById("pycheck-banner");
+    const codeEl = document.getElementById("pycheck-code")?.querySelector("code");
+    if (!banner || !codeEl) return;
+
     banner.className = "pycheck-banner pending";
     banner.textContent = `checking ${displayName || rel}…`;
     codeEl.textContent = "";
+    // Ensure the inner pycheck-pane is visible (other preview functions hide it)
+    document.getElementById("pycheck-pane")?.classList.remove("hidden");
+    activateTerminalTab("pycheck");
 
     let res;
     try {
@@ -3283,15 +3386,10 @@
       banner.innerHTML = `<strong>SyntaxError</strong>${esc(at)}: ${esc(res.msg || "unknown")} · ${esc(res.file || displayName || rel)}`;
       // scroll to the error line
       requestAnimationFrame(() => {
-        const errEl = pane.querySelector(".pyc-line.err");
+        const errEl = document.getElementById("pycheck-pane")?.querySelector(".pyc-line.err");
         if (errEl) errEl.scrollIntoView({ block: "center", behavior: "smooth" });
       });
     }
-    state.workspacePreview = null;
-    const pill = document.getElementById("preview-url");
-    if (pill) pill.textContent = `pycheck · ${displayName || rel}`;
-    const meta = document.getElementById("preview-meta");
-    if (meta) meta.textContent = `python syntax · ${displayName || rel}`;
   }
 
   // Hide every right-pane mode and lazy-create or return the doc-preview pane
@@ -3819,11 +3917,14 @@
         actions += `<button class="tree-action ws-preview-source" title="View formatted source in the panel">${SVG_EYE}</button>`;
       }
     }
+    const hasBadge = state.touchedFiles.has(entry.path);
+    const badgeHtml = hasBadge ? `<span class="ws-badge-m" title="Modified by agent">M</span>` : "";
     node.innerHTML = `
       <div class="tree-row" title="${esc(entry.path)}">
         ${chev}
         <i class="ph ${icon} tree-icon"></i>
         <span class="tree-name">${esc(entry.name)}</span>
+        ${badgeHtml}
         ${actions ? `<span class="tree-actions">${actions}</span>` : ""}
       </div>
       ${entry.is_dir ? `<div class="tree-children" hidden></div>` : ""}`;
@@ -5066,10 +5167,105 @@
     if (sideIcon) sideIcon.className = iconClass;
   }
 
-  function renderStatus() {
-    // status pill was removed; keep function as a no-op shim so callers still work,
-    // and update the context gauge since token counts may have changed.
+  function activateTerminalTab(tabId) {
+    const tabs = document.querySelectorAll(".term-tab");
+    const panes = document.querySelectorAll(".term-tab-pane");
+    
+    tabs.forEach(tab => {
+      const active = tab.dataset.tab === tabId;
+      tab.classList.toggle("active", active);
+    });
+    
+    panes.forEach(pane => {
+      const active = pane.id === `term-pane-${tabId}`;
+      pane.classList.toggle("hidden", !active);
+    });
+  }
+
+  function appendTerminalText(text, isError) {
+    const consolePre = document.getElementById("term-console-pre");
+    if (!consolePre) return;
+    const codeEl = consolePre.querySelector("code");
+    if (!codeEl) return;
+    
+    const cursor = consolePre.querySelector(".term-cursor");
+    
+    let safeText = esc(text);
+    if (isError) {
+      safeText = `<span class="term-err">${safeText}</span>`;
+    }
+    
+    if (cursor) {
+      cursor.insertAdjacentHTML("beforebegin", safeText);
+    } else {
+      codeEl.insertAdjacentHTML("beforeend", safeText);
+    }
+    
+    consolePre.scrollTop = consolePre.scrollHeight;
+    activateTerminalTab("terminal");
+  }
+
+  function appendAgentLog(msg) {
+    const agentLogPre = document.getElementById("term-agent-log-pre");
+    if (!agentLogPre) return;
+    const codeEl = agentLogPre.querySelector("code") || agentLogPre;
+    
+    const timestamp = new Date().toLocaleTimeString();
+    const safeMsg = esc(msg);
+    
+    codeEl.insertAdjacentHTML("beforeend", `[${timestamp}] ${safeMsg}<br>`);
+    agentLogPre.scrollTop = agentLogPre.scrollHeight;
+  }
+
+  function renderStatus(speed, stateStr) {
     renderCtxGauge();
+    
+    const statusLine = document.getElementById("status-line");
+    if (!statusLine) return;
+    
+    const isStreaming = !!state.streaming || stateStr === "streaming";
+    const statusText = stateStr || (isStreaming ? "streaming" : "idle");
+    
+    const modelName = state.settings.model || "no model loaded";
+    
+    const ctxLimitVal = Number(state.settings.num_ctx) || 32768;
+    const ctxLimit = ctxLimitVal >= 1024 ? Math.round(ctxLimitVal / 1024) + "k" : ctxLimitVal;
+    
+    let speedText = "- tok/s";
+    if (isStreaming) {
+      if (speed && speed > 0) {
+        speedText = `${Number(speed).toFixed(1)} tok/s`;
+      } else if (state._lastTps && state._lastTps > 0) {
+        speedText = `${Number(state._lastTps).toFixed(1)} tok/s`;
+      }
+    } else {
+      // Idle state: show average tok/s of the session
+      if (state.totalGenDuration && state.totalGenDuration > 0 && state.tokTotal && state.tokTotal > 0) {
+        const avg = state.tokTotal / state.totalGenDuration;
+        speedText = `${avg.toFixed(1)} tok/s`;
+      } else {
+        speedText = "- tok/s";
+      }
+    }
+    
+    const heartbeatSvg = `
+      <svg class="heartbeat-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+      </svg>
+    `;
+    
+    statusLine.innerHTML = `
+      <div class="status-item"><i class="ph ph-cpu"></i><span>${esc(modelName)}</span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item"><i class="ph ph-database"></i><span>${ctxLimit} ctx</span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item"><i class="ph ph-lightning"></i><span>${speedText}</span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item status-state ${isStreaming ? 'is-streaming' : ''}">
+        ${heartbeatSvg}
+        <span>${statusText}</span>
+      </div>
+    `;
   }
   function renderCtxGauge() {
     const arc = $("#ctx-gauge-arc");
@@ -5126,21 +5322,12 @@
     "mistral":   { label: "Mistral",   input:  2.00, output:   5.00 },  // Magistral Medium
   };
 
-  function calcCost(provider, scope = "alltime") {
+  function calcCost(provider) {
     const p = CLOUD_PRICING[provider];
     if (!p) return 0;
-    
-    let promptTok = 0;
-    let outTok = 0;
-    
-    if (scope === "session") {
-      promptTok = state.tokPromptTotal + (state._streamPromptEstimate || 0);
-      outTok = state.tokTotal + (state._streamOutEstimate || 0);
-    } else {
-      promptTok = state._allTimeTokIn + (state._streamPromptEstimate || 0);
-      outTok = state._allTimeTokOut + (state._streamOutEstimate || 0);
-    }
-    
+    // Use all-time persistent totals + any live streaming estimate
+    const promptTok = state._allTimeTokIn + (state._streamPromptEstimate || 0);
+    const outTok = state._allTimeTokOut + (state._streamOutEstimate || 0);
     const inCost  = (promptTok / 1_000_000) * p.input;
     const outCost = (outTok / 1_000_000) * p.output;
     return inCost + outCost;
@@ -5154,27 +5341,42 @@
     } catch {}
   }
 
+  // Calculate session-only cost (uses session token counters, not all-time)
+  function calcSessionCost(provider) {
+    const p = CLOUD_PRICING[provider];
+    if (!p) return 0;
+    const promptTok = state.tokPromptTotal + (state._streamPromptEstimate || 0);
+    const outTok = state.tokTotal + (state._streamOutEstimate || 0);
+    const inCost  = (promptTok / 1_000_000) * p.input;
+    const outCost = (outTok / 1_000_000) * p.output;
+    return inCost + outCost;
+  }
+
   function renderCostWidget() {
-    const elSession = $("#cost-amount-session");
-    const elAllTime = $("#cost-amount-alltime");
-    
-    if (elSession) {
-      const sessionCost = calcCost(state.costProvider, "session");
-      elSession.textContent = sessionCost < 0.005 ? "$0.00" : "$" + sessionCost.toFixed(2);
-      elSession.classList.toggle("zero", sessionCost < 0.005);
-    }
-    
-    if (elAllTime) {
-      const allTimeCost = calcCost(state.costProvider, "alltime");
-      elAllTime.textContent = allTimeCost < 0.005 ? "$0.00" : "$" + allTimeCost.toFixed(2);
-      elAllTime.classList.toggle("zero", allTimeCost < 0.005);
-    }
-    
-    // Update the "saved vs" label with provider name
+    const el = $("#cost-amount");
+    if (!el) return;
+    const allTimeCost = calcCost(state.costProvider);
+    const sessionCost = calcSessionCost(state.costProvider);
+    // Main big number = all-time total
+    el.textContent = allTimeCost < 0.005 ? "$0.00" : "$" + allTimeCost.toFixed(2);
+    el.classList.toggle("zero", allTimeCost < 0.005);
+
+    // Update the "saved vs" label dynamically with the provider name
     const label = $("#cost-widget .cost-widget-label");
     if (label) {
       const p = CLOUD_PRICING[state.costProvider];
-      label.textContent = `saved vs ${p ? p.label : state.costProvider}`;
+      label.textContent = `Saved Vs ${p ? p.label : state.costProvider} Cost`;
+    }
+
+    // Session row
+    const sessionEl = $("#cost-session");
+    if (sessionEl) {
+      sessionEl.textContent = sessionCost < 0.005 ? "$0.00" : "$" + sessionCost.toFixed(2);
+    }
+    // All-time row
+    const alltimeEl = $("#cost-alltime");
+    if (alltimeEl) {
+      alltimeEl.textContent = allTimeCost < 0.005 ? "$0.00" : "$" + allTimeCost.toFixed(2);
     }
   }
 
@@ -6129,6 +6331,110 @@
     $("#btn-mem-add")?.addEventListener("click", addMemoryFromInput);
     $("#mem-add-text")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); addMemoryFromInput(); }
+    });
+    // ----- vertical preview/terminal splitter -----
+    const vResizer = $("#preview-v-resizer");
+    if (vResizer) {
+      let dragging = false;
+      const endDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        vResizer.classList.remove("dragging");
+        document.body.style.userSelect = "";
+        try { vResizer.releasePointerCapture?.(vResizer._pid); } catch {}
+        localStorage.setItem("accuretta:terminal-h", app.style.getPropertyValue("--terminal-h"));
+      };
+      vResizer.addEventListener("pointerdown", (e) => {
+        dragging = true;
+        vResizer._pid = e.pointerId;
+        try { vResizer.setPointerCapture(e.pointerId); } catch {}
+        vResizer.classList.add("dragging");
+        document.body.style.userSelect = "none";
+        e.preventDefault();
+      });
+      vResizer.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const bodyRect = $("#preview-body")?.getBoundingClientRect();
+        if (bodyRect) {
+          const h = Math.max(100, Math.min(bodyRect.height * 0.8, bodyRect.bottom - e.clientY));
+          app.style.setProperty("--terminal-h", h + "px");
+        }
+      });
+      vResizer.addEventListener("pointerup", endDrag);
+      vResizer.addEventListener("pointercancel", endDrag);
+      window.addEventListener("blur", endDrag);
+      const saved = localStorage.getItem("accuretta:terminal-h");
+      if (saved) app.style.setProperty("--terminal-h", saved);
+    }
+
+    // ----- terminal pane tab buttons -----
+    document.querySelectorAll(".term-tab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const tabId = btn.dataset.tab;
+        activateTerminalTab(tabId);
+      });
+    });
+
+    // ----- clear active terminal console -----
+    $("#btn-term-clear")?.addEventListener("click", () => {
+      const activeTab = document.querySelector(".term-tab.active");
+      if (!activeTab) return;
+      const tabId = activeTab.dataset.tab;
+      if (tabId === "terminal") {
+        const consolePre = document.getElementById("term-console-pre");
+        if (consolePre) {
+          const codeEl = consolePre.querySelector("code");
+          if (codeEl) {
+            codeEl.innerHTML = `$ <span class="term-cursor"></span>`;
+          }
+        }
+      } else if (tabId === "pycheck") {
+        const banner = document.getElementById("pycheck-banner");
+        const codeEl = document.getElementById("pycheck-code")?.querySelector("code");
+        if (banner) {
+          banner.className = "pycheck-banner pending";
+          banner.textContent = "No python check run yet. Run check from a .py file in the workspace.";
+        }
+        if (codeEl) {
+          codeEl.textContent = "";
+        }
+      } else if (tabId === "agentlog") {
+        const logPre = document.getElementById("term-agent-log-pre");
+        if (logPre) {
+          const codeEl = logPre.querySelector("code") || logPre;
+          codeEl.innerHTML = "";
+        }
+      }
+    });
+
+    // ----- collapsible reasoning header click delegation -----
+    $("#chat-inner")?.addEventListener("click", (e) => {
+      const thinkHeader = e.target.closest(".think-header");
+      if (!thinkHeader) return;
+      const container = thinkHeader.closest(".think-container");
+      if (!container) return;
+      const content = container.querySelector(".think-content");
+      if (!content) return;
+      
+      const isHidden = content.classList.toggle("hidden");
+      const caret = thinkHeader.querySelector(".think-caret");
+      if (caret) {
+        if (isHidden) {
+          caret.className = "ph ph-caret-right think-caret";
+        } else {
+          caret.className = "ph ph-caret-down think-caret";
+        }
+      }
+    });
+
+    // ----- topbar back navigation chevron -----
+    $("#btn-back-chevron")?.addEventListener("click", () => {
+      if (isMobile()) {
+        state.mobileTab = "sessions";
+        applyMobileTab();
+      } else {
+        app.classList.toggle("sidebar-collapsed");
+      }
     });
 
     // ----- mobile toolbar overflow -----
