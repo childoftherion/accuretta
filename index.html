@@ -18,6 +18,12 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <!-- PWA manifest — picks up app-icon-192 + app-icon-512 from the same dir. -->
 <link rel="manifest" href="/manifest.webmanifest">
+<script>
+  (function () {
+    var theme = localStorage.getItem('accuretta:theme') || 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
 <link rel="stylesheet" href="/app.css?v=6">
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js" defer></script>
@@ -33,7 +39,8 @@
 <div class="splash" id="splash" role="status" aria-label="Loading Accuretta">
   <div class="splash-stack">
     <div class="splash-row">
-      <img class="splash-logo" src="/logo-mark-dark.png" alt="" aria-hidden="true">
+      <img class="splash-logo splash-logo-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
+      <img class="splash-logo splash-logo-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
       <span class="splash-wordmark">accuretta</span>
     </div>
     <div class="splash-bars" aria-hidden="true">

@@ -479,6 +479,25 @@ def get_workspace() -> dict:
     if not isinstance(ws, dict):
         ws = {"folders": []}
     ws.setdefault("folders", [])
+    
+    # If no workspace folder is configured (first run or none selected),
+    # automatically create and select "Accuretta Workspace" in the Documents folder.
+    folders = [f for f in ws["folders"] if isinstance(f, str) and f.strip()]
+    if not folders:
+        try:
+            doc_dir = Path(os.path.expanduser("~/Documents")).resolve()
+            if not doc_dir.exists():
+                doc_dir = Path.home() / "Documents"
+            
+            workspace_dir = doc_dir / "Accuretta Workspace"
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            
+            default_folder = normalize_path(str(workspace_dir))
+            ws["folders"] = [default_folder]
+            save_json(WORKSPACE_FILE, ws)
+        except Exception as e:
+            print(f"Error creating default workspace directory: {e}")
+            
     return ws
 
 
@@ -9185,8 +9204,9 @@ class Handler(BaseHTTPRequestHandler):
             folders = body.get("folders") or []
             folders = [normalize_path(f) for f in folders if isinstance(f, str) and f.strip()]
             save_json(WORKSPACE_FILE, {"folders": folders})
+            resolved_ws = get_workspace()
             broadcast_event({"type": "workspace:update"})
-            return self._send_json(200, {"folders": folders})
+            return self._send_json(200, resolved_ws)
         if p == "/api/save-to-workspace":
             # Direct save of preview HTML to a workspace folder. Skips the
             # model loop entirely — the frontend "Save to workspace" button
@@ -9710,6 +9730,8 @@ class Handler(BaseHTTPRequestHandler):
                 chat["title"] = _title_from_prompt(user_text)
                 broadcast_event({"type": "chat:rename", "chat_id": chat_id, "title": chat["title"]})
             user_msg: dict = {"role": "user", "content": user_text, "t": int(time.time())}
+            if body.get("invisible"):
+                user_msg["invisible"] = True
             if vision_native:
                 # Stored as data URLs so replay on the next turn (or after a
                 # reload) reattaches them. Frontend stripped non-image fields

@@ -1452,7 +1452,7 @@
       await newChat();
     }
 
-    applyTheme(state.settings.theme || "dark");
+    applyTheme(state.settings.theme || "light");
     renderStatus();
     renderModelPill();
     renderChatList();
@@ -1536,6 +1536,9 @@
   // ---------- data loading ----------
   async function loadSettings() {
     state.settings = await api("/api/settings");
+    if (state.settings && state.settings.theme) {
+      localStorage.setItem("accuretta:theme", state.settings.theme);
+    }
   }
   async function saveSettings(update) {
     const prevModel = state.settings.model;
@@ -1762,7 +1765,7 @@
       { kind: "cmd", icon: "ph-gear-six", label: "Open Settings", action: () => { closePalette(); openSettings(); } },
       { kind: "cmd", icon: "ph-brain", label: "Open Long-term memory", action: () => { closePalette(); openSettings(); setTimeout(() => $("#btn-mem-refresh")?.scrollIntoView({ behavior: "smooth" }), 80); } },
       { kind: "cmd", icon: "ph-arrow-counter-clockwise", label: "Regenerate last reply", action: () => { closePalette(); regenerateLast(); } },
-      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / aurora / nebula / soft / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "dark"); await saveSettings({ theme: next }); applyTheme(next); } },
+      { kind: "cmd", icon: "ph-moon", label: "Cycle theme (dark / dim / aurora / nebula / soft / light)", action: async () => { closePalette(); const next = nextTheme(state.settings.theme || "light"); await saveSettings({ theme: next }); applyTheme(next); } },
       { kind: "cmd", icon: "ph-browser", label: "Toggle preview pane", action: () => { closePalette(); app.classList.toggle("preview-collapsed"); } },
       { kind: "cmd", icon: "ph-camera", label: "Screenshot preview", action: () => { closePalette(); screenshotPreview(); } },
       { kind: "cmd", icon: "ph-package", label: "Export project", action: () => { closePalette(); exportProjectZip(); } },
@@ -1859,20 +1862,293 @@
     inner.innerHTML = "";
     if (!state.messages.length) {
       inner.innerHTML = `
-        <div class="bubble-row">
-          ${AGENT_AVATAR_HTML}
-          <div class="bubble-col">
-            <div class="bubble agent">Welcome to Accuretta. What would you like to do today?</div>
+        <div class="welcome-screen">
+          <div class="welcome-blobs">
+            <div class="welcome-blob welcome-blob-1"></div>
+            <div class="welcome-blob welcome-blob-2"></div>
+          </div>
+          <canvas id="welcome-canvas"></canvas>
+          <div class="welcome-content">
+            <div class="welcome-logo-wrap">
+              <img class="welcome-logo welcome-logo-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
+              <img class="welcome-logo welcome-logo-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
+            </div>
+            <h1 class="welcome-title">accuretta</h1>
+            <p class="welcome-subtitle">Welcome to Accuretta. What would you like to do today?</p>
+            <div class="welcome-suggestions">
+              <button class="welcome-suggest-btn" data-prompt="Design a landing page for my product using HTML, CSS and JS.">
+                <div class="welcome-suggest-icon-wrap">
+                  <i class="ph ph-layout"></i>
+                </div>
+                <span>Design a landing page</span>
+              </button>
+              <button class="welcome-suggest-btn" data-prompt="Create a Python backend script using FastAPI that serves a simple database.">
+                <div class="welcome-suggest-icon-wrap">
+                  <i class="ph ph-database"></i>
+                </div>
+                <span>Create a Python backend</span>
+              </button>
+              <button class="welcome-suggest-btn" data-prompt="Help me debug a memory leak in my application.">
+                <div class="welcome-suggest-icon-wrap">
+                  <i class="ph ph-bug"></i>
+                </div>
+                <span>Debug a memory leak</span>
+              </button>
+            </div>
           </div>
         </div>`;
+      initWelcomeScreen();
       scrollToBottom(true);
       return;
     }
     for (const m of state.messages) {
+      if (m.invisible) continue;
       inner.appendChild(renderBubble(m));
     }
     renderRegenerateChip();
     scrollToBottom(true);
+  }
+
+  function initWelcomeScreen() {
+    // 1. Suggestion buttons trigger instant invisible submission with an ether animation
+    document.querySelectorAll(".welcome-suggest-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const prompt = btn.dataset.prompt;
+
+        // Apply stylish "sent to the ether" disintegrating transition
+        const screen = document.querySelector(".welcome-screen");
+        if (screen) {
+          screen.classList.add("welcome-disintegrating");
+          document.querySelectorAll(".welcome-suggest-btn").forEach(b => {
+            if (b === btn) {
+              b.classList.add("clicked-ether");
+            } else {
+              b.classList.add("fade-out-ether");
+            }
+          });
+        }
+
+        setTimeout(() => {
+          send({ prompt, invisible: true });
+        }, 650);
+      });
+    });
+
+    // 2. WebGL Animation
+    initWelcomeWebGL();
+  }
+
+  function initWelcomeWebGL() {
+    const canvas = document.getElementById("welcome-canvas");
+    if (!canvas) return;
+
+    let gl;
+    try {
+      gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+    } catch (e) {
+      console.warn("WebGL not supported by this browser. Falling back to CSS blobs.");
+      return;
+    }
+    if (!gl) {
+      console.warn("WebGL context creation failed. Falling back to CSS blobs.");
+      return;
+    }
+
+    const vsSource = `
+      attribute vec2 position;
+      void main() {
+        gl_Position = vec4(position, 0.0, 1.0);
+      }
+    `;
+
+    const fsSource = `
+      precision mediump float;
+      uniform vec2 u_resolution;
+      uniform float u_time;
+      uniform vec2 u_mouse;
+      uniform vec3 u_accent_color;
+      uniform vec3 u_bg_color;
+
+      void main() {
+        vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+        vec2 st = uv * 2.0 - 1.0;
+        st.x *= u_resolution.x / u_resolution.y;
+
+        // Ethereal wide-spread slow-drifting trajectories (less concentrated)
+        float t = u_time * 0.14;
+        vec2 c1 = vec2(sin(t * 0.7) * 0.75, cos(t * 0.5) * 0.55);
+        vec2 c2 = vec2(cos(t * 0.6 + 2.0) * 0.85, sin(t * 0.8) * 0.65);
+        vec2 c3 = vec2(sin(t * 0.4 - 1.0) * 0.65, cos(t * 0.9 + 1.5) * 0.45);
+
+        // Lower spatial scaling factor for wide, organic glowing light fields instead of thick blobs
+        float f1 = exp(-length(st - c1) * 1.25);
+        float f2 = exp(-length(st - c2) * 1.45);
+        float f3 = exp(-length(st - c3) * 1.05);
+
+        // Combined field density
+        float density = f1 + f2 + f3;
+
+        // Faint complementary tones derived by shifting the active theme accent color channels
+        // This ensures the extra tones remain perfectly suitable for the selected theme
+        vec3 colorShift1 = vec3(u_accent_color.z, u_accent_color.x, u_accent_color.y);
+        vec3 colorShift2 = vec3(u_accent_color.y, u_accent_color.z, u_accent_color.x);
+
+        // Animated spectral dispersion (like light shining through a glass prism)
+        // RIppling 3-phase sine wave shifted by 120 degrees per color channel
+        float spectrumPhase = dot(st, vec2(0.4, 0.8)) * 1.3 + u_time * 0.22;
+        float specAmp = 0.11; // Faint, subtle spectrum glow
+        vec3 spectrum = vec3(
+          sin(spectrumPhase) * specAmp + specAmp,
+          sin(spectrumPhase + 2.094) * specAmp + specAmp,
+          sin(spectrumPhase + 4.188) * specAmp + specAmp
+        );
+
+        // Base intensity mapping (max 0.22 prominence for gorgeous background integration)
+        float intensity = smoothstep(0.1, 0.95, density) * 0.22;
+
+        // Blend primary accent and shifted pastel tones based on spatial field densities
+        vec3 blobColor = mix(u_accent_color, colorShift1, f1 / (density + 0.001));
+        blobColor = mix(blobColor, colorShift2, f2 / (density + 0.001));
+
+        // Inject the faint rainbow spectrum wash
+        blobColor += spectrum * (density * 0.16);
+
+        // Smooth viewport vignette to avoid harsh edge boundaries
+        float vignette = smoothstep(2.5, 0.5, length(st));
+        intensity *= vignette;
+
+        // Final color composition with background
+        vec3 color = mix(u_bg_color, blobColor, intensity);
+
+        // A faint luminous highlight when cores overlap (refraction clash glow)
+        float clashGlow = smoothstep(1.3, 2.6, density) * 0.07 * vignette;
+        vec3 superchargedHighlight = u_accent_color * 1.4 + vec3(0.08, 0.08, 0.12);
+        color = mix(color, superchargedHighlight, clashGlow);
+
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+
+    function compileShader(source, type) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error("Shader compile error:", gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+
+    const vs = compileShader(vsSource, gl.VERTEX_SHADER);
+    const fs = compileShader(fsSource, gl.FRAGMENT_SHADER);
+    if (!vs || !fs) return;
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("Program link error:", gl.getProgramInfoLog(program));
+      return;
+    }
+    gl.useProgram(program);
+
+    const vertices = new Float32Array([
+      -1, -1,   1, -1,  -1,  1,
+      -1,  1,   1, -1,   1,  1
+    ]);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    const posAttr = gl.getAttribLocation(program, "position");
+    gl.enableVertexAttribArray(posAttr);
+    gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
+
+    const uResolution = gl.getUniformLocation(program, "u_resolution");
+    const uTime = gl.getUniformLocation(program, "u_time");
+    const uMouse = gl.getUniformLocation(program, "u_mouse");
+    const uAccentColor = gl.getUniformLocation(program, "u_accent_color");
+    const uBgColor = gl.getUniformLocation(program, "u_bg_color");
+
+    let mouseX = canvas.width / 2;
+    let mouseY = canvas.height / 2;
+    let targetMouseX = mouseX;
+    let targetMouseY = mouseY;
+
+    function getThemeColors() {
+      const styles = getComputedStyle(document.documentElement);
+      
+      function hexToRgb(hex) {
+        hex = hex.trim();
+        if (hex.startsWith("rgba")) {
+          const m = hex.match(/\d+/g);
+          return m ? [parseInt(m[0])/255, parseInt(m[1])/255, parseInt(m[2])/255] : [1, 1, 1];
+        }
+        if (hex.startsWith("#")) {
+          if (hex.length === 4) {
+            const r = parseInt(hex[1] + hex[1], 16) / 255;
+            const g = parseInt(hex[2] + hex[2], 16) / 255;
+            const b = parseInt(hex[3] + hex[3], 16) / 255;
+            return [r, g, b];
+          }
+          const r = parseInt(hex.substring(1, 3), 16) / 255;
+          const g = parseInt(hex.substring(3, 5), 16) / 255;
+          const b = parseInt(hex.substring(5, 7), 16) / 255;
+          return [r, g, b];
+        }
+        return [0.5, 0.5, 0.5];
+      }
+
+      const accent = styles.getPropertyValue("--accent") || "#B8A3F2";
+      const bg = styles.getPropertyValue("--bg") || "#1a1a1d";
+
+      return {
+        accent: hexToRgb(accent),
+        bg: hexToRgb(bg)
+      };
+    }
+
+    function resize() {
+      const displayWidth = canvas.clientWidth;
+      const displayHeight = canvas.clientHeight;
+      if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth;
+        canvas.height = displayHeight;
+        gl.viewport(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    const startTime = performance.now();
+
+    function render(now) {
+      if (!document.getElementById("welcome-canvas")) {
+        return;
+      }
+
+      resize();
+
+      const elapsed = (now - startTime) / 1000;
+
+      mouseX += (targetMouseX - mouseX) * 0.1;
+      mouseY += (targetMouseY - mouseY) * 0.1;
+
+      const colors = getThemeColors();
+
+      gl.uniform2f(uResolution, canvas.width, canvas.height);
+      gl.uniform1f(uTime, elapsed);
+      gl.uniform2f(uMouse, mouseX, mouseY);
+      gl.uniform3fv(uAccentColor, colors.accent);
+      gl.uniform3fv(uBgColor, colors.bg);
+
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
   }
 
   function renderBubble(m) {
@@ -2217,10 +2493,10 @@
   }
 
   // ---------- send / stream ----------
-  async function send() {
+  async function send(opts = {}) {
     if (state.streaming) return;
     const ta = $("#composer-input");
-    let text = ta.value.trim();
+    let text = opts.prompt !== undefined ? opts.prompt.trim() : ta.value.trim();
 
     // "review this UI" → auto-capture the preview iframe and attach as an image
     // so the vision model actually sees it. Skip if the user already attached
@@ -2241,8 +2517,10 @@
       openSettings();
       return;
     }
-    ta.value = "";
-    autoResize(ta);
+    if (opts.prompt === undefined) {
+      ta.value = "";
+      autoResize(ta);
+    }
     if (state.chatId) localStorage.removeItem("accuretta:draft:" + state.chatId);
     state.pendingImages = [];
     renderImageTray();
@@ -2252,8 +2530,20 @@
       ? (text ? `${text}\n\n📎 ${images.length} image${images.length > 1 ? "s" : ""} attached` : `📎 ${images.length} image${images.length > 1 ? "s" : ""} attached`)
       : text;
     const userMsg = { role: "user", content: bubbleText, t: Math.floor(Date.now() / 1000) };
+    if (opts.invisible) {
+      userMsg.invisible = true;
+    }
     state.messages.push(userMsg);
-    $("#chat-inner").appendChild(renderBubble(userMsg));
+
+    // Clear welcome screen visually if we are about to append the agent stream bubble
+    const welcome = document.querySelector("#chat-inner .welcome-screen");
+    if (welcome) {
+      $("#chat-inner").innerHTML = "";
+    }
+
+    if (!opts.invisible) {
+      $("#chat-inner").appendChild(renderBubble(userMsg));
+    }
     scrollToBottom(true);
     renderCtxGauge();
 
@@ -2283,7 +2573,7 @@
     setStreamingUI(true);
 
     try {
-      await streamChat(text, agentRow, state.abortCtl.signal, images);
+      await streamChat(text, agentRow, state.abortCtl.signal, images, opts);
     } catch (e) {
       const b = agentRow.querySelector("#stream-bubble") || agentRow.querySelector(".bubble");
       if (b) {
@@ -2370,7 +2660,7 @@
       span.textContent = `${currentIdle}… ${total}s`;
     }, 1000);
 
-    const resp = await fetch("/api/chat", {
+     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2379,6 +2669,7 @@
         mode: state.mode,
         images: (images || []).map(x => x.dataUrl),
         regenerate,
+        invisible: !!(opts && opts.invisible),
       }),
       signal,
     });
@@ -5002,7 +5293,7 @@
     $("#sw-thinking")?.classList.toggle("on", s.enable_thinking !== false);
     fill("#set-think-budget", s.thinking_budget ?? 2048);
     const themeSel = $("#set-theme");
-    if (themeSel) themeSel.value = s.theme || "dark";
+    if (themeSel) themeSel.value = s.theme || "light";
     $("#sw-web").classList.toggle("on", s.allow_web_preview !== false);
 
     // IDE toggles mirror back into the composer chips
@@ -5086,7 +5377,7 @@
       frequency_penalty: n("#set-frequency"),
       enable_thinking: $("#sw-thinking")?.classList.contains("on") !== false,
       thinking_budget: n("#set-think-budget"),
-      theme: ($("#set-theme")?.value || "dark"),
+      theme: ($("#set-theme")?.value || "light"),
       allow_web_preview: $("#sw-web").classList.contains("on"),
       desktop_enabled: $("#sw-desktop-enabled")?.classList.contains("on") || false,
       desktop_app_allowlist: ($("#set-desktop-allowlist")?.value || "")
@@ -5102,7 +5393,7 @@
     const changedLoadKeys = LOAD_TIME_KEYS.filter(k => String(prev[k] ?? "") !== String(payload[k] ?? ""));
 
     await saveSettings(payload);
-    applyTheme(payload.theme || "dark");
+    applyTheme(payload.theme || "light");
 
     if (changedLoadKeys.length && payload.model_path) {
       const tid = "reload-llama";
@@ -5155,9 +5446,10 @@
   function applyTheme(theme) {
     if (theme === true) theme = "dark";
     else if (theme === false) theme = "light";
-    if (!THEME_CYCLE.includes(theme)) theme = "dark";
+    if (!THEME_CYCLE.includes(theme)) theme = "light";
     document.documentElement.dataset.theme = theme;
-    const iconClass = THEME_ICONS[theme] || THEME_ICONS.dark;
+    localStorage.setItem("accuretta:theme", theme);
+    const iconClass = THEME_ICONS[theme] || THEME_ICONS.light;
     const topBtn = $("#btn-theme");
     if (topBtn) topBtn.innerHTML = `<i class="${iconClass}"></i>`;
     // Keep the sidebar-foot mirror in sync. We only swap the inner <i>'s
@@ -5991,7 +6283,7 @@
       // OLED-safe pick for users who find pure white too harsh; first
       // click from the dark default lands there instead of jumping
       // straight to bright light.
-      const next = nextTheme(state.settings.theme || "dark");
+      const next = nextTheme(state.settings.theme || "light");
       await saveSettings({ theme: next });
       applyTheme(next);
     });
@@ -6218,7 +6510,7 @@
       // Mobile menu shows the NEXT theme as the action label
       // ("Switch to dim", "Switch to light", "Switch to dark") so the
       // user knows what the tap will do, mirroring the desktop cycle.
-      const cur = document.documentElement.getAttribute("data-theme") || "dark";
+      const cur = document.documentElement.getAttribute("data-theme") || "light";
       const next = nextTheme(cur);
       const niceName = { dark: "Dark", dim: "Dim", light: "Light" }[next] || next;
       const lbl = $("#mm-theme-label");
