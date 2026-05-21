@@ -620,9 +620,10 @@
         <option value="nebula">Nebula</option>
         <option value="soft">Soft</option>
         <option value="light">Light</option>
-        <option value="aurora">Aurora</option>
-        <option value="nebula">Nebula</option>
       </select>
+    </div>
+    <div class="form-row">
+      <button class="btn sm" id="btn-run-setup-wizard" type="button"><i class="ph ph-magic-wand"></i>Run Setup Wizard</button>
     </div>
 
     <div class="form-group" style="display:flex;align-items:center;gap:8px;">
@@ -1039,6 +1040,15 @@
       overlay.style.display = 'none';
       localStorage.setItem('accuretta:settings', '1');
     });
+
+    // Run Setup Wizard button from Settings
+    var runSetupBtn = document.getElementById('btn-run-setup-wizard');
+    if (runSetupBtn) {
+      runSetupBtn.addEventListener('click', function() {
+        localStorage.setItem('accuretta:settings', 'force');
+        location.reload();
+      });
+    }
   })();
 </script>
 </body>
