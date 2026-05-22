@@ -5521,12 +5521,20 @@ body.is-mobile {
     padding: 0 10px;
   }
 
+  .bubble-row .avatar {
+    display: none !important;
+  }
+
   .bubble-col {
-    max-width: 88%;
+    max-width: 92%;
+  }
+
+  .bubble-meta {
+    font-size: 10.5px;
   }
 
   .bubble {
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.45;
   }
 
@@ -7885,13 +7893,15 @@ body,
   }
 
   .composer {
-    background: color-mix(in srgb, var(--bg-raised) 75%, transparent);
+    background: var(--glass-bg) !important;
+    backdrop-filter: blur(var(--glass-blur));
+    -webkit-backdrop-filter: blur(var(--glass-blur));
     border-color: color-mix(in srgb, var(--border-strong) 30%, transparent);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.12);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   }
 
   .composer:focus-within {
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25), 0 0 0 4px var(--accent-subtle);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35), 0 0 0 4px var(--accent-subtle), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
 }
 
@@ -8590,6 +8600,7 @@ body,
   right: 12px;
   height: 2px;
   background: var(--accent);
+  box-shadow: 0 -2px 10px var(--accent), 0 0 4px var(--accent);
 }
 .term-tab i {
   font-size: 12px;
@@ -8606,10 +8617,16 @@ body,
   right: 0;
   bottom: 0;
   overflow: auto;
-  padding: 8px 12px;
+  padding: 16px 20px;
   background: var(--bg-sunken);
   /* Prevent terminal black from bleeding into preview pane above */
   contain: paint;
+}
+
+@media (max-width: 600px) {
+  .term-tab-pane {
+    padding: 8px 12px;
+  }
 }
 .term-tab-pane.hidden {
   display: none;
