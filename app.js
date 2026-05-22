@@ -3336,6 +3336,7 @@
     $("#preview-meta").textContent = "—";
     $("#preview-size").textContent = "—";
     $("#preview-frame").classList.add("hidden");
+    $("#preview-stage").classList.add("hidden");
     $("#code-view").classList.add("hidden");
     document.getElementById("pycheck-pane")?.classList.add("hidden");
     document.getElementById("doc-preview-pane")?.classList.add("hidden");
