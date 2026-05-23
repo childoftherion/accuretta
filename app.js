@@ -1134,7 +1134,8 @@
     let out = blocks.join("")
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/`([^`]+)`/g, "<code>$1</code>");
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, '<img src="$2" alt="$1">');
 
     // Autolink URLs into clickable chips with hover preview. Runs BEFORE
     // fence restoration so URLs that the model embedded inside ``` blocks
@@ -3706,7 +3707,11 @@
       pane.innerHTML = `
         <div class="doc-preview-banner" id="doc-preview-banner"></div>
         <div class="doc-preview-body" id="doc-preview-body"></div>`;
-      document.getElementById("preview-body")?.appendChild(pane);
+      const pBody = document.getElementById("preview-body");
+      if (pBody) {
+        const resizer = document.getElementById("preview-v-resizer");
+        pBody.insertBefore(pane, resizer);
+      }
     }
     pane.classList.remove("hidden");
     return pane;
@@ -5494,7 +5499,8 @@
       codeEl.insertAdjacentHTML("beforeend", safeText);
     }
     
-    consolePre.scrollTop = consolePre.scrollHeight;
+    const pane = consolePre.closest('.term-tab-pane');
+    if (pane) pane.scrollTop = pane.scrollHeight;
     activateTerminalTab("terminal");
   }
 
@@ -5507,7 +5513,8 @@
     const safeMsg = esc(msg);
     
     codeEl.insertAdjacentHTML("beforeend", `[${timestamp}] ${safeMsg}<br>`);
-    agentLogPre.scrollTop = agentLogPre.scrollHeight;
+    const pane = agentLogPre.closest('.term-tab-pane');
+    if (pane) pane.scrollTop = pane.scrollHeight;
   }
 
   function renderStatus(speed, stateStr) {

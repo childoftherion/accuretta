@@ -1579,6 +1579,38 @@ def tool_read_file(args: dict) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+def _run_linter(path: str) -> str:
+    """Run a fast linter on the file. Returns error message if failed, empty string if passed."""
+    import subprocess
+    ext = os.path.splitext(path)[1].lower()
+    
+    if ext == ".py":
+        try:
+            res = subprocess.run(["flake8", "--isolated", "--select=E9,F821,F822,F823", path], capture_output=True, text=True, timeout=5)
+            if res.returncode != 0:
+                return f"flake8 syntax/name error:\n{res.stdout.strip()}"
+        except Exception:
+            pass
+            
+    elif ext in [".js", ".jsx", ".ts", ".tsx"]:
+        dirpath = os.path.dirname(path)
+        has_pkg = False
+        while dirpath and dirpath != os.path.dirname(dirpath):
+            if os.path.isfile(os.path.join(dirpath, "package.json")):
+                has_pkg = True
+                break
+            dirpath = os.path.dirname(dirpath)
+            
+        if has_pkg:
+            try:
+                cmd = ["npx", "--no", "eslint", path]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if res.returncode != 0:
+                    return f"eslint error:\n{res.stdout.strip()}"
+            except Exception:
+                pass
+    return ""
+
 
 def tool_write_file(args: dict) -> dict:
     path = normalize_path(args.get("path") or "")
@@ -1624,6 +1656,10 @@ def tool_write_file(args: dict) -> dict:
             elif line.startswith('-') and not line.startswith('---'):
                 deleted += 1
                 
+        lint_err = _run_linter(path)
+        if lint_err:
+            return {"error": f"File written, BUT linter found errors. Please fix them immediately:\n{lint_err}"}
+            
         return {"ok": True, "path": path, "bytes": len(content.encode("utf-8")), "added": added, "deleted": deleted}
     except Exception as e:
         return {"error": str(e)}
@@ -1727,6 +1763,11 @@ def tool_edit_file(args: dict) -> dict:
                 deleted += 1
 
         Path(path).write_text(modified, encoding="utf-8")
+        
+        lint_err = _run_linter(path)
+        if lint_err:
+            return {"error": f"Edit applied, BUT linter found errors. Please fix them immediately:\n{lint_err}"}
+            
         return {
             "ok": True,
             "path": path,
@@ -1737,6 +1778,197 @@ def tool_edit_file(args: dict) -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+
+def tool_replace_ast_node(args: dict) -> dict:
+    """Surgical AST-based replacement. Provide path, node_type, node_name, and new_text."""
+    path = normalize_path(args.get("path") or "")
+    node_type = args.get("node_type") or ""
+    node_name = args.get("node_name") or ""
+    new_text = args.get("new_text", "")
+    
+    if not path or not node_type or not node_name or not new_text:
+        return {"error": "Missing required arguments: path, node_type, node_name, new_text"}
+        
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        import tree_sitter
+    except ImportError:
+        return {"error": "tree-sitter is not installed. Please pip install tree-sitter"}
+        
+    lang_module = None
+    if ext == ".py":
+        try:
+            import tree_sitter_python
+            lang_module = tree_sitter_python.language()
+        except ImportError:
+            pass
+    elif ext in [".js", ".jsx"]:
+        try:
+            import tree_sitter_javascript
+            lang_module = tree_sitter_javascript.language()
+        except ImportError:
+            pass
+    elif ext in [".ts", ".tsx"]:
+        try:
+            import tree_sitter_typescript
+            lang_module = tree_sitter_typescript.language_typescript() if ext == ".ts" else tree_sitter_typescript.language_tsx()
+        except ImportError:
+            pass
+            
+    if not lang_module:
+        return {"error": f"AST editing not supported for file extension {ext} or tree-sitter plugin missing"}
+        
+    try:
+        lang = tree_sitter.Language(lang_module)
+        parser = tree_sitter.Parser(lang)
+    except Exception as e:
+        return {"error": f"Failed to initialize tree-sitter parser: {e}"}
+    
+    try:
+        source_bytes = Path(path).read_bytes()
+    except Exception as e:
+        return {"error": f"Failed to read file: {e}"}
+        
+    tree = parser.parse(source_bytes)
+    
+    found_node = None
+    def traverse(node):
+        nonlocal found_node
+        if found_node:
+            return
+        if node.type == node_type:
+            name_node = node.child_by_field_name('name')
+            if name_node and name_node.text.decode('utf8') == node_name:
+                found_node = node
+                return
+            for child in node.children:
+                if child.type == 'identifier' and child.text.decode('utf8') == node_name:
+                    found_node = node
+                    return
+        for child in node.children:
+            traverse(child)
+            
+    traverse(tree.root_node)
+    
+    if not found_node:
+        return {"error": f"Could not find node of type '{node_type}' with name '{node_name}'"}
+        
+    start = found_node.start_byte
+    end = found_node.end_byte
+    
+    new_bytes = source_bytes[:start] + new_text.encode('utf8') + source_bytes[end:]
+    
+    approval = request_approval(
+        title="AST Replace",
+        command=f'Replace {node_type} {node_name} in {os.path.basename(path)}',
+        details={"kind": "replace_ast_node", "path": path, "preview": new_text[:200] + "..."},
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied edit ({approval.get('status')})"}
+        
+    Path(path).write_bytes(new_bytes)
+    
+    lint_err = _run_linter(path)
+    if lint_err:
+        return {"error": f"AST replaced, BUT linter found errors. Please fix them immediately:\n{lint_err}"}
+        
+    return {"ok": True, "path": path, "replaced_node": node_name}
+
+
+def tool_find_references(args: dict) -> dict:
+    """Find deterministic references to a symbol using AST."""
+    symbol = args.get("symbol") or ""
+    if not symbol:
+        return {"error": "Missing symbol string"}
+        
+    import tree_sitter
+    try:
+        import tree_sitter_python
+        lang_py = tree_sitter.Language(tree_sitter_python.language())
+    except ImportError:
+        lang_py = None
+        
+    try:
+        import tree_sitter_javascript
+        lang_js = tree_sitter.Language(tree_sitter_javascript.language())
+    except ImportError:
+        lang_js = None
+        
+    try:
+        import tree_sitter_typescript
+        lang_ts = tree_sitter.Language(tree_sitter_typescript.language_typescript())
+        lang_tsx = tree_sitter.Language(tree_sitter_typescript.language_tsx())
+    except ImportError:
+        lang_ts = None
+        lang_tsx = None
+        
+    hits = []
+    folders = get_workspace().get("folders", [])
+    if not folders:
+        return {"error": "No workspace folders configured"}
+        
+    target_bytes = symbol.encode('utf8')
+        
+    for folder in folders:
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not is_ignored(os.path.join(root, d))]
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                if is_ignored(fpath):
+                    continue
+                    
+                ext = os.path.splitext(fname)[1].lower()
+                lang = None
+                if ext == ".py":
+                    lang = lang_py
+                elif ext in [".js", ".jsx"]:
+                    lang = lang_js
+                elif ext == ".ts":
+                    lang = lang_ts
+                elif ext == ".tsx":
+                    lang = lang_tsx
+                    
+                if not lang:
+                    continue
+                    
+                try:
+                    content = Path(fpath).read_bytes()
+                except Exception:
+                    continue
+                    
+                if target_bytes not in content:
+                    continue
+                    
+                try:
+                    parser = tree_sitter.Parser(lang)
+                    tree = parser.parse(content)
+                except Exception:
+                    continue
+                
+                code_lines = content.decode('utf8', errors='replace').splitlines()
+                
+                def traverse(node):
+                    if len(node.children) == 0 and node.text == target_bytes:
+                        line_start = node.start_point[0]
+                        if line_start < len(code_lines):
+                            hits.append({
+                                "file": fpath,
+                                "line": line_start + 1,
+                                "code": code_lines[line_start].strip()
+                            })
+                    for child in node.children:
+                        traverse(child)
+                traverse(tree.root_node)
+                
+    unique_hits = []
+    seen = set()
+    for h in hits:
+        k = (h["file"], h["line"])
+        if k not in seen:
+            seen.add(k)
+            unique_hits.append(h)
+            
+    return {"symbol": symbol, "matches": unique_hits[:100]}
 
 
 def tool_delete_file(args: dict) -> dict:
@@ -5879,6 +6111,31 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_edit_file,
     },
+    "replace_ast_node": {
+        "description": "Surgical AST-based replacement. Provide path, node_type, node_name, and new_text. The tool will parse the file using tree-sitter, find the exact node, and replace its bounds with your new text without relying on line numbers.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "node_type": {"type": "string", "description": "e.g., function_definition, class_definition, function_declaration"},
+                "node_name": {"type": "string", "description": "The exact identifier name of the function or class"},
+                "new_text": {"type": "string", "description": "The complete replacement code for the node"},
+            },
+            "required": ["path", "node_type", "node_name", "new_text"],
+        },
+        "fn": tool_replace_ast_node,
+    },
+    "find_references": {
+        "description": "Find deterministic references to a symbol (function, class, variable) across the workspace using AST. Returns exact files and line numbers.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "The exact identifier name to search for (e.g. renderMarkdown)"},
+            },
+            "required": ["symbol"],
+        },
+        "fn": tool_find_references,
+    },
     "delete_file": {
         "description": "Delete a file or folder. Requires user approval.",
         "parameters": {
@@ -7587,38 +7844,33 @@ def describe_image(b64: str, hint: str = "") -> str:
             b64_clean = b64
     else:
         b64_clean = b64
-        data_url = f"data:image/png;base64,{b64}"
     _ = b64_clean  # kept for future (raw b64 endpoints)
-    prompt = (
-        "Describe this image precisely and completely. "
-        "Transcribe ALL visible text verbatim. "
-        "Describe UI elements (buttons, menus, labels, errors) and their state. "
-        "Note window titles, app names, and any numbers/versions shown. "
-        "Be factual — do not invent."
-    )
+    prompt_text = "Describe this image in detail."
     if hint:
-        prompt += f"\n\nContext from user: {hint}"
+        prompt_text = f"Describe this image. Context: {hint}"
+        
     payload = {
         "model": "vision",
-        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_clean}"}},
+                    {"type": "text", "text": prompt_text}
+                ]
+            }
+        ],
         "temperature": 0.1,
         "max_tokens": 768,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }],
     }
     try:
         out = llama_post("/v1/chat/completions", payload, base=VISION_LLAMA, timeout=180)
-        choices = out.get("choices") or []
-        if choices:
-            msg = choices[0].get("message") or {}
-            text = (msg.get("content") or "").strip()
-            if text:
-                return text
+        if isinstance(out, dict):
+            choices = out.get("choices") or []
+            if choices:
+                text = (choices[0].get("message") or {}).get("content", "").strip()
+                if text:
+                    return text
         return "[image attached — empty description]"
     except Exception as e:
         return f"[image attached — vision llama-server at {VISION_LLAMA} failed: {e}]"
@@ -7761,6 +8013,31 @@ desktop automation — the agent can see and drive the screen when enabled:
 - every action respects the global panic/kill switch. if any tool
   returns a panic error, stop the whole task and tell the user.
 
+behavioral guidelines to reduce common coding mistakes:
+- tradeoff: these guidelines bias toward caution over speed. for trivial tasks, use judgment.
+- think before coding: don't assume. don't hide confusion. surface tradeoffs.
+  * state your assumptions explicitly. if uncertain, ask.
+  * if multiple interpretations exist, present them - don't pick silently.
+  * if a simpler approach exists, say so. push back when warranted.
+  * if something is unclear, stop. name what's confusing. ask.
+- simplicity first: minimum code that solves the problem. nothing speculative.
+  * no features beyond what was asked.
+  * no abstractions for single-use code.
+  * no "flexibility" or "configurability" that wasn't requested.
+  * no error handling for impossible scenarios.
+  * if you write 200 lines and it could be 50, rewrite it.
+  * ask yourself: "would a senior engineer say this is overcomplicated?" if yes, simplify.
+- surgical changes: touch only what you must. clean up only your own mess.
+  * when editing existing code: don't "improve" adjacent code, comments, or formatting.
+  * don't refactor things that aren't broken.
+  * match existing style, even if you'd do it differently.
+  * if you notice unrelated dead code, mention it - don't delete it.
+  * when your changes create orphans: remove imports/variables/functions that YOUR changes made unused. don't remove pre-existing dead code unless asked.
+  * the test: every changed line should trace directly to the user's request.
+- goal-driven execution: define success criteria. loop until verified.
+  * transform tasks into verifiable goals (e.g. "Fix the bug" -> "Write a test that reproduces it, then make it pass").
+  * strong success criteria let you loop independently. weak criteria require constant clarification.
+
 keep responses tight. when reporting results, use the voice above.
 """
 
@@ -7878,6 +8155,16 @@ rules:
 
 keep responses tight."""
     parts.append(core)
+
+    # === EMOTION STICKERS ===
+    parts.append("""visual stickers:
+you may occasionally append exactly one of these to the very end of your response. do NOT use regular unicode emojis.
+- ![celebrate](/accuMOTION/accu_CELEBRATE.png)
+- ![cool](/accuMOTION/accu_COOL.png)
+- ![frustrated](/accuMOTION/accu_FRUSTRATED.png)
+- ![happy](/accuMOTION/accu_HAPPY.png)
+- ![like](/accuMOTION/accu_LIKE.png)
+- ![tired](/accuMOTION/accu_TIRED.png)""")
 
     # === MODE-SPECIFIC ADDENDUM (only when relevant) ===
     if chat_mode == "ide" or (chat_mode == "auto" and include_tools is False):
@@ -8824,7 +9111,7 @@ class Handler(BaseHTTPRequestHandler):
             if p.startswith("/api/"):
                 return self._handle_api_get(p, parsed)
             name = p.lstrip("/")
-            if name in STATIC_WHITELIST:
+            if name in STATIC_WHITELIST or name.startswith("accuMOTION/"):
                 return self._serve_static(name)
             return self._send_json(404, {"error": "not found"})
         except Exception as e:
@@ -9367,6 +9654,7 @@ class Handler(BaseHTTPRequestHandler):
                 # logs/UI look nicer with a clean name.)
                 s["model"] = Path(target).stem
                 save_json(SETTINGS_FILE, s)
+                _start_vision_fallback_if_needed(s)
                 broadcast_event({"type": "models:update", "loaded_model": target})
             return self._send_json(200 if res.get("ok") else 500, res)
         if p == "/api/models/stop":
@@ -9374,6 +9662,7 @@ class Handler(BaseHTTPRequestHandler):
             # so a perfectly healthy llama doesn't immediately respawn 5s
             # later. The next /api/models/load re-arms the watchdog.
             _llama.stop_permanent()
+            _vision_llama.stop_permanent()
             broadcast_event({"type": "models:update", "loaded_model": ""})
             return self._send_json(200, {"ok": True})
         if p == "/api/models/watchdog":
@@ -10315,16 +10604,14 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
     notes.append(f"VRAM budget: {vram:.1f} GB · usable {budget_mb/1024:.1f} GB ({int(headroom*100)}% of total).")
 
     # -- KV cache dtype --
-    # q8_0 is the quality/cost sweet spot. Drop to q4_0 only when very tight.
-    if size_gb > vram * 1.2 and vram <= 12:
-        out["kv_cache_type"] = "q4_0"
-        notes.append("KV cache: q4_0 (model >> VRAM; every MB counts).")
-    elif vram >= 24 and size_gb < vram * 0.4:
+    # q8_0 is the quality/cost sweet spot. We enforce it as a minimum to
+    # guarantee zero perplexity loss, sacrificing context length instead if tight.
+    if vram >= 24 and size_gb < vram * 0.4:
         out["kv_cache_type"] = "f16"
         notes.append("KV cache: f16 (you have headroom).")
     else:
         out["kv_cache_type"] = "q8_0"
-        notes.append("KV cache: q8_0 (best quality/size balance).")
+        notes.append("KV cache: q8_0 (zero perplexity loss baseline).")
 
     # -- Context window + n_cpu_moe (joint optimization) --
     # The two settings are coupled: bigger ctx eats more KV cache VRAM, which
@@ -10333,9 +10620,9 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
     # gives the user "biggest context that's still fast" instead of the old
     # "fixed 45%-of-budget cap that left context on the table".
     kv_per_1k = _kv_per_1k_mb(profile, out["kv_cache_type"], size_gb)
-    # Compute buffer: ~1 GB for activations, scratch, CUDA workspace,
-    # attention work area. Empirically sufficient for the models we target.
-    compute_buf_mb = 1024.0
+    # Compute buffer: ~1.5 GB for activations, scratch, CUDA workspace,
+    # attention work area. Padded to accommodate explicit 512+ ubatch sizing.
+    compute_buf_mb = 1536.0
     size_mb = size_gb * 1024
     # Tier ladder. We deliberately do NOT cap to GGUF-reported trained_max —
     # many GGUFs report a conservative trained context that the model handles
@@ -10499,12 +10786,15 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
     # too small for hybrid CPU/GPU.
     if out["n_cpu_moe"] > 0 or (not is_moe and out["num_gpu"] < 99):
         out["num_batch"] = 2048
-        out["n_ubatch"] = 2048
-        notes.append("batch/ubatch: 2048 (offloading — bigger batches amortize PCIe).")
+        notes.append("batch: 2048 (offloading).")
     elif vram >= 24:
         out["num_batch"] = 2048
     elif vram >= 16:
         out["num_batch"] = 1024
+        
+    # Explicitly lock micro-batch to 512. Higher values on CPU-offloaded MoEs
+    # cause massive L3 cache thrashing and RAM bandwidth bottlenecks.
+    out["n_ubatch"] = 512
 
     out["notes"] = " ".join(notes)
     return out
@@ -10985,7 +11275,9 @@ class LlamaProcess:
             print(f"[watchdog] restart failed: {res.get('error')}", file=sys.stderr)
 
     def start(self, model_path: str, wait: bool = True, wait_seconds: int = 120,
-              _from_watchdog: bool = False) -> dict:
+              _from_watchdog: bool = False,
+              port_override: int = 0, mmproj_override: str = None,
+              ctx_override: int = 0, ngl_override: int = -1) -> dict:
         # Thin wrapper that guards the call with the _starting flag so the
         # watchdog leaves us alone while a transition is in flight. Setting
         # the flag BEFORE reset_circuit_breaker() and BEFORE the inner stop()
@@ -10998,13 +11290,19 @@ class LlamaProcess:
         try:
             return self._start_impl(model_path=model_path, wait=wait,
                                     wait_seconds=wait_seconds,
-                                    _from_watchdog=_from_watchdog)
+                                    _from_watchdog=_from_watchdog,
+                                    port_override=port_override,
+                                    mmproj_override=mmproj_override,
+                                    ctx_override=ctx_override,
+                                    ngl_override=ngl_override)
         finally:
             self._starting = False
 
     def _start_impl(self, model_path: str, wait: bool = True,
                     wait_seconds: int = 120,
-                    _from_watchdog: bool = False) -> dict:
+                    _from_watchdog: bool = False,
+                    port_override: int = 0, mmproj_override: str = None,
+                    ctx_override: int = 0, ngl_override: int = -1) -> dict:
         # User-initiated start clears the circuit breaker and re-enables the
         # watchdog. Watchdog-initiated retries skip this so each attempt
         # counts toward the crash limit (otherwise the breaker never trips).
@@ -11017,19 +11315,19 @@ class LlamaProcess:
             return {"ok": False, "error": f"model not found: {model_path}"}
 
         s = get_settings()
-        port = _parse_llama_port()
+        port = port_override if port_override > 0 else _parse_llama_port()
         # Cap ctx to keep KV cache from blowing past VRAM. A 256k ctx with f16
         # KV on a 16-attn-head model burns ~16 GiB by itself, leaving nothing
         # for the weights and forcing layer offload to system RAM. 32k is a
         # sane chat default; users who want more can raise it knowing the cost.
         # Context size. Users can crank this past 65k now that --n-cpu-moe lets
         # them spill model weights instead of KV cache. Hard ceiling is 1M tokens.
-        ctx_raw = int(s.get("num_ctx") or 32768)
+        ctx_raw = ctx_override if ctx_override > 0 else int(s.get("num_ctx") or 32768)
         ctx = min(max(ctx_raw, 512), 1_048_576) if ctx_raw > 0 else 32768
         n_batch = max(int(s.get("num_batch") or 2048), 32)
         n_ubatch_raw = int(s.get("n_ubatch") or 0)
         n_ubatch = n_ubatch_raw if n_ubatch_raw > 0 else min(max(n_batch // 2, 512), 1024)
-        ngl_setting = int(s.get("num_gpu") or 99)
+        ngl_setting = ngl_override if ngl_override >= 0 else int(s.get("num_gpu") or 99)
         ngl = -1 if ngl_setting >= 99 else ngl_setting
         n_threads = int(s.get("num_thread") or 0)  # 0 = let llama-server pick
         n_parallel = max(int(s.get("n_parallel") or 1), 1)
@@ -11096,7 +11394,7 @@ class LlamaProcess:
         # mmproj_auto is on, the default) we look for a sibling mmproj.gguf
         # next to the model. Empty string means "text-only model" — chat
         # handler will fall back to the side-vision describe_image() path.
-        mmproj_path = (s.get("mmproj_path") or "").strip()
+        mmproj_path = mmproj_override if mmproj_override is not None else (s.get("mmproj_path") or "").strip()
         if mmproj_path and not safe_exists(mmproj_path):
             print(f"[llama] WARN mmproj_path set but missing: {mmproj_path} — ignoring")
             mmproj_path = ""
@@ -11117,7 +11415,7 @@ class LlamaProcess:
 
         # If something *else* is squatting on the port (e.g. user launched
         # llama-server manually before bridge), refuse rather than fight it.
-        if llama_ping(timeout=0.8):
+        if llama_ping(timeout=0.8, base_url=f"http://127.0.0.1:{port}"):
             return {"ok": False, "error": f"port {port} already in use by another llama-server. Stop it first."}
 
         cmd = [
@@ -11141,6 +11439,11 @@ class LlamaProcess:
             # Loads the vision tower + projector. After this, /v1/chat/completions
             # accepts {type:"image_url", image_url:{url:"data:..."}} content blocks.
             cmd += ["--mmproj", mmproj_path]
+            if "moondream" in Path(model_path).stem.lower():
+                # Moondream 2 lacks a built-in jinja template that works out of the box
+                # with llama.cpp's multi-modal message extraction, causing it to
+                # instantly output a stop token or hallucinate if we don't supply one.
+                cmd += ["--chat-template", "Question: {{messages[0].content}}\n\nAnswer:"]
         if n_threads > 0:
             cmd += ["-t", str(n_threads)]
         if n_cpu_moe > 0:
@@ -11228,6 +11531,10 @@ class LlamaProcess:
             "model_path": model_path,
             "wait": False,
             "wait_seconds": wait_seconds,
+            "port_override": port_override,
+            "mmproj_override": mmproj_override,
+            "ctx_override": ctx_override,
+            "ngl_override": ngl_override,
         }
         self._ensure_watchdog()
 
@@ -11250,11 +11557,14 @@ class LlamaProcess:
 
 
 _llama = LlamaProcess()
+_vision_llama = LlamaProcess()
 
 
-def llama_ping(timeout: float = 2.0) -> bool:
+def llama_ping(timeout: float = 2.0, base_url: str = None) -> bool:
+    if base_url is None:
+        base_url = LLAMA
     try:
-        with urllib.request.urlopen(f"{LLAMA}/v1/models", timeout=timeout) as r:
+        with urllib.request.urlopen(f"{base_url}/v1/models", timeout=timeout) as r:
             r.read(1)
         return True
     except Exception:
@@ -11280,6 +11590,43 @@ def wait_for_llama(wait_seconds: int = 30) -> bool:
             print(f"  waiting for llama-server at {LLAMA} ...")
             printed = True
     return False
+
+
+def _start_vision_fallback_if_needed(s: dict) -> None:
+    global VISION_LLAMA
+    v_model = (s.get("vision_model") or "").strip()
+    if not v_model or not safe_exists(v_model):
+        return
+    if os.environ.get("VISION_LLAMA_HOST"):
+        return
+    
+    main_port = _parse_llama_port()
+    v_port = main_port + 1
+    
+    v_stem = Path(v_model).stem.lower()
+    if "qwen2-vl" in v_stem or "qwen2.5-vl" in v_stem or "pixtral" in v_stem or "llava" in v_stem:
+        v_mmproj = ""
+    else:
+        try:
+            v_mmproj = find_mmproj_for(v_model)
+        except Exception:
+            v_mmproj = ""
+        
+    print(f"  spawning vision fallback server with {os.path.basename(v_model)} on port {v_port} ...")
+    res = _vision_llama.start(
+        model_path=v_model,
+        wait=False,
+        wait_seconds=60,
+        port_override=v_port,
+        mmproj_override=v_mmproj,
+        ctx_override=4096,
+        ngl_override=0
+    )
+    if res.get("ok"):
+        VISION_LLAMA = f"http://127.0.0.1:{v_port}"
+        print(f"  vision fallback: started (pid {res.get('pid')}) at {VISION_LLAMA}")
+    else:
+        print(f"  [warn] vision fallback didn't start: {res.get('error')}")
 
 
 # ---- main ------------------------------------------------------------------
@@ -11322,6 +11669,7 @@ def main():
         res = _llama.start(last_model, wait=True, wait_seconds=120)
         if res.get("ok"):
             print(f"  llama-server: ready (pid {res.get('pid')})")
+            _start_vision_fallback_if_needed(s_initial)
         else:
             print(f"  [warn] llama-server didn't start: {res.get('error')}")
             print(f"         pick a different model or update settings via the UI.")
@@ -11345,6 +11693,8 @@ def main():
     import atexit
     atexit.register(_llama.stop)
     atexit.register(_llama.shutdown_watchdog)
+    atexit.register(_vision_llama.stop)
+    atexit.register(_vision_llama.shutdown_watchdog)
 
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     httpd.daemon_threads = True
@@ -11443,10 +11793,12 @@ def main():
         # subprocess death and try to "heal" it during shutdown.
         try:
             _llama.shutdown_watchdog()
+            _vision_llama.shutdown_watchdog()
         except Exception:
             pass
         try:
             _llama.stop()
+            _vision_llama.stop()
         except Exception:
             pass
 

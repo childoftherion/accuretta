@@ -45,3 +45,12 @@ pyghidra>=1.4.0           # Decompile and analyze native libraries in-process vi
 # ------------------------------------------------------------------------------
 pypdf>=3.0.0              # Standard PDF text extraction
 pdfplumber>=0.10.0        # Advanced PDF table extraction and layout preservation
+
+# ------------------------------------------------------------------------------
+# Agentic Code Manipulation (Optional)
+# ------------------------------------------------------------------------------
+tree-sitter>=0.22.0       # AST parsing for code editing and deterministic referencing
+tree-sitter-python        # Python grammar for AST parsing
+tree-sitter-javascript    # JavaScript grammar for AST parsing
+tree-sitter-typescript    # TypeScript/React grammar for AST parsing
+flake8>=7.3.0             # Fast local python linter for the auto-healing loop
