@@ -371,7 +371,7 @@
     }
     // Make sure summary is computed (running flag is now false).
     updateToolGroupHead(stack);
-    group.classList.add("done-pill");
+    
     // Reset the head icon back to the wrench — in finalized state the strip
     // represents "tools the model used" generically, not a specific live tool.
     const iconSlot = group.querySelector(".tool-group-icon");
@@ -404,10 +404,12 @@
       // tool_start label). Don't overwrite mid-run.
       activity.hidden = false;
       summary.hidden = true;
+      group.classList.remove("done-pill");
     } else {
       icon?.classList.remove("spinning");
       activity.hidden = true;
       summary.hidden = false;
+      group.classList.add("done-pill");
       // Count commands separately from other tools so the summary reads as
       // "X tools · Y commands" — the user's exact ask.
       let cmd = 0, tools = 0;
@@ -416,10 +418,38 @@
         else tools++;
       });
       const parts = [];
-      if (tools > 0) parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
-      if (cmd > 0) parts.push(`${cmd} command${cmd === 1 ? "" : "s"}`);
-      if (err > 0) parts.push(`${err} failed`);
-      summary.textContent = parts.length ? parts.join(" · ") : `${done} step${done === 1 ? "" : "s"}`;
+      let html = "";
+      
+      // Get compressed messages count from row, if any
+      const row = group.closest(".bubble-row");
+      const dropped = row && row.dataset.dropped ? parseInt(row.dataset.dropped, 10) : 0;
+      
+      if (dropped > 0) {
+        html += `<span class="summary-item"><i class="ph ph-arrows-in-line-horizontal"></i> ${dropped} msgs</span>`;
+      }
+      if (tools > 0) {
+        if (html) html += `<span class="dot-sep"></span>`;
+        html += `<span class="summary-item"><i class="ph ph-gear"></i> ${tools}</span>`;
+      }
+      if (cmd > 0) {
+        if (html) html += `<span class="dot-sep"></span>`;
+        // Replace SVG width/height or just use it raw. 
+        // The user asked to use TOOL_SVG.running_command.
+        html += `<span class="summary-item cmd-item">${TOOL_SVG.running_command} ${cmd}</span>`;
+      }
+      if (err > 0) {
+        if (html) html += `<span class="dot-sep"></span>`;
+        html += `<span class="summary-item err-item"><i class="ph ph-warning"></i> ${err} failed</span>`;
+        group.classList.add("has-err");
+      } else {
+        group.classList.remove("has-err");
+      }
+      
+      if (html) {
+        summary.innerHTML = html;
+      } else {
+        summary.textContent = `${done} step${done === 1 ? "" : "s"}`;
+      }
     }
   }
 
@@ -3105,6 +3135,10 @@
         }
         const text = pill.querySelector(".ctx-trim-text");
         if (text) text.textContent = `${evt.dropped} message${evt.dropped === 1 ? "" : "s"} summarized`;
+        row.dataset.dropped = evt.dropped;
+        // Re-render tool group head if it exists to pick up the dropped count
+        const stack = row.querySelector(".tool-stack");
+        if (stack) updateToolGroupHead(stack);
       }
     } else if (evt.type === "version_saved") {
       state.versions.push(evt.version);
@@ -3214,6 +3248,7 @@
               finalBubble.innerHTML = `<pre style="white-space:pre-wrap;font-family:inherit;margin:0;">${esc(finalContent)}</pre>`;
             }
             enhanceCodeBlocks(finalBubble);
+            setTimeout(() => scrollToBottom(true), 50);
           }
           updateThinkLine(lastRow, false);
         }
@@ -6147,6 +6182,7 @@
   function wireEvents() {
     $("#btn-new-chat").addEventListener("click", newChat);
     $("#btn-settings").addEventListener("click", openSettings);
+    $("#btn-settings-m")?.addEventListener("click", openSettings);
     $("#btn-close-settings").addEventListener("click", closeSettings);
     $("#drawer-scrim").addEventListener("click", closeSettings);
     $("#btn-cmd-history")?.addEventListener("click", openCmdHistory);
@@ -6471,7 +6507,14 @@
     $("#btn-toggle-preview").addEventListener("click", () => app.classList.toggle("preview-collapsed"));
 
     // sidebar toggles
-    $("#btn-toggle-sidebar").addEventListener("click", () => app.classList.add("sidebar-collapsed"));
+    $("#btn-toggle-sidebar").addEventListener("click", () => {
+      if (isMobile()) {
+        state.mobileTab = "chat";
+        applyMobileTab();
+      } else {
+        app.classList.add("sidebar-collapsed");
+      }
+    });
     $("#btn-toggle-sidebar-m").addEventListener("click", () => {
       if (isMobile()) {
         state.mobileTab = "sessions";

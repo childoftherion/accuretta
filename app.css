@@ -8,6 +8,10 @@
   box-sizing: border-box;
 }
 
+button, a, input, select, textarea, [role="button"] {
+  touch-action: manipulation;
+}
+
 html,
 body {
   margin: 0;
@@ -422,16 +426,44 @@ button {
   height: 20px;
 }
 
-.chatlist {
+.sidebar-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   overflow-y: auto;
-  flex: 1 1 40%;
-  min-height: 60px;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.chatlist {
+  display: flex;
+  flex-direction: column;
 }
 
 .chatrow {
   display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-family: var(--font-sans);
   cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+  margin: 0 6px 2px;
+}
+
+.chatrow:hover {
+  background: var(--bg-inset);
+  color: var(--fg);
+}
+
+.chatrow.active {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .chatrow .t {
@@ -456,12 +488,23 @@ button {
 
 /* workspace section (bottom half) */
 .workspace {
-  border-top: 1px solid var(--border);
-  overflow-y: auto;
-  flex: 1 1 40%;
-  min-height: 80px;
   display: flex;
   flex-direction: column;
+}
+
+.sidebar-divider {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 12px 14px;
+  display: block;
+}
+
+.side-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  margin-top: auto; /* Pushes stats and foot to the bottom if content is short */
 }
 
 .ws-root {
@@ -701,7 +744,6 @@ button {
 }
 
 .side-foot {
-  border-top: 1px solid var(--border);
   padding: 6px 10px 8px;
   display: flex;
   flex-direction: column;
@@ -1055,45 +1097,40 @@ button {
 
 
 
-.ctx-gauge::before,
+.ctx-gauge-title,
+.ctx-gauge-body,
 .ctx-gauge-label,
 .ctx-gauge svg {
   position: relative;
   z-index: 1;
 }
 
-
-.ctx-gauge::before {
-  content: "Context Memory" !important;
-  grid-column: 1;
-  grid-row: 1;
-
+.ctx-gauge-title {
   font-family: var(--font-sans) !important;
-  font-size: 11px !important;
+  font-size: 13px !important;
   font-weight: 500 !important;
   text-transform: capitalize !important;
   letter-spacing: 0.01em !important;
   color: var(--fg-muted) !important;
+}
 
+.ctx-gauge-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .ctx-gauge .ctx-gauge-label {
-  grid-column: 1;
-  grid-row: 2;
-
   font-family: var(--font-sans) !important;
-  font-size: 26px !important;
-  font-weight: 500 !important;
-  letter-spacing: -0.03em !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
   color: var(--fg) !important;
   line-height: 1.1 !important;
-
 }
 
 .ctx-gauge svg {
   display: block;
-  grid-column: 2;
-  grid-row: 1 / span 2;
   color: var(--accent);
 
   width: 32px !important;
@@ -1130,7 +1167,7 @@ button {
 }
 
 
-.ctx-gauge.warn::before {
+.ctx-gauge.warn .ctx-gauge-title {
   color: var(--warning) !important;
 }
 
@@ -1152,7 +1189,7 @@ button {
   color: var(--danger) !important;
 }
 
-.ctx-gauge.crit::before {
+.ctx-gauge.crit .ctx-gauge-title {
   color: var(--danger) !important;
 }
 
@@ -2741,7 +2778,7 @@ button {
 /* ONE persistent strip per agent turn: wrench head shows live activity
    (or final summary), inline web-search chips, chevron to expand body. */
 .tool-group {
-  margin: 2px 0;
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2823,38 +2860,97 @@ button {
    no pill background — looks like a footnote, not part of the answer. */
 .tool-group.done-pill .tool-group-head {
   background: transparent;
-  border: 1px dashed var(--border);
-  padding: 3px 10px;
-  opacity: 0.65;
-  font-size: 11px;
-  color: var(--fg-faint);
-  font-style: italic;
+  border: none;
+  padding: 4px 0;
+  opacity: 1;
+  font-size: 13px;
+  color: var(--fg);
+  font-style: normal;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tool-group.done-pill .tool-group-head:hover {
-  opacity: 1;
-  background: color-mix(in srgb, var(--bg-inset) 30%, transparent);
-  border-color: var(--border-strong);
-  border-style: solid;
+  background: transparent;
+  border: none;
 }
 
 .tool-group.done-pill .tool-group-icon {
-  width: 12px;
-  height: 12px;
-  color: var(--fg-faint);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success, #10b981);
+  color: transparent;
   animation: none;
+  flex-shrink: 0;
+}
+
+.tool-group.done-pill.has-err .tool-group-icon {
+  background: var(--danger, #ef4444);
 }
 
 .tool-group.done-pill .tool-group-icon.spinning {
   animation: none;
 }
 
-.tool-group.done-pill .tool-group-summary {
-  font-weight: 400;
-  color: var(--fg-faint);
+.tool-group-summary[hidden] {
+  display: none !important;
+}
+
+.tool-group-summary {
+  font-weight: 500;
+  color: var(--fg);
+  background: var(--bg-raised);
+  padding: 4px 12px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-group-summary .dot-sep {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--border-strong, #333);
+}
+
+.tool-group-summary .summary-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+}
+
+.tool-group-summary .summary-item i,
+.tool-group-summary .summary-item svg {
+  color: var(--fg-muted, #888);
+  width: 14px;
+  height: 14px;
+}
+
+.tool-group-summary .cmd-item {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-left: 2px;
+}
+
+.tool-group-summary .err-item {
+  color: var(--danger, #ef4444);
+}
+
+.tool-group-summary .err-item i {
+  color: var(--danger, #ef4444);
 }
 
 .tool-group.done-pill .tool-group-chips {
+  display: none;
+}
+
+/* Hide standalone ctx-trim-pill if we have a unified tool pill */
+.bubble-row:has(.tool-group.done-pill) .ctx-trim-pill {
   display: none;
 }
 
@@ -4991,14 +5087,16 @@ button {
 
 /* ---- actions ---- */
 .approval .appr-actions {
-  display: grid;
-  grid-template-columns: 1fr 1.5fr;
+  display: flex;
   gap: 8px;
+  width: 100%;
 }
 .approval .appr-btn {
   display: inline-flex; align-items: center; justify-content: center;
+  flex: 1;
+  min-width: 0;
   gap: 6px;
-  padding: 9px 14px;
+  padding: 9px 10px;
   font-family: var(--font-sans);
   font-size: 12.5px;
   font-weight: 600;
@@ -5476,6 +5574,11 @@ body.is-mobile {
        status-bar clock without leaving the half-centimeter gap that the
        original +20px buffer did. */
     padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
   }
 
   /* collapse theme, preview, desktop automation, and command history on mobile */
@@ -5526,16 +5629,7 @@ body.is-mobile {
   }
 
   .bubble-col {
-    max-width: 92%;
-  }
-
-  .bubble-meta {
-    font-size: 10.5px;
-  }
-
-  .bubble {
-    font-size: 14px;
-    line-height: 1.45;
+    max-width: 100%;
   }
 
   .drawer {
@@ -5543,10 +5637,17 @@ body.is-mobile {
   }
 
   .approval-stack {
-    left: 10px;
-    right: 10px;
+    left: 0;
+    right: 0;
     bottom: calc(64px + env(safe-area-inset-bottom, 0));
     max-width: none;
+  }
+
+  .approval {
+    border-radius: 16px 16px 0 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
   }
 
   /* roomier composer on mobile — bigger tap targets, fills the bottom area */
@@ -7462,6 +7563,10 @@ body,
   }
 
   /* Compact side-foot layout for mobile sidebar */
+  .side-stats {
+    margin-top: 48px;
+  }
+
   .side-foot {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -7519,8 +7624,10 @@ body,
   .status-line {
     gap: 6px !important;
     padding: 3px 10px !important;
-    font-size: 9px !important;
-    flex-wrap: wrap;
+    font-size: 8px !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto;
+    white-space: nowrap;
   }
 
   .status-line .status-item i,
@@ -8320,7 +8427,7 @@ body,
 .think-container {
   display: flex;
   flex-direction: column;
-  margin: 6px 0;
+  margin: 0;
   max-width: 100%;
   align-items: flex-start !important;
   align-self: flex-start !important;

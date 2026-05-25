@@ -77,77 +77,87 @@
       <span class="brand-subtitle">Your model. Your machine.</span>
     </div>
 
-    <div class="section-head">
-      <span>Sessions</span>
-      <span class="grow"></span>
-      <button class="iconbtn" id="btn-new-chat" title="New session"><i class="ph ph-plus"></i></button>
-    </div>
-    <div class="chatlist" id="chatlist"></div>
-
-    <div class="section-head">
-      <span>Workspace</span>
-      <span class="grow"></span>
-      <button class="iconbtn" id="btn-ws-add-toggle" title="Add folder"><i class="ph ph-plus"></i></button>
-    </div>
-    <div class="workspace" id="workspace">
-      <div id="ws-list"></div>
-      <div class="ws-add hidden" id="ws-add">
-        <input id="ws-input" placeholder="C:\path\to\folder" autocomplete="off">
-        <button class="btn sm" id="ws-browse-btn" title="Browse for folder"><i class="ph ph-folder-open"></i></button>
-        <button class="btn accent sm" id="ws-add-btn">Add</button>
-      </div>
-    </div>
-
-    <div class="side-foot">
-      <!-- cost savings widget — shows what this session and all-time would cost on cloud AI -->
-      <div class="cost-widget" id="cost-widget">
-        <div class="cost-widget-head">
-          <span class="cost-widget-label">Saved Vs Average API Cost</span>
-          <span class="cost-widget-amount" id="cost-amount">$0.00</span>
-        </div>
-        <div class="cost-breakdown">
-          <div class="cost-row"><span class="cost-row-label">Saved this session</span><span class="cost-row-val" id="cost-session">$0.00</span></div>
-          <div class="cost-row"><span class="cost-row-label">All time saved</span><span class="cost-row-val" id="cost-alltime">$0.00</span></div>
-        </div>
-        <div class="cost-pills">
-          <select class="cost-select" id="cost-select">
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="google">Google</option>
-            <option value="xai">xAI</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="mistral">Mistral</option>
-          </select>
-        </div>
-      </div>
-      <div class="ctx-gauge" id="ctx-gauge" title="working memory used">
-        <svg viewBox="0 0 32 32" width="24" height="24" aria-hidden="true">
-          <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.15"></circle>
-          <circle id="ctx-gauge-arc" cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"
-                  stroke-linecap="round" stroke-dasharray="81.68" stroke-dashoffset="81.68"
-                  transform="rotate(-90 16 16)"></circle>
-        </svg>
-        <span class="ctx-gauge-label" id="ctx-gauge-label">0%</span>
-      </div>
-      <div class="side-meta-row">
-        <span class="tok-total" id="tok-total" title="Total generated tokens this session">0 tok</span>
-        <div class="side-socials" aria-label="Social links">
-          <a class="side-social" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" title="You can download local models here" aria-label="Hugging Face">
-            <svg viewBox="0 0 120 120" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M37.5 55c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zm45 0c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zM60 3C28.5 3 3 28.5 3 60s25.5 57 57 57 57-25.5 57-57S91.5 3 60 3zm0 104c-25.9 0-47-21.1-47-47S34.1 13 60 13s47 21.1 47 47-21.1 47-47 47zm24.5-32.5c-2.8 4.8-8 12.5-24.5 12.5s-21.7-7.7-24.5-12.5c-1.1-1.9.4-4.2 2.6-4 6.2.6 13.1 2 21.9 2s15.7-1.4 21.9-2c2.2-.2 3.7 2.1 2.6 4z"/></svg>
-          </a>
-          <a class="side-social" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" title="@NoJetsNextDoor on X" aria-label="X / Twitter">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-          </a>
-          <a class="side-social" href="https://github.com/mkultraware/" target="_blank" rel="noopener noreferrer" title="mkultraware on GitHub" aria-label="GitHub">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
-          </a>
-        </div>
-      </div>
-      <div class="side-foot-actions" style="display: flex; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted);">
-        <button class="iconbtn" id="btn-theme-side" title="Toggle light / dark theme"><i class="ph ph-moon" id="btn-theme-side-icon"></i></button>
-        <button class="iconbtn" id="btn-faq" title="FAQ / About"><i class="ph ph-question"></i></button>
+    <div class="sidebar-scroll">
+      <div class="section-head">
+        <span>SESSIONS</span>
         <span class="grow"></span>
-        <button class="iconbtn" id="btn-settings" title="Settings"><i class="ph ph-gear-six"></i></button>
+        <button class="iconbtn" id="btn-new-chat" title="New session"><i class="ph ph-plus"></i></button>
+      </div>
+      <div class="chatlist" id="chatlist"></div>
+
+      <hr class="sidebar-divider">
+
+      <div class="section-head ws-section-head">
+        <span>WORKSPACE</span>
+        <span class="grow"></span>
+        <button class="iconbtn" id="btn-ws-add-toggle" title="Add folder"><i class="ph ph-plus"></i></button>
+      </div>
+      <div class="workspace" id="workspace">
+        <div id="ws-list"></div>
+        <div class="ws-add hidden" id="ws-add">
+          <input id="ws-input" placeholder="C:\path\to\folder" autocomplete="off">
+          <button class="btn sm" id="ws-browse-btn" title="Browse for folder"><i class="ph ph-folder-open"></i></button>
+          <button class="btn accent sm" id="ws-add-btn">Add</button>
+        </div>
+      </div>
+
+      <div class="side-stats">
+        <!-- cost savings widget — shows what this session and all-time would cost on cloud AI -->
+        <div class="cost-widget" id="cost-widget">
+          <div class="cost-widget-head">
+            <span class="cost-widget-label">Saved vs OpenAI cost</span>
+            <span class="cost-widget-amount" id="cost-amount">$0.00</span>
+          </div>
+          <div class="cost-breakdown">
+            <div class="cost-row"><span class="cost-row-label">Saved this session</span><span class="cost-row-val" id="cost-session">$0.00</span></div>
+            <div class="cost-row"><span class="cost-row-label">All time saved</span><span class="cost-row-val" id="cost-alltime">$0.00</span></div>
+          </div>
+          <div class="cost-pills">
+            <select class="cost-select" id="cost-select">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+              <option value="xai">xAI</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="mistral">Mistral</option>
+            </select>
+          </div>
+        </div>
+        <div class="ctx-gauge" id="ctx-gauge" title="working memory used">
+          <div class="ctx-gauge-title">Context memory</div>
+          <div class="ctx-gauge-body">
+            <span class="ctx-gauge-label" id="ctx-gauge-label">0%</span>
+            <svg viewBox="0 0 32 32" width="36" height="36" aria-hidden="true">
+              <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5" opacity="0.15"></circle>
+              <circle id="ctx-gauge-arc" cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"
+                      stroke-linecap="round" stroke-dasharray="81.68" stroke-dashoffset="81.68"
+                      transform="rotate(-90 16 16)"></circle>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="side-foot">
+        <div class="side-meta-row">
+          <span class="tok-total" id="tok-total" title="Total generated tokens this session">0 tok</span>
+          <div class="side-socials" aria-label="Social links">
+            <a class="side-social" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" title="You can download local models here" aria-label="Hugging Face">
+              <svg viewBox="0 0 120 120" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M37.5 55c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zm45 0c-3.3 0-6-2.7-6-6s2.7-6 6-6 6 2.7 6 6-2.7 6-6 6zM60 3C28.5 3 3 28.5 3 60s25.5 57 57 57 57-25.5 57-57S91.5 3 60 3zm0 104c-25.9 0-47-21.1-47-47S34.1 13 60 13s47 21.1 47 47-21.1 47-47 47zm24.5-32.5c-2.8 4.8-8 12.5-24.5 12.5s-21.7-7.7-24.5-12.5c-1.1-1.9.4-4.2 2.6-4 6.2.6 13.1 2 21.9 2s15.7-1.4 21.9-2c2.2-.2 3.7 2.1 2.6 4z"/></svg>
+            </a>
+            <a class="side-social" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" title="@NoJetsNextDoor on X" aria-label="X / Twitter">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            </a>
+            <a class="side-social" href="https://github.com/mkultraware/" target="_blank" rel="noopener noreferrer" title="mkultraware on GitHub" aria-label="GitHub">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+            </a>
+          </div>
+        </div>
+        <div class="side-foot-actions" style="display: flex; gap: 8px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-muted);">
+          <button class="iconbtn" id="btn-theme-side" title="Toggle light / dark theme"><i class="ph ph-sparkle" id="btn-theme-side-icon"></i></button>
+          <button class="iconbtn" id="btn-faq" title="FAQ / About"><i class="ph ph-question"></i></button>
+          <span class="grow"></span>
+          <button class="iconbtn" id="btn-settings" title="Settings"><i class="ph ph-gear-six"></i></button>
+        </div>
       </div>
     </div>
   </aside>
@@ -158,7 +168,7 @@
   <div class="center">
     <div class="topbar">
       <button class="iconbtn" id="btn-toggle-sidebar-m" title="Sidebar"><i class="ph ph-list"></i></button>
-      <button class="iconbtn" id="btn-back-chevron" title="Back"><i class="ph ph-caret-left"></i></button>
+      <button class="iconbtn mobile-only" id="btn-settings-m" title="Settings"><i class="ph ph-gear-six"></i></button>
       <div class="path">
         <i class="ph ph-chat-circle-dots"></i>
         <span class="em" id="chat-title">new session</span>
@@ -219,6 +229,7 @@
                 <div class="overflow-section-label">Network</div>
                 <button class="chip" id="quick-netscan-mothership" title="Inserts a prompt asking the model to scan THIS machine's active TCP/UDP connections and recent DNS, then flag anything weird"><i class="ph ph-radio"></i>Sniff mothership</button>
                 <button class="chip" id="quick-netscan-device" title="Coming soon — sniff the device you're browsing from. Needs a small netagent installed there."><i class="ph ph-laptop"></i>Sniff this device</button>
+
               </div>
             </div>
             <span class="composer-spacer"></span>
