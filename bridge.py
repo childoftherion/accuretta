@@ -60,6 +60,15 @@ except Exception:
     _pgw = None  # type: ignore
     _HAVE_PGW = False
 
+# ---- macOS window enumeration (AppKit) -----------------------------------
+# macOS equivalent of pygetwindow — uses AppKit to enumerate top-level windows.
+# Requires no external dependencies beyond the standard macOS frameworks.
+try:
+    import AppKit  # type: ignore
+    _HAVE_APPKIT = True
+except Exception:
+    _HAVE_APPKIT = False
+
 # ---- firmware analysis (optional) ----------------------------------------
 # Signature scanning is pure-Python (no binwalk dependency — the pip
 # "binwalk" package is a broken stub unrelated to the real tool).
@@ -2248,12 +2257,8 @@ def _netsnap_debug_dump(stdout: str, stderr: str, exit_code=None, reason: str = 
         return f"<debug-dump failed: {e}>"
 
 
-def tool_network_snapshot(args: dict) -> dict:
-    """Snapshot the host's current network state (no admin, no install).
-    Returns active TCP connections (with owning process names), UDP listeners,
-    and the recent DNS resolver cache so the model can spot weird traffic."""
-    if os.name != "nt":
-        return {"error": "network_snapshot currently only supports Windows (uses Get-NetTCPConnection)"}
+def _network_snapshot_windows() -> dict:
+    """Windows network snapshot via PowerShell Get-NetTCPConnection."""
     approval = request_approval(
         title="Network snapshot",
         command="Get-NetTCPConnection / Get-NetUDPEndpoint / Get-DnsClientCache",
@@ -2262,15 +2267,11 @@ def tool_network_snapshot(args: dict) -> dict:
     if approval.get("decision") != "approve":
         return {"error": f"user denied snapshot ({approval.get('status')})"}
 
-    # 2 MiB cap — busy machines easily produce >16 KiB of JSON. The model never
-    # sees this raw output (only the aggregated top_processes/top_remotes), so
-    # there's no context-window cost to keeping the full payload.
     res = _run_powershell(_NETSNAP_PS, timeout=20, max_stdout=2_000_000)
     raw_stdout = res.get("stdout") or ""
     raw_stderr = res.get("stderr") or ""
     ok_flag = res.get("ok")
     if not ok_flag:
-        # dump everything we know about the failure so we can diagnose
         _netsnap_debug_dump(raw_stdout, raw_stderr, exit_code=res.get("returncode"), reason="powershell-not-ok")
         return {"error": (raw_stderr or raw_stdout or "snapshot failed").strip()[:400]}
     raw = raw_stdout.lstrip("\ufeff").strip()
@@ -2311,13 +2312,11 @@ def tool_network_snapshot(args: dict) -> dict:
     if isinstance(tcp, dict): tcp = [tcp]
     if isinstance(udp, dict): udp = [udp]
 
-    # annotate each connection with its owning process name (or "?" if gone).
     for c in tcp:
         c["process"] = procs.get(str(c.get("OwningProcess")), "?")
     for c in udp:
         c["process"] = procs.get(str(c.get("OwningProcess")), "?")
 
-    # group by remote endpoint so destinations with many connections rise to the top.
     from collections import Counter
     remotes = Counter()
     for c in tcp:
@@ -2327,7 +2326,6 @@ def tool_network_snapshot(args: dict) -> dict:
             remotes[(addr, int(port))] += 1
     top_remotes = [{"address": a, "port": p, "count": n} for (a, p), n in remotes.most_common(30)]
 
-    # connections per process — handy for "what is svchost talking to"
     by_proc = Counter()
     for c in tcp:
         by_proc[c.get("process") or "?"] += 1
@@ -2350,6 +2348,198 @@ def tool_network_snapshot(args: dict) -> dict:
         "top_processes": top_procs,
         "recent_dns": data.get("dns_cache") or [],
     }
+
+
+def _network_snapshot_macos() -> dict:
+    """macOS network snapshot via lsof and networksetup."""
+    approval = request_approval(
+        title="Network snapshot",
+        command="lsof -i -P -n | grep -E 'TCP|UDP'",
+        details={"kind": "network_snapshot"},
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied snapshot ({approval.get('status')})"}
+
+    tcp = []
+    udp = []
+    try:
+        # lsof -i TCP -P -n for TCP connections
+        r = subprocess.run(
+            ["lsof", "-i", "TCP", "-P", "-n"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines()[1:]:  # skip header
+                parts = line.split()
+                if len(parts) >= 9:
+                    name = parts[0]
+                    pid = parts[1]
+                    user = parts[3]
+                    # Type is usually column 5, Name is column 9+
+                    # Format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+                    node = parts[7] if len(parts) > 7 else ""
+                    name_field = " ".join(parts[9:]) if len(parts) > 9 else ""
+                    
+                    # Parse local and remote addresses
+                    addr_parts = name_field.split("->") if "->" in name_field else [name_field]
+                    local_addr = addr_parts[0].strip() if addr_parts else ""
+                    remote_addr = addr_parts[1].strip() if len(addr_parts) > 1 else ""
+                    
+                    state = node if node in ("ESTABLISHED", "LISTEN", "CLOSE_WAIT", "TIME_WAIT", "SYN_SENT", "SYN_RECV", "FIN_WAIT1", "FIN_WAIT2", "LAST_ACK", "CLOSING") else ""
+                    
+                    tcp.append({
+                        "process": name,
+                        "pid": pid,
+                        "user": user,
+                        "local_address": local_addr,
+                        "remote_address": remote_addr,
+                        "state": state,
+                        "platform": "macos",
+                    })
+    except Exception:
+        pass
+
+    try:
+        # lsof -i UDP -P -n for UDP
+        r = subprocess.run(
+            ["lsof", "-i", "UDP", "-P", "-n"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 9:
+                    name = parts[0]
+                    pid = parts[1]
+                    user = parts[3]
+                    name_field = " ".join(parts[9:]) if len(parts) > 9 else ""
+                    udp.append({
+                        "process": name,
+                        "pid": pid,
+                        "user": user,
+                        "local_address": name_field,
+                        "platform": "macos",
+                    })
+    except Exception:
+        pass
+
+    from collections import Counter
+    remotes = Counter()
+    for c in tcp:
+        addr = c.get("remote_address", "").split(":")[0] if ":" in c.get("remote_address", "") else c.get("remote_address", "")
+        if addr and addr not in ("0.0.0.0", "::", "127.0.0.1", "localhost"):
+            remotes[addr] += 1
+    top_remotes = [{"address": a, "count": n} for a, n in remotes.most_common(30)]
+
+    by_proc = Counter()
+    for c in tcp:
+        by_proc[c.get("process") or "?"] += 1
+    top_procs = [{"process": k, "connections": v} for k, v in by_proc.most_common(20)]
+
+    return {
+        "platform": "macos",
+        "tcp_count": len(tcp),
+        "udp_count": len(udp),
+        "tcp_connections": tcp[:80],
+        "udp_listeners": udp[:30],
+        "top_remotes": top_remotes,
+        "top_processes": top_procs,
+        "recent_dns": [],
+    }
+
+
+def _network_snapshot_linux() -> dict:
+    """Linux network snapshot via ss and /proc."""
+    approval = request_approval(
+        title="Network snapshot",
+        command="ss -tulnp",
+        details={"kind": "network_snapshot"},
+    )
+    if approval.get("decision") != "approve":
+        return {"error": f"user denied snapshot ({approval.get('status')})"}
+
+    tcp = []
+    udp = []
+    
+    # ss -tulnp for TCP connections
+    r = subprocess.run(
+        ["ss", "-tulnp"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode == 0:
+        for line in r.stdout.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                state = parts[0]
+                local = parts[4] if len(parts) > 4 else ""
+                remote = parts[5] if len(parts) > 5 else ""
+                # Try to get process info from users="(..." field
+                proc_info = ""
+                for p in parts:
+                    if p.startswith("users=("):
+                        proc_info = p
+                        break
+                
+                tcp.append({
+                    "process": proc_info,
+                    "local_address": local,
+                    "remote_address": remote,
+                    "state": state,
+                    "platform": "linux",
+                })
+
+    # ss -ulnp for UDP
+    r = subprocess.run(
+        ["ss", "-ulnp"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode == 0:
+        for line in r.stdout.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 5:
+                udp.append({
+                    "local_address": parts[4] if len(parts) > 4 else "",
+                    "platform": "linux",
+                })
+
+    from collections import Counter
+    remotes = Counter()
+    for c in tcp:
+        addr = c.get("remote_address", "").rsplit(":", 1)[0] if ":" in c.get("remote_address", "") else c.get("remote_address", "")
+        if addr and addr not in ("0.0.0.0", "::", "127.0.0.1", "::1"):
+            remotes[addr] += 1
+    top_remotes = [{"address": a, "count": n} for a, n in remotes.most_common(30)]
+
+    by_proc = Counter()
+    for c in tcp:
+        by_proc[c.get("process") or "?"] += 1
+    top_procs = [{"process": k, "connections": v} for k, v in by_proc.most_common(20)]
+
+    return {
+        "platform": "linux",
+        "tcp_count": len(tcp),
+        "udp_count": len(udp),
+        "tcp_connections": tcp[:80],
+        "udp_listeners": udp[:30],
+        "top_remotes": top_remotes,
+        "top_processes": top_procs,
+        "recent_dns": [],
+    }
+
+
+def tool_network_snapshot(args: dict) -> dict:
+    """Snapshot the host's current network state (no admin, no install).
+    Returns active TCP connections (with owning process names), UDP listeners,
+    and the recent DNS resolver cache so the model can spot weird traffic.
+    Cross-platform: Windows (PowerShell), macOS (lsof), Linux (ss)."""
+    if sys.platform == "win32":
+        return _network_snapshot_windows()
+    elif sys.platform == "darwin":
+        return _network_snapshot_macos()
+    elif sys.platform == "linux":
+        return _network_snapshot_linux()
+    else:
+        return {"error": f"network_snapshot not supported on platform: {sys.platform}"}
 
 
 def tool_open_program(args: dict) -> dict:
@@ -3448,7 +3638,99 @@ def _take_screenshot_b64(region: tuple[int, int, int, int] | None = None, max_di
     return _b64.b64encode(buf.getvalue()).decode(), (orig_w, orig_h)
 
 
-def _list_windows_raw() -> list[dict]:
+def winAttributeValue(ax_elem, attr: str):
+    """Safely get an accessibility attribute value from an AXUIElement."""
+    try:
+        result = ax_elem.attributeValue(attr)
+        return result
+    except Exception:
+        return None
+
+
+def _list_windows_raw_x11() -> list[dict]:
+    """List windows on X11/Wayland via xdotool fallback."""
+    out = []
+    try:
+        xd = shutil.which("xdotool")
+        if not xd:
+            return []
+        # Get window list
+        r = subprocess.run([xd, "search", "--name", "."], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return []
+        for wid in r.stdout.strip().splitlines():
+            wid = wid.strip()
+            if not wid:
+                continue
+            # Get window info
+            r2 = subprocess.run([xd, "window", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, timeout=3)
+            title_r = subprocess.run([xd, "search", "--name", wid, "echo", "--name"], capture_output=True, text=True, timeout=3)
+            if r2.returncode == 0:
+                geo = {}
+                for line in r2.stdout.strip().splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        geo[k.strip()] = v.strip()
+                title = (title_r.stdout or "").strip().split("\n")[-1] if title_r.returncode == 0 else ""
+                out.append({
+                    "title": title,
+                    "x": int(geo.get("Geometry.X", 0)),
+                    "y": int(geo.get("Geometry.Y", 0)),
+                    "w": int(geo.get("Geometry.Width", 0)),
+                    "h": int(geo.get("Geometry.Height", 0)),
+                    "active": False,
+                    "platform": "linux",
+                })
+    except Exception:
+        pass
+    return out
+
+
+def _list_windows_raw_macos() -> list[dict]:
+    """Return visible top-level windows on macOS using AppKit/AXUIElement.
+    Returns list of {title, pid, role, layer, windowLevel}."""
+    if not _HAVE_APPKIT:
+        return []
+    out = []
+    try:
+        app_win = AppKit.NSApplication.sharedApplication()
+        win_mgr = app_win.windowController()
+        # Use NSWorkspace to get running apps and their windows
+        ws = AppKit.NSWorkspace.sharedWorkspace
+        running_apps = ws.runningApplications
+        for app in running_apps:
+            if not app.isActive():
+                continue
+            # Get windows from the app's accessibility object
+            try:
+                ax_elem = app.accessibilitySystemWide()
+                if not ax_elem:
+                    continue
+                # Get windows via AXWindows
+                windows = ax_elem.attributeValue("AXWindows")
+                if not windows:
+                    continue
+                for win in windows:
+                    title = winAttributeValue(win, "AXTitle") or ""
+                    if not title:
+                        continue
+                    is_visible = bool(winAttributeValue(win, "AXVisibleWindow"))
+                    out.append({
+                        "title": title,
+                        "pid": app.processIdentifier(),
+                        "app_name": app.localizedName() or "",
+                        "active": app.isActive,
+                        "visible": is_visible,
+                        "platform": "macos",
+                    })
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return out
+
+
+def _list_windows_raw_windows() -> list[dict]:
     """Return visible top-level windows with title + bbox. Requires pygetwindow."""
     if not _HAVE_PGW:
         return []
@@ -3475,7 +3757,39 @@ def _list_windows_raw() -> list[dict]:
     return out
 
 
-def _find_window(substring: str):
+def _list_windows_raw() -> list[dict]:
+    """Return visible top-level windows with title + bbox.
+    Uses pygetwindow on Windows, AppKit on macOS."""
+    if sys.platform == "darwin":
+        return _list_windows_raw_macos()
+    if sys.platform == "win32":
+        return _list_windows_raw_windows()
+    # Linux: try xdotool via subprocess as fallback
+    if sys.platform == "linux":
+        return _list_windows_raw_x11()
+    return []
+
+
+def _find_window_macos(substring: str):
+    """Fuzzy find a single window by title substring (case-insensitive) on macOS."""
+    if not _HAVE_APPKIT or not substring:
+        return None
+    needle = substring.strip().lower()
+    try:
+        ws = AppKit.NSWorkspace.sharedWorkspace
+        for app in ws.runningApplications:
+            try:
+                name = (app.localizedName() or "").lower()
+                if needle in name:
+                    return {"type": "macos_app", "pid": app.processIdentifier(), "name": app.localizedName()}
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def _find_window_windows(substring: str):
     """Fuzzy find a single window by title substring (case-insensitive).
     Returns pygetwindow handle or None."""
     if not _HAVE_PGW or not substring:
@@ -3491,6 +3805,19 @@ def _find_window(substring: str):
         return candidates[0]
     except Exception:
         return None
+
+
+def _find_window(substring: str):
+    """Fuzzy find a single window by title substring (case-insensitive).
+    Platform-aware: macOS, Windows, or Linux."""
+    if not substring:
+        return None
+    needle = substring.strip().lower()
+    if sys.platform == "darwin":
+        return _find_window_macos(needle)
+    if sys.platform == "win32":
+        return _find_window_windows(needle)
+    return None
 
 
 # ---- desktop tools: read-only (observation) ---------------------------------
@@ -9612,12 +9939,39 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 import tkinter as tk
                 from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                path = filedialog.askdirectory(title=title)
-                root.destroy()
-                return self._send_json(200, {"path": path or ""})
+                # macOS: NSWindow must be created on the main thread.
+                # Tkinter's Tk() called from a background thread raises
+                # 'NSWindow should only be instantiated on the main thread!'.
+                # We dispatch the Tk creation to the main thread via after_idle
+                # on a root that was already created there, or fall back to
+                # osascript on macOS.
+                if sys.platform == "darwin":
+                    # Use osascript for a native macOS folder picker — no
+                    # threading issues and it works headless too.
+                    # IMPORTANT: Use "POSIX path of" to convert the AppleScript
+                    # HFS+ colon path (Macintosh HD:Users:...) to POSIX format.
+                    try:
+                        result = subprocess.run(
+                            ["osascript", "-e",
+                             'POSIX path of (choose folder with prompt "' + title.replace('"', '\\"') + '")'],
+                            capture_output=True, text=True, timeout=30,
+                        )
+                        raw_path = (result.stdout or "").strip()
+                        if result.returncode != 0 or not raw_path:
+                            return self._send_json(200, {"path": ""})
+                        # Normalize the path (remove trailing slash, resolve symlinks)
+                        import os as _os
+                        path = _os.path.normpath(raw_path)
+                        return self._send_json(200, {"path": path})
+                    except Exception:
+                        return self._send_json(200, {"path": "", "error": "folder picker unavailable"})
+                else:
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    path = filedialog.askdirectory(title=title)
+                    root.destroy()
+                    return self._send_json(200, {"path": path or ""})
             except Exception as e:
                 return self._send_json(200, {"path": "", "error": str(e)})
         if p == "/api/models/scan-dir":
@@ -10191,7 +10545,8 @@ class Handler(BaseHTTPRequestHandler):
 def detect_vram_gb() -> dict:
     """Best-effort GPU VRAM probe. Returns {gb, name, source} or
     {gb: 0, name: "", source: "none"} on failure. Tries nvidia-smi first
-    (most common), then falls back to silence. Never raises."""
+    (most common), then falls back to macOS system_profiler / Windows WMI.
+    Never raises."""
     out = {"gb": 0, "name": "", "source": "none"}
     # nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits
     smi = shutil.which("nvidia-smi")
@@ -10212,6 +10567,68 @@ def detect_vram_gb() -> dict:
                     out["name"] = parts[1] if len(parts) > 1 else "NVIDIA GPU"
                     out["source"] = "nvidia-smi"
                     return out
+        except Exception:
+            pass
+    # macOS: system_profiler SPDisplaysDataType | grep "VRAM" + "Model Name"
+    if sys.platform == "darwin":
+        try:
+            r = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and r.stdout:
+                gpu_name = ""
+                vram_mb = 0
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if "Model Name" in line:
+                        gpu_name = line.split(":", 1)[1].strip()
+                    if "VRAM" in line or "Display VRAM" in line:
+                        # e.g. "Display VRAM: 1024 MB (GDDR6)" or "1.5 GB"
+                        m = re.search(r"([\d.]+)\s*(GB|MB)", line, re.IGNORECASE)
+                        if m:
+                            val = float(m.group(1))
+                            unit = m.group(2).upper()
+                            if unit == "GB":
+                                vram_mb = int(val * 1024)
+                            else:
+                                vram_mb = int(val)
+                if gpu_name or vram_mb > 0:
+                    out["name"] = gpu_name or "Apple GPU"
+                    out["gb"] = round(vram_mb / 1024, 1) if vram_mb > 0 else 0
+                    # Detect Apple Silicon family
+                    if "M1" in gpu_name or "M2" in gpu_name or "M3" in gpu_name or "M4" in gpu_name:
+                        out["source"] = "system_profiler (Apple Silicon)"
+                        # Apple Silicon shares system RAM — estimate from hw.memsize
+                        try:
+                            mem_r = subprocess.run(
+                                ["sysctl", "-n", "hw.memsize"],
+                                capture_output=True, text=True, timeout=3,
+                            )
+                            if mem_r.returncode == 0:
+                                total_bytes = int(mem_r.stdout.strip())
+                                # Unified memory: GPU gets a large share
+                                out["gb"] = max(out["gb"], round(total_bytes / (1024**3), 0))
+                                out["source"] = "system_profiler + sysctl (Apple Silicon)"
+                        except Exception:
+                            pass
+                    else:
+                        out["source"] = "system_profiler"
+                    return out
+        except Exception:
+            pass
+    # Windows WMI fallback for GPU info
+    if sys.platform == "win32":
+        try:
+            r = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "Name"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                lines = [l.strip() for l in r.stdout.strip().splitlines()[1:] if l.strip()]
+                if lines:
+                    out["name"] = lines[0]
+                    out["source"] = "wmic"
         except Exception:
             pass
     return out
@@ -10801,7 +11218,8 @@ def auto_tune(model_path: str, vram_gb: float) -> dict:
 
 
 def find_llama_bin() -> str:
-    """Locate llama-server.exe — settings override > env > PATH > known dirs > recursive scan."""
+    """Locate llama-server — settings override > env > PATH > known dirs > recursive scan.
+    Cross-platform: Windows (.exe), macOS (universal binary), Linux (static binary)."""
     s = get_settings()
     explicit = (s.get("llama_bin") or "").strip()
     if explicit and safe_exists(explicit):
@@ -10814,23 +11232,50 @@ def find_llama_bin() -> str:
         return found
     
     home = Path.home()
-    search_roots = [
-        ROOT,
-        home / "Downloads",
-        home / "Desktop",
-        home / "Documents",
-        Path("C:/llama.cpp"),
-    ]
     
-    # Scan other drive letters for common top-level llama folders
-    if os.name == "nt":
-        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+    # Platform-specific search roots
+    if sys.platform == "darwin":
+        # macOS: Homebrew installs to /opt/homebrew (Apple Silicon) or /usr/local (Intel)
+        search_roots = [
+            ROOT,
+            home / "Downloads",
+            home / "Desktop",
+            home / "Documents",
+            Path("/opt/homebrew/bin"),       # Apple Silicon Homebrew
+            Path("/usr/local/bin"),           # Intel Homebrew
+            Path("/usr/bin"),
+            home / "llama.cpp",
+            home / ".llama.cpp",
+            Path("/opt/llama.cpp"),
+        ]
+    elif sys.platform == "win32":
+        search_roots = [
+            ROOT,
+            home / "Downloads",
+            home / "Desktop",
+            home / "Documents",
+            Path("C:/llama.cpp"),
+            Path("D:/llama.cpp"),
+        ]
+        # Scan other drive letters for common top-level llama folders
+        for letter in "EFGHIJKLMNOPQRSTUVWXYZ":
             drive = Path(f"{letter}:\\")
             if safe_exists(drive):
                 for candidate_folder in ["llama.cpp", "llama", "bin"]:
                     cand = drive / candidate_folder
                     if safe_exists(cand) and safe_is_dir(cand):
                         search_roots.append(cand)
+    else:  # linux
+        search_roots = [
+            ROOT,
+            home / "Downloads",
+            home / "Desktop",
+            home / "Documents",
+            Path("/usr/local/bin"),
+            Path("/usr/bin"),
+            home / "llama.cpp",
+            Path("/opt/llama.cpp"),
+        ]
                         
     seen_roots = set()
     valid_roots = []
@@ -10857,15 +11302,37 @@ def find_llama_bin() -> str:
         except Exception:
             continue
             
-    candidates = [
-        home / ".unsloth/llama.cpp/build/bin/Release/llama-server.exe",
-        home / ".unsloth/llama.cpp/build/bin/llama-server.exe",
-        home / ".docker/bin/inference/llama-server.exe",
-        home / "llama.cpp/build/bin/Release/llama-server.exe",
-        home / "llama.cpp/llama-server.exe",
-        Path("C:/llama.cpp/build/bin/Release/llama-server.exe"),
-        Path("C:/llama.cpp/llama-server.exe"),
-    ]
+    # Platform-specific candidate paths
+    if sys.platform == "darwin":
+        candidates = [
+            home / "llama.cpp/build/bin/Release/llama-server",
+            home / "llama.cpp/build/bin/llama-server",
+            home / ".unsloth/llama.cpp/build/bin/Release/llama-server",
+            home / ".unsloth/llama.cpp/build/bin/llama-server",
+            Path("/opt/homebrew/bin/llama-server"),
+            Path("/usr/local/bin/llama-server"),
+            Path("/opt/llama.cpp/llama-server"),
+        ]
+    elif sys.platform == "win32":
+        candidates = [
+            home / ".unsloth/llama.cpp/build/bin/Release/llama-server.exe",
+            home / ".unsloth/llama.cpp/build/bin/llama-server.exe",
+            home / ".docker/bin/inference/llama-server.exe",
+            home / "llama.cpp/build/bin/Release/llama-server.exe",
+            home / "llama.cpp/llama-server.exe",
+            Path("C:/llama.cpp/build/bin/Release/llama-server.exe"),
+            Path("C:/llama.cpp/llama-server.exe"),
+            Path("D:/llama.cpp/build/bin/Release/llama-server.exe"),
+        ]
+    else:  # linux
+        candidates = [
+            home / "llama.cpp/build/bin/Release/llama-server",
+            home / "llama.cpp/build/bin/llama-server",
+            home / ".unsloth/llama.cpp/build/bin/Release/llama-server",
+            Path("/opt/homebrew/bin/llama-server"),
+            Path("/usr/local/bin/llama-server"),
+            Path("/opt/llama.cpp/llama-server"),
+        ]
     for c in candidates:
         if safe_exists(c):
             return str(c)
@@ -11710,32 +12177,90 @@ def main():
         if choice in ("none", "off", "skip", "no"):
             print(f"  [info] ACCURETTA_BROWSER={choice} — not auto-opening a browser. Visit {url} in any browser.")
             return
-        # Map short names to common Windows install paths + executable names.
-        candidates = {
-            "chrome":  ["chrome.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"],
-            "firefox": ["firefox.exe", r"C:\Program Files\Mozilla Firefox\firefox.exe", r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"],
-            "edge":    ["msedge.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"],
-            "brave":   ["brave.exe", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"],
-            "opera":   ["opera.exe", os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\opera.exe")],
-            "vivaldi": ["vivaldi.exe", os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe")],
-        }
-        if choice and choice in candidates:
-            import shutil, subprocess
-            exe = None
-            for c in candidates[choice]:
-                p = shutil.which(c) if not os.path.sep in c else (c if os.path.exists(c) else None)
-                if p:
-                    exe = p
-                    break
-            if exe:
+        
+        # Cross-platform browser detection and launch
+        if sys.platform == "darwin":
+            # macOS: use open -a to launch browsers by name
+            mac_browsers = {
+                "chrome":  "Google Chrome",
+                "firefox": "Firefox",
+                "edge":    "Microsoft Edge",
+                "brave":   "Brave Browser",
+                "safari":  "Safari",
+                "opera":   "Opera",
+                "vivaldi": "Vivaldi",
+            }
+            if choice and choice in mac_browsers:
                 try:
-                    subprocess.Popen([exe, url], close_fds=True)
+                    subprocess.Popen(
+                        ["open", "-a", mac_browsers[choice], url],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
                     print(f"  [info] opened {choice} -> {url}")
                     return
                 except Exception as e:
                     print(f"  [warn] failed to launch {choice} ({e}); falling back to default browser.")
             else:
-                print(f"  [warn] ACCURETTA_BROWSER={choice} but {choice} not found; falling back to default browser.")
+                # Default on macOS: try Safari, then fall back to webbrowser
+                try:
+                    subprocess.Popen(
+                        ["open", "-a", "Safari", url],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    print(f"  [info] opened Safari -> {url}")
+                    return
+                except Exception:
+                    pass
+        elif sys.platform == "win32":
+            # Windows: use full install paths + executable names
+            win_candidates = {
+                "chrome":  ["chrome.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"],
+                "firefox": ["firefox.exe", r"C:\Program Files\Mozilla Firefox\firefox.exe", r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe"],
+                "edge":    ["msedge.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"],
+                "brave":   ["brave.exe", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"],
+                "opera":   ["opera.exe", os.path.expandvars(r"%LOCALAPPDATA%\Programs\Opera\opera.exe")],
+                "vivaldi": ["vivaldi.exe", os.path.expandvars(r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe")],
+            }
+            if choice and choice in win_candidates:
+                exe = None
+                for c in win_candidates[choice]:
+                    p = shutil.which(c) if not os.path.sep in c else (c if os.path.exists(c) else None)
+                    if p:
+                        exe = p
+                        break
+                if exe:
+                    try:
+                        subprocess.Popen([exe, url], close_fds=True)
+                        print(f"  [info] opened {choice} -> {url}")
+                        return
+                    except Exception as e:
+                        print(f"  [warn] failed to launch {choice} ({e}); falling back to default browser.")
+                else:
+                    print(f"  [warn] ACCURETTA_BROWSER={choice} but {choice} not found; falling back to default browser.")
+        else:  # linux
+            # Linux: use which() for browser executables
+            linux_browsers = {
+                "chrome":  "google-chrome",
+                "chromium": "chromium-browser",
+                "firefox": "firefox",
+                "edge":    "microsoft-edge",
+                "brave":   "brave-browser",
+                "opera":   "opera",
+                "vivaldi": "vivaldi",
+            }
+            if choice and choice in linux_browsers:
+                exe = shutil.which(linux_browsers[choice])
+                if exe:
+                    try:
+                        subprocess.Popen([exe, url], close_fds=True)
+                        print(f"  [info] opened {choice} -> {url}")
+                        return
+                    except Exception as e:
+                        print(f"  [warn] failed to launch {choice} ({e}); falling back to default browser.")
+                else:
+                    print(f"  [warn] ACCURETTA_BROWSER={choice} but {choice} not found; falling back to default browser.")
+        
+        # Final fallback: use Python's webbrowser module (platform-independent)
         try:
             webbrowser.open(url)
         except Exception:
