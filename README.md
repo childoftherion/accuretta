@@ -163,6 +163,39 @@ pip install pefile pyelftools yara-python
 
 All three are pure-Python wheels with prebuilt binaries on PyPI — no compiler dance, no JDK, no extra config. If any of them is missing the tool returns a friendly "install with: pip install …" message instead of crashing the bridge.
 
+## Agentic Coding Tools
+
+To drastically reduce the token-overhead of working with large projects, the bridge exposes three native, standard-library-only tools for the model to use when reasoning about code:
+
+*   **`read_skeleton(path)`** — extracts the structural skeleton (classes, functions, signatures, docstrings) of a Python or JS/TS file without reading the entire file. This allows the model to scan a 5,000-line file using only a few hundred tokens of context.
+*   **`check_syntax(path)`** — runs `ast.parse` (or `node --check`) on a target file to verify its syntax. The model uses this automatically to verify its own edits are correct before returning control to you.
+*   **`run_tests(command, cwd)`** — a subprocess wrapper that runs test suites (like `pytest` or `npm test`) and intelligently filters the noise from `stdout`, returning just the failure hints, tracebacks, and pass/fail booleans to the agent.
+
+## Universal MCP Support (Model Context Protocol)
+
+Accuretta natively supports any external MCP Server via a lightweight, dependency-free stdio client built directly into `bridge.py`.
+
+You can plug in official servers (like GitHub, SQLite, Google Drive, PostgreSQL) and their capabilities are dynamically mapped into native tools for the agent to use.
+
+**Zero-Friction Setup:**
+Simply drop a `bridge_mcp_config.json` next to `bridge.py` using the exact same standard configuration schema used by Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_abc123..." }
+    }
+  }
+}
+```
+
+Restart `bridge.py`, and the new tools instantly appear in the agent's toolbelt.
+
+> **\*Safety First:** Because MCP servers can run arbitrary commands depending on their implementation, **every single MCP tool call is strictly Approval-Gated by default**. The bridge will prompt you with an approval card showing the tool name and exact JSON payload before allowing the server to execute anything.
+
 ## Who this is for
 
 * People who want a Cursor or Antigravity style experience without the subscription

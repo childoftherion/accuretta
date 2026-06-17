@@ -54,3 +54,8 @@ tree-sitter-python        # Python grammar for AST parsing
 tree-sitter-javascript    # JavaScript grammar for AST parsing
 tree-sitter-typescript    # TypeScript/React grammar for AST parsing
 flake8>=7.3.0             # Fast local python linter for the auto-healing loop
+# ------------------------------------------------------------------------------
+# Cybersecurity / Forensics (Optional)
+# ------------------------------------------------------------------------------
+evtx>=0.8.0                # Fast Rust-based Windows EVTX event log parser
+dpkt>=1.9.8                # Lightweight PCAP/PCAPNG packet capture parser

@@ -32,6 +32,9 @@ from typing import Any
 import webbrowser
 import base64 as _b64
 import io as _io
+import socket
+import ssl
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 # ---- desktop automation (optional) ---------------------------------------
@@ -150,6 +153,36 @@ except Exception:
     _HAVE_PYGHIDRA = False
 _PYGHIDRA_STARTED = False
 _PYGHIDRA_START_LOCK = threading.Lock()
+
+# ---- Cybersecurity / Forensics (optional) --------------------------------
+try:
+    from evtx import PyEvtxParser as _PyEvtxParser  # type: ignore
+    _HAVE_EVTX_RUST = True
+except Exception:
+    _PyEvtxParser = None  # type: ignore
+    _HAVE_EVTX_RUST = False
+
+try:
+    from Evtx.Evtx import Evtx as _Evtx  # type: ignore
+    _HAVE_EVTX_PY = True
+except Exception:
+    _Evtx = None  # type: ignore
+    _HAVE_EVTX_PY = False
+
+try:
+    import dpkt as _dpkt  # type: ignore
+    _HAVE_DPKT = True
+except Exception:
+    _dpkt = None  # type: ignore
+    _HAVE_DPKT = False
+
+try:
+    from scapy.all import rdpcap as _rdpcap  # type: ignore
+    _HAVE_SCAPY = True
+except Exception:
+    _rdpcap = None  # type: ignore
+    _HAVE_SCAPY = False
+
 
 # Kill switch: when set, every desktop action tool refuses immediately.
 # The frontend panic button and the user deny-action both flip this via
@@ -6047,7 +6080,1240 @@ def tool_yara_scan(args: dict) -> dict:
     }
 
 
+# --- Tool 1: scan_secrets ---
+_REPO_SECRET_RE: list[tuple[str, "re.Pattern[bytes]", int]] = [
+    # .env file assignments
+    ("dotenv_secret",            re.compile(rb"(?i)^\s*(?:DB_PASSWORD|SECRET_KEY|API_SECRET|AWS_SECRET|PRIVATE_KEY|DATABASE_URL|REDIS_URL|MONGO_URI|SMTP_PASSWORD|AUTH_TOKEN)\s*=\s*[^\s#]{8,}", re.MULTILINE), 15),
+    # Azure tokens
+    ("azure_client_secret",      re.compile(rb"(?i)azure[^\n]{0,30}(?:client.?secret|tenant.?id)[^a-z0-9]{0,5}[A-Za-z0-9_\-\.~]{20,}"), 30),
+    # npm tokens
+    ("npm_token",                re.compile(rb"//registry\.npmjs\.org/:_authToken=[A-Za-z0-9\-_]{36,}"), 50),
+    # PyPI tokens
+    ("pypi_token",               re.compile(rb"\bpypi-[A-Za-z0-9_\-]{60,}\b"), 64),
+    # Heroku API key
+    ("heroku_api_key",           re.compile(rb"(?i)heroku[^\n]{0,20}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), 40),
+    # Slack webhook
+    ("slack_webhook",            re.compile(rb"https://hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{20,}"), 60),
+    # Discord webhook
+    ("discord_webhook",          re.compile(rb"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_\-]{60,}"), 70),
+    # Telegram bot token
+    ("telegram_bot_token",       re.compile(rb"\b\d{8,10}:[A-Za-z0-9_\-]{35}\b"), 44),
+    # Connection strings (JDBC, MongoDB, PostgreSQL, MySQL, Redis)
+    ("connection_string",        re.compile(rb"(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp)://[^\s\"'<>]{10,}"), 15),
+    # YAML/TOML secrets
+    ("yaml_password_field",      re.compile(rb"(?i)^\s*(?:password|passwd|secret|api_key|auth_token|private_key)\s*[:=]\s*[^\s#\n]{8,}", re.MULTILINE), 15),
+]
+
+def _hunt_secrets_in_file(path: Path, include_http: bool = False, max_per_pattern: int = 25) -> list[dict]:
+    try:
+        data = path.read_bytes()
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    lines = data.split(b"\n")
+    
+    for kind, rx, min_hit_len in _APK_SECRET_RE + _REPO_SECRET_RE:
+        if not include_http and kind in {"hardcoded_http_endpoint", "ipv4_literal"}:
+            continue
+            
+        seen: set[bytes] = set()
+        n = 0
+        for i, line in enumerate(lines):
+            for m in rx.finditer(line):
+                hit = m.group(0)
+                if len(hit) < min_hit_len:
+                    continue
+                if hit in seen:
+                    continue
+                seen.add(hit)
+                try:
+                    preview = hit.decode("utf-8", errors="replace")
+                except Exception:
+                    preview = repr(hit)
+                
+                if len(preview) > 24 and kind not in {"hardcoded_http_endpoint", "ipv4_literal", "firebase_db_url", "firebase_app_url"}:
+                    preview = preview[:8] + "…[redacted]…" + preview[-4:]
+                
+                out.append({
+                    "file": path.name,
+                    "kind": kind,
+                    "match": preview[:200],
+                    "line": i + 1
+                })
+                n += 1
+                if n >= max_per_pattern:
+                    break
+            if n >= max_per_pattern:
+                break
+    return out
+
+def tool_scan_secrets(args: dict) -> dict:
+    """Scan a file or directory for hardcoded secrets."""
+    raw_path = args.get("path")
+    if not raw_path:
+        return {"error": "path required"}
+    
+    target = Path(normalize_path(raw_path))
+    if not target.exists():
+        return {"error": "path not found"}
+    if is_blocked_path(str(target)):
+        return {"error": "path blocked"}
+        
+    exts = args.get("extensions")
+    if not exts:
+        exts = [
+            ".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".yaml", ".yml", 
+            ".toml", ".env", ".cfg", ".ini", ".xml", ".properties", ".tf", 
+            ".sh", ".bat", ".ps1", ".go", ".rs", ".java", ".rb", ".php", 
+            ".cs", ".config", ".sql", ".dockerfile", ".tfvars"
+        ]
+    exts = set(e.lower() if e.startswith(".") else f".{e.lower()}" for e in exts)
+    
+    max_files = args.get("max_files", 500)
+    max_bytes = args.get("max_file_bytes", 2 * 1024 * 1024)
+    include_http = args.get("include_http_endpoints", False)
+    
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build", ".next", ".nuxt"}
+    
+    aid = request_approval(
+        "Secret scan",
+        f"Scan {target} for hardcoded secrets",
+        {"target": str(target), "extensions": list(exts)}
+    )
+    if aid.get("decision") != "approve":
+        return {"error": "user denied"}
+
+    files_to_scan = []
+    if target.is_file():
+        files_to_scan.append(target)
+    else:
+        for root, dirs, files in os.walk(target):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for f in files:
+                p = Path(root) / f
+                if p.suffix.lower() in exts:
+                    files_to_scan.append(p)
+            if len(files_to_scan) >= max_files:
+                break
+                
+    files_to_scan = files_to_scan[:max_files]
+    
+    findings = []
+    files_with_findings = 0
+    scanned = 0
+    
+    for p in files_to_scan:
+        try:
+            if p.stat().st_size > max_bytes:
+                continue
+            scanned += 1
+            file_findings = _hunt_secrets_in_file(p, include_http=include_http)
+            if file_findings:
+                files_with_findings += 1
+                for f in file_findings:
+                    f["file"] = str(p.relative_to(target)) if target.is_dir() else p.name
+                findings.extend(file_findings)
+        except Exception:
+            continue
+            
+    risk_counts = {}
+    for f in findings:
+        risk_counts[f["kind"]] = risk_counts.get(f["kind"], 0) + 1
+        
+    return {
+        "path": str(target),
+        "files_scanned": scanned,
+        "files_with_findings": files_with_findings,
+        "findings": findings,
+        "risk_summary": {
+            "total_secrets_found": len(findings),
+            "breakdown": risk_counts
+        }
+    }
+
+# --- Tool 2: parse_evtx ---
+_EVTX_EVENT_LABELS = {
+    1102: "Audit log cleared",
+    4624: "Logon success",
+    4625: "Logon failure",
+    4634: "Logoff",
+    4648: "Explicit credential logon",
+    4672: "Special privileges assigned",
+    4688: "Process created",
+    4689: "Process exited",
+    4697: "Service installed",
+    4698: "Scheduled task created",
+    4699: "Scheduled task deleted",
+    4700: "Scheduled task enabled",
+    4702: "Scheduled task updated",
+    4720: "User account created",
+    4722: "User account enabled",
+    4725: "User account disabled",
+    4726: "User account deleted",
+    4728: "Member added to security group",
+    4732: "Member added to local group",
+    4738: "User account changed",
+    4740: "Account locked out",
+    4756: "Member added to universal group",
+    4776: "Credential validation",
+    5140: "Network share accessed",
+    5156: "Windows Filtering Platform connection",
+    7034: "Service crashed",
+    7036: "Service state changed",
+    7040: "Service start type changed",
+    7045: "Service installed (System log)",
+    4104: "PowerShell ScriptBlock",
+}
+
+def tool_parse_evtx(args: dict) -> dict:
+    """Parse Windows .evtx event log files."""
+    if not _HAVE_EVTX_RUST and not _HAVE_EVTX_PY:
+        return {"error": "evtx parser not available. install with: pip install evtx"}
+        
+    raw_path = args.get("path")
+    if not raw_path:
+        return {"error": "path required"}
+    
+    target = Path(normalize_path(raw_path))
+    if not target.exists() or not target.is_file():
+        return {"error": "file not found"}
+        
+    event_ids = set(args.get("event_ids", []))
+    limit = min(args.get("limit", 500), 5000)
+    keywords = (args.get("keywords") or "").lower()
+    since_str = args.get("since")
+    since_dt = None
+    if since_str:
+        try:
+            since_dt = datetime.datetime.fromisoformat(since_str.replace('Z', '+00:00'))
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            pass
+
+    aid = request_approval("Parse event log", f"Read {target}", {"target": str(target)})
+    if aid.get("decision") != "approve":
+        return {"error": "user denied"}
+
+    events = []
+    total_records = 0
+    filtered_records = 0
+    parser_used = "evtx (rust)" if _HAVE_EVTX_RUST else "python-evtx"
+    
+    try:
+        if _HAVE_EVTX_RUST:
+            parser = _PyEvtxParser(str(target))
+            for record in parser.records_json():
+                total_records += 1
+                try:
+                    event = json.loads(record["data"])
+                    sys_node = event.get("Event", {}).get("System", {})
+                    eid = sys_node.get("EventID", 0)
+                    if isinstance(eid, dict):
+                        eid = eid.get("#text", 0)
+                    eid = int(eid)
+                    
+                    if event_ids and eid not in event_ids:
+                        continue
+                        
+                    time_created_node = sys_node.get("TimeCreated", {})
+                    time_str = time_created_node.get("#attributes", {}).get("SystemTime") or time_created_node.get("SystemTime")
+                    
+                    if since_dt and time_str:
+                        try:
+                            evt_dt = datetime.datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                            if evt_dt.tzinfo is None:
+                                evt_dt = evt_dt.replace(tzinfo=datetime.timezone.utc)
+                            if evt_dt < since_dt:
+                                continue
+                        except Exception:
+                            pass
+                            
+                    raw_data = json.dumps(event).lower()
+                    if keywords and keywords not in raw_data:
+                        continue
+                        
+                    event_data = event.get("Event", {}).get("EventData", {})
+                    
+                    filtered_records += 1
+                    if len(events) < limit:
+                        events.append({
+                            "record_id": sys_node.get("EventRecordID"),
+                            "event_id": eid,
+                            "label": _EVTX_EVENT_LABELS.get(eid, "Unknown"),
+                            "timestamp": time_str,
+                            "computer": sys_node.get("Computer"),
+                            "channel": sys_node.get("Channel"),
+                            "provider": sys_node.get("Provider", {}).get("#attributes", {}).get("Name") or sys_node.get("Provider", {}).get("Name"),
+                            "data": event_data
+                        })
+                except Exception:
+                    continue
+        else:
+            with _Evtx(str(target)) as log:
+                for record in log.records():
+                    total_records += 1
+                    try:
+                        node = record.lxml()
+                        ns = {'e': 'http://schemas.microsoft.com/win/2004/08/events/event'}
+                        
+                        eid_node = node.find('.//e:System/e:EventID', namespaces=ns)
+                        if eid_node is None:
+                            continue
+                        eid = int(eid_node.text)
+                        
+                        if event_ids and eid not in event_ids:
+                            continue
+                            
+                        time_node = node.find('.//e:System/e:TimeCreated', namespaces=ns)
+                        time_str = time_node.get('SystemTime') if time_node is not None else None
+                        
+                        if since_dt and time_str:
+                            try:
+                                evt_dt = datetime.datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                                if evt_dt.tzinfo is None:
+                                    evt_dt = evt_dt.replace(tzinfo=datetime.timezone.utc)
+                                if evt_dt < since_dt:
+                                    continue
+                            except Exception:
+                                pass
+                                
+                        raw_data = record.xml().lower()
+                        if keywords and keywords not in raw_data:
+                            continue
+                            
+                        event_data = {}
+                        for data in node.findall('.//e:EventData/e:Data', namespaces=ns) + node.findall('.//e:UserData/e:Data', namespaces=ns):
+                            event_data[data.get('Name') or 'Value'] = data.text
+                            
+                        filtered_records += 1
+                        if len(events) < limit:
+                            computer_node = node.find('.//e:System/e:Computer', namespaces=ns)
+                            channel_node = node.find('.//e:System/e:Channel', namespaces=ns)
+                            provider_node = node.find('.//e:System/e:Provider', namespaces=ns)
+                            record_id_node = node.find('.//e:System/e:EventRecordID', namespaces=ns)
+                            
+                            events.append({
+                                "record_id": record_id_node.text if record_id_node is not None else None,
+                                "event_id": eid,
+                                "label": _EVTX_EVENT_LABELS.get(eid, "Unknown"),
+                                "timestamp": time_str,
+                                "computer": computer_node.text if computer_node is not None else None,
+                                "channel": channel_node.text if channel_node is not None else None,
+                                "provider": provider_node.get('Name') if provider_node is not None else None,
+                                "data": event_data
+                            })
+                    except Exception:
+                        continue
+    except Exception as e:
+        return {"error": f"parsing failed: {e}"}
+
+    event_counts = {}
+    flagged = []
+    high_interest_ids = {1102, 4697, 7045, 4720, 4726, 4104}
+    
+    for e in events:
+        eid = e["event_id"]
+        event_counts[eid] = event_counts.get(eid, 0) + 1
+        if eid in high_interest_ids:
+            flagged.append(e)
+
+    return {
+        "path": str(target),
+        "parser": parser_used,
+        "total_records": total_records,
+        "filtered_records": filtered_records,
+        "events": events,
+        "summary": {
+            "event_id_counts": event_counts,
+            "security_highlights": flagged
+        }
+    }
+
+# --- Tool 3: analyze_pcap ---
+def tool_analyze_pcap(args: dict) -> dict:
+    """Analyze a PCAP or PCAPNG packet capture file."""
+    if not _HAVE_DPKT and not _HAVE_SCAPY:
+        return {"error": "PCAP parser not available. install with: pip install dpkt (preferred) or scapy"}
+        
+    raw_path = args.get("path")
+    if not raw_path:
+        return {"error": "path required"}
+    
+    target = Path(normalize_path(raw_path))
+    if not target.exists() or not target.is_file():
+        return {"error": "file not found"}
+        
+    max_packets = args.get("max_packets", 50000)
+    dns_only = args.get("dns_only", False)
+    http_only = args.get("http_only", False)
+
+    aid = request_approval("Analyze packet capture", f"Parse {target}", {"target": str(target)})
+    if aid.get("decision") != "approve":
+        return {"error": "user denied"}
+
+    try:
+        if _HAVE_DPKT:
+            return _analyze_pcap_dpkt(target, max_packets, dns_only, http_only)
+        else:
+            return _analyze_pcap_scapy(target, max_packets, dns_only, http_only)
+    except Exception as e:
+        return {"error": f"parsing failed: {e}"}
+
+def _analyze_pcap_dpkt(path: Path, max_packets: int, dns_only: bool, http_only: bool) -> dict:
+    import socket
+    
+    dns_queries = []
+    http_requests = []
+    tls_sni = []
+    src_ips = {}
+    dst_ips = {}
+    ports = {}
+    protocols = {}
+    
+    pkt_count = 0
+    first_ts = None
+    last_ts = None
+    
+    known_bad_ports = {4444, 5555, 1337, 31337, 8888}
+    suspicious = []
+    connections = {} # (src, dst, dport) -> count
+    
+    try:
+        with open(path, 'rb') as f:
+            try:
+                pcap = _dpkt.pcap.Reader(f)
+            except ValueError:
+                f.seek(0)
+                pcap = _dpkt.pcapng.Reader(f)
+                
+            for ts, buf in pcap:
+                if pkt_count >= max_packets:
+                    break
+                pkt_count += 1
+                
+                if first_ts is None:
+                    first_ts = ts
+                last_ts = ts
+                
+                try:
+                    eth = _dpkt.ethernet.Ethernet(buf)
+                except Exception:
+                    continue
+                    
+                if not isinstance(eth.data, _dpkt.ip.IP) and not isinstance(eth.data, _dpkt.ip6.IP6):
+                    continue
+                    
+                ip = eth.data
+                
+                try:
+                    src = socket.inet_ntop(socket.AF_INET if isinstance(ip, _dpkt.ip.IP) else socket.AF_INET6, ip.src)
+                    dst = socket.inet_ntop(socket.AF_INET if isinstance(ip, _dpkt.ip.IP) else socket.AF_INET6, ip.dst)
+                except Exception:
+                    continue
+                
+                src_ips[src] = src_ips.get(src, 0) + 1
+                dst_ips[dst] = dst_ips.get(dst, 0) + 1
+                
+                if isinstance(ip.data, _dpkt.udp.UDP):
+                    protocols["UDP"] = protocols.get("UDP", 0) + 1
+                    udp = ip.data
+                    dport = udp.dport
+                    ports[dport] = ports.get(dport, 0) + 1
+                    
+                    conn_key = (src, dst, dport)
+                    connections[conn_key] = connections.get(conn_key, 0) + 1
+                    
+                    if dport in known_bad_ports:
+                        suspicious.append(f"Connection to suspicious port: {src} -> {dst}:{dport}")
+                    
+                    if not http_only and (udp.dport == 53 or udp.sport == 53):
+                        try:
+                            dns = _dpkt.dns.DNS(udp.data)
+                            if dns.qr == _dpkt.dns.DNS_Q and len(dns.qd) > 0:
+                                qname = dns.qd[0].name
+                                dns_queries.append({"timestamp": ts, "query": qname, "src": src})
+                                if qname.endswith(".onion") or qname.endswith(".bit") or qname.endswith(".i2p"):
+                                    suspicious.append(f"Suspicious DNS query: {qname} from {src}")
+                        except Exception:
+                            pass
+                            
+                elif isinstance(ip.data, _dpkt.tcp.TCP):
+                    protocols["TCP"] = protocols.get("TCP", 0) + 1
+                    tcp = ip.data
+                    dport = tcp.dport
+                    ports[dport] = ports.get(dport, 0) + 1
+                    
+                    conn_key = (src, dst, dport)
+                    connections[conn_key] = connections.get(conn_key, 0) + 1
+                    
+                    if dport in known_bad_ports:
+                        suspicious.append(f"Connection to suspicious port: {src} -> {dst}:{dport}")
+                    
+                    if not dns_only and len(tcp.data) > 0:
+                        # Try HTTP
+                        try:
+                            req = _dpkt.http.Request(tcp.data)
+                            http_requests.append({
+                                "timestamp": ts,
+                                "src": src,
+                                "dst": dst,
+                                "method": req.method,
+                                "uri": req.uri,
+                                "host": req.headers.get("host", ""),
+                                "user_agent": req.headers.get("user-agent", "")
+                            })
+                            if "authorization" in req.headers and req.headers["authorization"].lower().startswith("basic"):
+                                suspicious.append(f"Cleartext HTTP Basic Auth: {src} -> {dst}")
+                            continue # Successfully parsed HTTP
+                        except Exception:
+                            pass
+                            
+                        # Try TLS Client Hello
+                        if not http_only and len(tcp.data) >= 5 and tcp.data[0] == 22 and tcp.data[1] == 3: # Handshake, TLS/SSL
+                            try:
+                                if tcp.data[5] == 1:
+                                    records, bytes_used = _dpkt.ssl.tls_multi_factory(tcp.data)
+                                    for record in records:
+                                        if record.type == 22: # Handshake
+                                            for msg in record.data:
+                                                if msg.type == 1: # ClientHello
+                                                    pass
+                            except Exception:
+                                pass
+                                
+    except Exception as e:
+        return {"error": f"Failed reading PCAP: {e}"}
+
+    for (s, d, p), count in connections.items():
+        if count > 100: # Simple beaconing heuristic
+            suspicious.append(f"High connection count (possible beaconing): {s} -> {d}:{p} ({count} connections)")
+
+    return {
+        "path": str(path),
+        "parser": "dpkt",
+        "packet_count": pkt_count,
+        "time_range": {"first": first_ts, "last": last_ts},
+        "protocols": protocols,
+        "dns_queries": dns_queries[:1000],
+        "http_requests": http_requests[:1000],
+        "tls_sni": tls_sni[:1000],
+        "top_sources": sorted([{"ip": k, "count": v} for k, v in src_ips.items()], key=lambda x: x["count"], reverse=True)[:20],
+        "top_destinations": sorted([{"ip": k, "count": v} for k, v in dst_ips.items()], key=lambda x: x["count"], reverse=True)[:20],
+        "top_ports": sorted([{"port": k, "count": v} for k, v in ports.items()], key=lambda x: x["count"], reverse=True)[:20],
+        "suspicious": list(set(suspicious))
+    }
+
+def _analyze_pcap_scapy(path: Path, max_packets: int, dns_only: bool, http_only: bool) -> dict:
+    return {"error": "Scapy fallback not fully implemented. Please install dpkt for PCAP analysis."}
+
+# --- Tool 4: audit_http_headers ---
+def tool_audit_http_headers(args: dict) -> dict:
+    """Fetch a URL and grade its HTTP security headers."""
+    url = args.get("url")
+    if not url:
+        return {"error": "url required"}
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"error": "url must start with http:// or https://"}
+        
+    follow_redirects = args.get("follow_redirects", True)
+    
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    )
+    
+    try:
+        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def http_error_302(self, req, fp, code, msg, headers):
+                if follow_redirects:
+                    return super().http_error_302(req, fp, code, msg, headers)
+                return urllib.response.addinfourl(fp, headers, req.get_full_url(), code)
+            http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+        opener = urllib.request.build_opener(NoRedirectHandler(), urllib.request.HTTPSHandler(context=ctx))
+        resp = opener.open(req, timeout=15)
+        
+        headers = dict(resp.headers)
+        status_code = resp.getcode()
+        final_url = resp.geturl()
+        
+    except urllib.error.HTTPError as e:
+        headers = dict(e.headers)
+        status_code = e.code
+        final_url = e.url
+    except Exception as e:
+        return {"error": f"Failed to fetch {url}: {e}"}
+
+    graded_headers = {}
+    score = 100
+    findings = []
+    
+    h_hsts = headers.get("Strict-Transport-Security", "").lower()
+    if h_hsts:
+        m = re.search(r"max-age=(\d+)", h_hsts)
+        if m and int(m.group(1)) >= 31536000:
+            graded_headers["Strict-Transport-Security"] = {"value": h_hsts, "status": "pass", "note": "HSTS enabled with sufficient max-age"}
+        else:
+            graded_headers["Strict-Transport-Security"] = {"value": h_hsts, "status": "warn", "note": "HSTS max-age is too short"}
+            score -= 5
+    else:
+        graded_headers["Strict-Transport-Security"] = {"value": None, "status": "fail", "note": "Missing HSTS"}
+        score -= 15
+        findings.append("No Strict-Transport-Security header (vulnerable to downgrade attacks)")
+
+    h_csp = headers.get("Content-Security-Policy", "").lower()
+    if h_csp:
+        if "unsafe-inline" in h_csp or "unsafe-eval" in h_csp:
+            graded_headers["Content-Security-Policy"] = {"value": h_csp, "status": "warn", "note": "CSP present but contains unsafe directives"}
+            score -= 10
+            findings.append("CSP contains unsafe-inline or unsafe-eval")
+        else:
+            graded_headers["Content-Security-Policy"] = {"value": h_csp, "status": "pass", "note": "Strong CSP"}
+    else:
+        graded_headers["Content-Security-Policy"] = {"value": None, "status": "fail", "note": "Missing CSP"}
+        score -= 15
+        findings.append("No Content-Security-Policy header (vulnerable to XSS)")
+
+    h_xfo = headers.get("X-Frame-Options", "").upper()
+    if h_xfo in {"DENY", "SAMEORIGIN"}:
+        graded_headers["X-Frame-Options"] = {"value": h_xfo, "status": "pass", "note": "Clickjacking protection active"}
+    elif not h_xfo:
+        graded_headers["X-Frame-Options"] = {"value": None, "status": "fail", "note": "Missing X-Frame-Options"}
+        score -= 10
+        findings.append("No X-Frame-Options header (vulnerable to clickjacking)")
+    else:
+        graded_headers["X-Frame-Options"] = {"value": h_xfo, "status": "warn", "note": f"Unrecognized value: {h_xfo}"}
+        score -= 5
+
+    h_cto = headers.get("X-Content-Type-Options", "").lower()
+    if h_cto == "nosniff":
+        graded_headers["X-Content-Type-Options"] = {"value": h_cto, "status": "pass", "note": "MIME-sniffing protection active"}
+    else:
+        graded_headers["X-Content-Type-Options"] = {"value": h_cto, "status": "fail", "note": "Missing or invalid nosniff"}
+        score -= 5
+        findings.append("Missing X-Content-Type-Options: nosniff")
+
+    h_ref = headers.get("Referrer-Policy", "").lower()
+    if h_ref in {"no-referrer", "strict-origin-when-cross-origin"}:
+        graded_headers["Referrer-Policy"] = {"value": h_ref, "status": "pass", "note": "Strong referrer policy"}
+    elif h_ref:
+        graded_headers["Referrer-Policy"] = {"value": h_ref, "status": "warn", "note": "Weak referrer policy"}
+        score -= 5
+    else:
+        graded_headers["Referrer-Policy"] = {"value": None, "status": "fail", "note": "Missing Referrer-Policy"}
+        score -= 5
+
+    h_server = headers.get("Server", "")
+    if h_server:
+        if re.search(r"[0-9]", h_server):
+            graded_headers["Server"] = {"value": h_server, "status": "fail", "note": "Server version info leaked"}
+            score -= 5
+            findings.append("Server header leaks version information")
+        else:
+            graded_headers["Server"] = {"value": h_server, "status": "warn", "note": "Generic server header"}
+
+    h_powered = headers.get("X-Powered-By", "")
+    if h_powered:
+        graded_headers["X-Powered-By"] = {"value": h_powered, "status": "fail", "note": "Technology info leaked"}
+        score -= 5
+        findings.append("X-Powered-By header leaks technology stack")
+
+    if score >= 90: grade = "A"
+    elif score >= 80: grade = "B"
+    elif score >= 70: grade = "C"
+    elif score >= 60: grade = "D"
+    else: grade = "F"
+
+    tls_info = {}
+    if final_url.startswith("https://"):
+        parsed = urllib.parse.urlparse(final_url)
+        try:
+            with socket.create_connection((parsed.netloc.split(":")[0], parsed.port or 443), timeout=5) as sock:
+                with ctx.wrap_socket(sock, server_hostname=parsed.netloc.split(":")[0]) as ssock:
+                    cert = ssock.getpeercert(binary_form=True)
+                    tls_info = {
+                        "version": ssock.version(),
+                        "cipher": ssock.cipher()
+                    }
+        except Exception:
+            pass
+
+    return {
+        "url": url,
+        "final_url": final_url,
+        "status_code": status_code,
+        "grade": grade,
+        "score": score,
+        "headers": graded_headers,
+        "findings": findings,
+        "tls": tls_info
+    }
+
+# --- Tool 5: check_deps ---
+def tool_check_deps(args: dict) -> dict:
+    """Check dependency manifests against OSV.dev vulnerabilities."""
+    raw_path = args.get("path")
+    if not raw_path:
+        return {"error": "path required"}
+        
+    target = Path(normalize_path(raw_path))
+    if not target.exists():
+        return {"error": "path not found"}
+        
+    if target.is_dir():
+        # Auto-detect manifest
+        manifests = ["package.json", "requirements.txt", "go.mod", "Cargo.toml", "Pipfile.lock"]
+        found = None
+        for m in manifests:
+            if (target / m).exists():
+                target = target / m
+                found = True
+                break
+        if not found:
+            return {"error": f"No supported dependency manifest found in {target}"}
+
+    manifest_name = target.name.lower()
+    ecosystem = args.get("ecosystem")
+    packages = []
+    
+    try:
+        content = target.read_text(encoding="utf-8")
+        
+        if manifest_name == "requirements.txt" or (ecosystem and ecosystem.lower() == "pypi"):
+            ecosystem = "PyPI"
+            for line in content.splitlines():
+                line = line.split("#")[0].strip()
+                if not line: continue
+                m = re.match(r"^([A-Za-z0-9_\-]+)(?:>=|==)([\w\.]+)", line)
+                if m:
+                    packages.append({"name": m.group(1), "version": m.group(2)})
+                    
+        elif manifest_name == "package.json" or (ecosystem and ecosystem.lower() == "npm"):
+            ecosystem = "npm"
+            data = json.loads(content)
+            deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            for name, ver in deps.items():
+                ver = re.sub(r"^[\^~>=<]+", "", ver) # strip semver modifiers
+                packages.append({"name": name, "version": ver})
+                
+        elif manifest_name == "go.mod" or (ecosystem and ecosystem.lower() == "go"):
+            ecosystem = "Go"
+            in_require = False
+            for line in content.splitlines():
+                line = line.strip()
+                if line == "require (":
+                    in_require = True
+                    continue
+                if in_require and line == ")":
+                    in_require = False
+                    continue
+                if in_require or line.startswith("require "):
+                    m = re.search(r"([A-Za-z0-9_\-\./]+)\s+v([\w\.\-]+)", line)
+                    if m:
+                        packages.append({"name": m.group(1), "version": m.group(2)})
+                        
+        elif manifest_name == "cargo.toml" or (ecosystem and ecosystem.lower() == "crates.io"):
+            ecosystem = "crates.io"
+            in_deps = False
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("["):
+                    in_deps = "dependencies" in line
+                    continue
+                if in_deps and "=" in line:
+                    parts = line.split("=", 1)
+                    name = parts[0].strip()
+                    ver_part = parts[1].strip()
+                    m = re.search(r"version\s*=\s*[\"']([^\"']+)[\"']", ver_part)
+                    if m:
+                        packages.append({"name": name, "version": m.group(1)})
+                    elif ver_part.startswith('"') or ver_part.startswith("'"):
+                        packages.append({"name": name, "version": ver_part.strip("\"'")})
+        else:
+            return {"error": f"Unsupported manifest type: {manifest_name}"}
+    except Exception as e:
+        return {"error": f"Failed parsing manifest: {e}"}
+
+    if not packages:
+        return {"error": "No packages found to check"}
+
+    # Query OSV.dev batch API
+    queries = []
+    for p in packages:
+        queries.append({
+            "version": p["version"],
+            "package": {"name": p["name"], "ecosystem": ecosystem}
+        })
+        
+    try:
+        req = urllib.request.Request(
+            "https://api.osv.dev/v1/querybatch",
+            data=json.dumps({"queries": queries}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        return {"error": f"OSV.dev API request failed: {e}"}
+        
+    results = data.get("results", [])
+    vulnerable_packages = []
+    clean_packages = []
+    vulnerable_count = 0
+    ignored_vulns = set(args.get("ignore", []))
+    
+    for i, res in enumerate(results):
+        pkg = packages[i]
+        vulns = res.get("vulns", [])
+        
+        filtered_vulns = []
+        for v in vulns:
+            if v.get("id") not in ignored_vulns:
+                filtered_vulns.append({
+                    "id": v.get("id"),
+                    "summary": v.get("summary", "No summary"),
+                    "url": f"https://osv.dev/vulnerability/{v.get('id')}"
+                })
+                
+        if filtered_vulns:
+            vulnerable_count += 1
+            vulnerable_packages.append({
+                "name": pkg["name"],
+                "version": pkg["version"],
+                "vulns": filtered_vulns
+            })
+        else:
+            clean_packages.append(pkg["name"])
+
+    return {
+        "path": str(target),
+        "ecosystem": ecosystem,
+        "manifest_type": manifest_name,
+        "packages_checked": len(packages),
+        "vulnerable_count": vulnerable_count,
+        "packages": vulnerable_packages,
+        "clean_packages": clean_packages,
+        "risk_summary": f"Found {vulnerable_count} vulnerable packages out of {len(packages)} checked."
+    }
+
+# =====================================================================
+# AGENTIC CODING TOOLS
+# =====================================================================
+
+def tool_read_skeleton(args: dict) -> dict:
+    file_path = normalize_path(args.get("path", ""))
+    if not is_in_workspace(file_path):
+        return {"error": "Path is outside workspace bounds."}
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+    
+    ext = os.path.splitext(file_path)[1]
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        return {"error": f"Read error: {e}"}
+
+    if ext == '.py':
+        try:
+            tree = ast.parse(content)
+            skeleton = []
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    doc = ast.get_docstring(node)
+                    doc_preview = f" # {doc.splitlines()[0]}" if doc else ""
+                    skeleton.append(f"def {node.name}(...):{doc_preview}")
+                elif isinstance(node, ast.ClassDef):
+                    doc = ast.get_docstring(node)
+                    doc_preview = f" # {doc.splitlines()[0]}" if doc else ""
+                    skeleton.append(f"class {node.name}:{doc_preview}")
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            cdoc = ast.get_docstring(child)
+                            cdoc_prev = f" # {cdoc.splitlines()[0]}" if cdoc else ""
+                            skeleton.append(f"    def {child.name}(...):{cdoc_prev}")
+            return {"result": "\n".join(skeleton)}
+        except SyntaxError as e:
+            return {"error": f"AST parse failed due to SyntaxError: {e}"}
+            
+    elif ext in ('.js', '.ts', '.jsx', '.tsx'):
+        skeleton = []
+        class_re = re.compile(r'^\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)')
+        func_re = re.compile(r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)')
+        arrow_re = re.compile(r'^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=]+)\s*=>')
+        
+        for line in content.splitlines():
+            if m := class_re.search(line):
+                skeleton.append(f"class {m.group(1)}")
+            elif m := func_re.search(line):
+                skeleton.append(f"function {m.group(1)}()")
+            elif m := arrow_re.search(line):
+                skeleton.append(f"const {m.group(1)} = () => ...")
+                
+        return {"result": "\n".join(skeleton)}
+    else:
+        return {"error": f"Unsupported file extension: {ext}"}
+
+
+def tool_check_syntax(args: dict) -> dict:
+    file_path = normalize_path(args.get("path", ""))
+    if not is_in_workspace(file_path):
+        return {"error": "Path is outside workspace bounds."}
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+    
+    ext = os.path.splitext(file_path)[1]
+    if ext == '.py':
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                ast.parse(f.read(), filename=file_path)
+            return {"result": "Syntax OK"}
+        except SyntaxError as e:
+            return {"error": f"SyntaxError at line {e.lineno}, offset {e.offset}: {e.msg}\n{e.text}"}
+        except Exception as e:
+            return {"error": str(e)}
+            
+    elif ext in ('.js', '.ts', '.jsx', '.tsx'):
+        try:
+            res = subprocess.run(['node', '--check', file_path], capture_output=True, text=True)
+            if res.returncode == 0:
+                return {"result": "Syntax OK"}
+            return {"error": res.stderr.strip() or "Syntax check failed"}
+        except FileNotFoundError:
+            return {"error": "Node.js not installed or not in PATH."}
+    else:
+        return {"error": f"Unsupported extension: {ext}"}
+
+
+def tool_run_tests(args: dict) -> dict:
+    command = args.get("command", "")
+    cwd = normalize_path(args.get("cwd", str(ROOT)))
+    
+    if not is_in_workspace(cwd):
+        return {"error": "CWD is outside workspace bounds."}
+    
+    # Approval gating tests might be needed if they run arbitrary scripts, but typically tests are safe.
+    # We will just run them.
+    try:
+        res = subprocess.run(shlex.split(command), cwd=cwd, capture_output=True, text=True)
+        output = res.stdout + "\n" + res.stderr
+        
+        failures = [
+            line.strip() for line in output.splitlines() 
+            if any(kw in line for kw in ("FAIL", "Error:", "Exception", "Traceback", "FAILED"))
+        ]
+        
+        summary = {
+            "passed": res.returncode == 0,
+            "returncode": res.returncode,
+            "failure_hints": failures[:15],
+            "output_tail": output[-2000:]
+        }
+        
+        if res.returncode == 0:
+            return {"result": summary}
+        return {"error": "Tests failed", "details": summary}
+        
+    except Exception as e:
+        return {"error": str(e)}
+
+# =====================================================================
+# MCP CLIENT IMPLEMENTATION
+# =====================================================================
+
+class MCPClient:
+    def __init__(self, name: str, command: str, args: list[str] = None, env: dict[str, str] = None):
+        self.name = name
+        self.command = command
+        self.args = args or []
+        self.env = env or {}
+        self.process = None
+        self.request_id = 0
+        self.responses = {}
+        self.condition = threading.Condition()
+        self.running = False
+        self._reader_thread = None
+
+    def start(self):
+        process_env = os.environ.copy()
+        process_env.update(self.env)
+        
+        try:
+            self.process = subprocess.Popen(
+                [self.command] + self.args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=process_env,
+                text=True,
+                bufsize=1,
+                shell=(os.name == 'nt')
+            )
+        except Exception as e:
+            return {"error": str(e)}
+            
+        self.running = True
+        self._reader_thread = threading.Thread(target=self._read_stdout, daemon=True)
+        self._reader_thread.start()
+
+        init_response = self._send_request("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "accuretta-bridge",
+                "version": "1.0.0"
+            }
+        })
+        
+        self._send_notification("notifications/initialized")
+        return init_response
+
+    def _read_stdout(self):
+        for line in self.process.stdout:
+            if not self.running:
+                break
+            try:
+                message = json.loads(line)
+                if "id" in message and ("result" in message or "error" in message):
+                    with self.condition:
+                        self.responses[message["id"]] = message
+                        self.condition.notify_all()
+            except json.JSONDecodeError:
+                pass
+
+    def _send_request(self, method: str, params: dict = None) -> dict:
+        self.request_id += 1
+        req_id = self.request_id
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params or {}
+        }
+        
+        try:
+            self.process.stdin.write(json.dumps(payload) + "\n")
+            self.process.stdin.flush()
+        except Exception as e:
+            return {"error": {"message": f"Failed to write to MCP stdin: {e}"}}
+
+        with self.condition:
+            while req_id not in self.responses and self.running and self.process.poll() is None:
+                self.condition.wait(timeout=0.1)
+                
+            if req_id in self.responses:
+                return self.responses.pop(req_id)
+                
+        return {"error": {"message": "Client stopped or process crashed"}}
+
+    def _send_notification(self, method: str, params: dict = None):
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {}
+        }
+        try:
+            self.process.stdin.write(json.dumps(payload) + "\n")
+            self.process.stdin.flush()
+        except Exception:
+            pass
+
+    def list_tools(self) -> dict:
+        return self._send_request("tools/list")
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        return self._send_request("tools/call", {
+            "name": name,
+            "arguments": arguments
+        })
+
+    def stop(self):
+        self.running = False
+        if self.process:
+            self.process.terminate()
+            self.process.wait()
+
+_ACTIVE_MCP_CLIENTS = []
+
+def _load_mcp_servers():
+    config_path = ROOT / "bridge_mcp_config.json"
+    if not config_path.exists():
+        return
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"[!] Failed to parse bridge_mcp_config.json: {e}")
+        return
+        
+    for server_name, server_config in config.get("mcpServers", {}).items():
+        client = MCPClient(
+            name=server_name,
+            command=server_config["command"],
+            args=server_config.get("args", []),
+            env=server_config.get("env", {})
+        )
+        
+        print(f"[*] Starting MCP server: {server_name}...")
+        res = client.start()
+        if "error" in res:
+            print(f"[!] Failed to start MCP {server_name}: {res['error']}")
+            continue
+            
+        _ACTIVE_MCP_CLIENTS.append(client)
+        
+        tools_response = client.list_tools()
+        if "error" in tools_response:
+            print(f"[!] Failed to list tools for {server_name}: {tools_response['error']}")
+            continue
+            
+        mcp_tools = tools_response.get("result", {}).get("tools", [])
+        
+        for tool_def in mcp_tools:
+            tool_name = tool_def["name"]
+            # prefix tool name to avoid collisions
+            prefixed_name = f"mcp_{server_name}_{tool_name}"
+            
+            def make_tool_callable(mcp_client, name, desc):
+                def wrapper(args: dict):
+                    # ALWAYS APPROVAL GATE MCP TOOLS
+                    appr = request_approval(
+                        title=f"MCP: {name}",
+                        command=f"Execute {name} via {mcp_client.name}",
+                        details={"Arguments": args}
+                    )
+                    if appr.get("decision") != "approve":
+                        return {"error": "User denied action.", "reason": appr.get("reason", "")}
+                        
+                    response = mcp_client.call_tool(name, args)
+                    if "error" in response:
+                        return {"error": response['error']}
+                        
+                    content = response.get("result", {}).get("content", [])
+                    return "\n".join(item.get("text", "") for item in content if item.get("type") == "text")
+                return wrapper
+
+            # Inject into the global TOOLS dictionary
+            TOOLS[prefixed_name] = {
+                "description": f"[MCP: {server_name}] {tool_def.get('description', '')}. Requires user approval.",
+                "parameters": tool_def.get("inputSchema", {}),
+                "fn": make_tool_callable(client, tool_name, tool_def.get('description', '')),
+            }
+            # Add to analysis tool names so it's registered
+            _ANALYSIS_TOOL_NAMES.add(prefixed_name)
+            print(f"  -> Registered MCP tool: {prefixed_name}")
+
 TOOLS: dict[str, dict] = {
+
+    "read_skeleton": {
+        "description": "Read the skeleton (classes, functions, signatures, docstrings) of a source file.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path to the file."}},
+            "required": ["path"],
+        },
+        "fn": tool_read_skeleton,
+    },
+    "check_syntax": {
+        "description": "Check the syntax of a Python or JS/TS file without executing it. Returns line numbers of any errors.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path to the file."}},
+            "required": ["path"],
+        },
+        "fn": tool_check_syntax,
+    },
+    "run_tests": {
+        "description": "Run a test command (e.g. pytest, npm test) and get a structured summary of failures.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Test command to execute."},
+                "cwd": {"type": "string", "description": "Directory to run tests in."}
+            },
+            "required": ["command"],
+        },
+        "fn": tool_run_tests,
+    },
+
+
+    "scan_secrets": {
+        "description": "Scan a file or directory for hardcoded secrets (API keys, tokens, passwords). Read-only. Requires user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to file or directory."},
+                "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional list of extensions to scan."},
+                "max_files": {"type": "integer", "description": "Max files to scan, default 500."},
+                "max_file_bytes": {"type": "integer", "description": "Max file size to scan, default 2MB."},
+                "include_http_endpoints": {"type": "boolean", "description": "Include hardcoded HTTP URLs in scan, default false."}
+            },
+            "required": ["path"],
+        },
+        "fn": tool_scan_secrets,
+    },
+    "parse_evtx": {
+        "description": "Parse Windows .evtx event log files. Requires user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to .evtx file."},
+                "event_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of event IDs to filter."},
+                "limit": {"type": "integer", "description": "Max records to return, default 500."},
+                "keywords": {"type": "string", "description": "Optional keyword search."},
+                "since": {"type": "string", "description": "Optional ISO timestamp filter."}
+            },
+            "required": ["path"],
+        },
+        "fn": tool_parse_evtx,
+    },
+    "analyze_pcap": {
+        "description": "Analyze a PCAP or PCAPNG packet capture file. Requires user approval.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to PCAP file."},
+                "max_packets": {"type": "integer", "description": "Max packets to process, default 50000."},
+                "dns_only": {"type": "boolean", "description": "Only extract DNS queries."},
+                "http_only": {"type": "boolean", "description": "Only extract HTTP requests."}
+            },
+            "required": ["path"],
+        },
+        "fn": tool_analyze_pcap,
+    },
+    "audit_http_headers": {
+        "description": "Fetch a URL and grade its HTTP security headers. No approval needed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to audit."},
+                "follow_redirects": {"type": "boolean", "description": "Follow HTTP redirects, default true."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_audit_http_headers,
+    },
+    "check_deps": {
+        "description": "Check dependency manifests against OSV.dev vulnerabilities. No approval needed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to manifest file or directory."},
+                "ecosystem": {"type": "string", "description": "Optional ecosystem override (e.g. PyPI, npm)."},
+                "ignore": {"type": "array", "items": {"type": "string"}, "description": "List of vuln IDs to ignore."}
+            },
+            "required": ["path"],
+        },
+        "fn": tool_check_deps,
+    },
+
     "list_directory": {
         "description": "List files and folders at a path. Use to explore.",
         "parameters": {
@@ -6908,6 +8174,8 @@ _ANALYSIS_TOOL_NAMES = {
     "network_snapshot",
     "scan_apk", "decompile_apk", "ghidra_analyze",
     "binary_inspect", "yara_scan",
+    "scan_secrets", "parse_evtx", "analyze_pcap", "check_deps",
+    "read_skeleton", "check_syntax", "run_tests",
     # git diffs and logs are bulky-by-design too — the model needs to read the
     # whole patch to write a sane commit message or to verify a push payload.
     "git_diff", "git_log", "git_show", "git_status",
@@ -6921,6 +8189,12 @@ _ANALYSIS_TOOL_NAMES = {
 # scan_apk on a real-world APK with deep:true and 200 findings + a few
 # hundred exported components routinely lands in the 30-40 KB range.
 _TOOL_RESULT_CAPS = {
+
+    "scan_secrets": 48000,
+    "parse_evtx": 48000,
+    "analyze_pcap": 48000,
+    "check_deps": 24000,
+
     "network_snapshot": 32000,
     "scan_apk": 48000,
     "decompile_apk": 24000,
@@ -7141,6 +8415,27 @@ def tools_for_prompt() -> str:
 # Common synonyms the model invents instead of the canonical tool names. Map
 # them so a single typo doesn't burn an entire tool round on "unknown tool".
 TOOL_ALIASES = {
+
+    "skeleton": "read_skeleton",
+    "ast": "read_skeleton",
+    "syntax": "check_syntax",
+    "lint": "check_syntax",
+    "test": "run_tests",
+    "pytest": "run_tests",
+
+
+    "pcap": "analyze_pcap",
+    "pcapng": "analyze_pcap",
+    "analyze_packet": "analyze_pcap",
+    "evtx": "parse_evtx",
+    "event_log": "parse_evtx",
+    "secret_scan": "scan_secrets",
+    "find_secrets": "scan_secrets",
+    "cve_scan": "check_deps",
+    "deps_scan": "check_deps",
+    "audit_headers": "audit_http_headers",
+    "security_headers": "audit_http_headers",
+
     "create_file": "write_file",
     "save_file": "write_file",
     "make_file": "write_file",
@@ -11804,6 +13099,7 @@ def main():
 
 
 if __name__ == "__main__":
+    _load_mcp_servers()
     try:
         main()
     except Exception as e:
