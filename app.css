@@ -1284,6 +1284,55 @@ button {
 }
 
 .modal-body code {
+  font-family: var(--font-mono);
+  background: var(--bg-hover);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* Apple-style alternating loader */
+.apple-loader {
+  display: inline-block;
+  position: relative;
+  width: 32px;
+  height: 32px;
+}
+.apple-loader div {
+  transform-origin: 16px 16px;
+  animation: apple-loader 1.2s linear infinite;
+  position: absolute;
+  width: 100%;
+  height: 100%;
+}
+.apple-loader div:after {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 3px;
+  left: 14px;
+  width: 3px;
+  height: 8px;
+  border-radius: 20%;
+  background: var(--text);
+}
+.apple-loader div:nth-child(1) { transform: rotate(0deg); animation-delay: -1.1s; }
+.apple-loader div:nth-child(2) { transform: rotate(30deg); animation-delay: -1.0s; }
+.apple-loader div:nth-child(3) { transform: rotate(60deg); animation-delay: -0.9s; }
+.apple-loader div:nth-child(4) { transform: rotate(90deg); animation-delay: -0.8s; }
+.apple-loader div:nth-child(5) { transform: rotate(120deg); animation-delay: -0.7s; }
+.apple-loader div:nth-child(6) { transform: rotate(150deg); animation-delay: -0.6s; }
+.apple-loader div:nth-child(7) { transform: rotate(180deg); animation-delay: -0.5s; }
+.apple-loader div:nth-child(8) { transform: rotate(210deg); animation-delay: -0.4s; }
+.apple-loader div:nth-child(9) { transform: rotate(240deg); animation-delay: -0.3s; }
+.apple-loader div:nth-child(10) { transform: rotate(270deg); animation-delay: -0.2s; }
+.apple-loader div:nth-child(11) { transform: rotate(300deg); animation-delay: -0.1s; }
+.apple-loader div:nth-child(12) { transform: rotate(330deg); animation-delay: 0s; }
+@keyframes apple-loader {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
   background: var(--bg-inset);
   padding: 1px 5px;
   border-radius: 3px;
@@ -1701,14 +1750,12 @@ button {
     0 8px 24px rgba(0, 122, 255, 0.10);
 }
 
-/* dim theme: cool lilac clashes with the warm slate palette, so we
-   swap to a much darker neutral taupe — clearly darker than the page
-   bg so the bubble reads as carved-in rather than floating, and grey
-   enough to drop the "piss filter" feel from the previous tan version.
-   Cream text + a soft dark glow keep readability against the new bg. */
+/* dim theme: swap to a darker cool-slate — clearly darker than the page
+   bg so the bubble reads as carved-in rather than floating.
+   Crisp white/gray text + a soft dark glow keep readability. */
 [data-theme="dim"] .bubble.user {
-  background: #2D2925 !important;
-  color: #F0EBE0 !important;
+  background: #2B2F36 !important;
+  color: #E8EAED !important;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.40) !important;
 }
 
@@ -1716,36 +1763,33 @@ button {
 [data-theme="dim"] .bubble.user strong,
 [data-theme="dim"] .bubble.user em,
 [data-theme="dim"] .bubble.user span {
-  color: #F0EBE0 !important;
-  -webkit-text-fill-color: #F0EBE0 !important;
+  color: #E8EAED !important;
+  -webkit-text-fill-color: #E8EAED !important;
 }
 
-/* Inline code / pre inside the user bubble: the base rule paints them
-   with a near-black tile that disappears on the new dark taupe. Bump
-   to a light translucent tile + light text so they still read as
-   "code" without losing contrast against the bubble. */
+/* Inline code / pre inside the user bubble */
 [data-theme="dim"] .bubble.user code,
 [data-theme="dim"] .bubble.user pre {
-  background: rgba(255, 250, 240, 0.10) !important;
-  color: #F0EBE0 !important;
+  background: rgba(232, 234, 237, 0.10) !important;
+  color: #E8EAED !important;
 }
 
 [data-theme="dim"] .bubble.user .code-card-body {
-  color: #F0EBE0 !important;
+  color: #E8EAED !important;
 }
 
 [data-theme="dim"] .bubble.user .code-card-body .code-line::before {
-  color: rgba(240, 235, 224, 0.45);
+  color: rgba(232, 234, 237, 0.45);
 }
 
 [data-theme="dim"] .bubble.user .cc-act {
-  color: rgba(240, 235, 224, 0.65);
+  color: rgba(232, 234, 237, 0.65);
 }
 
 [data-theme="dim"] .bubble.user .cc-act:hover {
-  color: #F0EBE0;
-  background: rgba(255, 250, 240, 0.10);
-  border-color: rgba(255, 250, 240, 0.20);
+  color: #E8EAED;
+  background: rgba(232, 234, 237, 0.10);
+  border-color: rgba(232, 234, 237, 0.20);
 }
 
 /* aurora theme user bubble matching the custom dark spruce and neon green-cyan glow */

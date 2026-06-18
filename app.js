@@ -5650,7 +5650,7 @@
   // Updated May 2026. Keys are brand names, not model names.
   const CLOUD_PRICING = {
     "openai":    { label: "OpenAI",    input: 30.00, output: 180.00 },  // GPT-5.5 Pro
-    "anthropic": { label: "Anthropic", input:  5.00, output:  25.00 },  // Claude Opus
+    "anthropic": { label: "Anthropic", input: 10.00, output:  50.00 },  // Claude Fable 5
     "google":    { label: "Google",    input:  4.00, output:  18.00 },  // Gemini 3.1 Pro (>200K ctx)
     "xai":       { label: "xAI",       input:  2.00, output:   6.00 },  // Grok 4.20
     "deepseek":  { label: "DeepSeek",  input:  1.74, output:   3.48 },  // V4 Pro (standard)
@@ -6195,6 +6195,49 @@
     $("#btn-faq")?.addEventListener("click", openFaq);
     $("#btn-close-faq")?.addEventListener("click", closeFaq);
     $("#faq-scrim")?.addEventListener("click", closeFaq);
+    
+    const openShutdown = () => { $("#shutdown-scrim")?.classList.add("open"); $("#shutdown-modal")?.classList.add("open"); };
+    const closeShutdown = () => { $("#shutdown-scrim")?.classList.remove("open"); $("#shutdown-modal")?.classList.remove("open"); };
+    $("#btn-shutdown-side")?.addEventListener("click", openShutdown);
+    $$('[data-mm="shutdown"]').forEach(el => el.addEventListener("click", () => { closeMobileMenu(); openShutdown(); }));
+    $("#btn-close-shutdown")?.addEventListener("click", closeShutdown);
+    $("#shutdown-scrim")?.addEventListener("click", closeShutdown);
+    
+    $("#btn-shutdown-no-save")?.addEventListener("click", async () => {
+      window.__allowClose = true;
+      try { await api("/api/shutdown", { method: "POST", body: { save: false } }); } catch (e) {}
+      window.close();
+    });
+    
+    $("#btn-shutdown-save")?.addEventListener("click", async () => {
+      $("#btn-shutdown-save").disabled = true;
+      $("#btn-shutdown-no-save").disabled = true;
+      $("#shutdown-loader").classList.remove("hidden");
+      try {
+        await api("/api/shutdown", { method: "POST", body: { save: true, messages: state.messages } });
+      } catch (e) {
+        console.error("Shutdown save failed", e);
+      }
+      window.__allowClose = true;
+      
+      const loader = $("#shutdown-loader");
+      if (loader) {
+        loader.innerHTML = "<p style='color: var(--ok); font-weight: 500;'>Done! It is now safe to close this window.</p>";
+      }
+      
+      window.close();
+    });
+
+    window.addEventListener("beforeunload", (e) => {
+      if (!window.__allowClose && state.messages && state.messages.length > 2) {
+        e.preventDefault();
+        e.returnValue = "";
+        setTimeout(() => {
+          if (!window.__allowClose) openShutdown();
+        }, 100);
+      }
+    });
+
     $("#btn-save-settings").addEventListener("click", collectAndSaveSettings);
     $("#set-theme")?.addEventListener("change", e => {
       const next = e.target.value;

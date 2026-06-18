@@ -299,41 +299,38 @@
    is the OLED-burn-in nudge baked in for free.
    ============================================================ */
 [data-theme="dim"] {
-  --bg:        #36332e;
-  --bg-raised: #403d37;
-  --bg-sunken: #2c2924;
-  --bg-inset:  #4a4640;
+  --bg:        #3E4249;
+  --bg-raised: #4A4F57;
+  --bg-sunken: #32363B;
+  --bg-inset:  #555B64;
 
-  --glass-bg:       rgba(64, 61, 55, 0.72);
+  --glass-bg:       rgba(74, 79, 87, 0.72);
   --glass-border:   rgba(255, 255, 255, 0.05);
 
-  --bg-gradient: linear-gradient(180deg, #3b3832 0%, #36332e 38%, #2f2c27 100%);
+  --bg-gradient: linear-gradient(180deg, #444951 0%, #3E4249 38%, #363940 100%);
 
-  --fg:        #E8E5DD;
-  --fg-muted:  #B5B1A6;
-  --fg-subtle: #8A8679;
-  --fg-faint:  #6A6659;
+  --fg:        #E8EAED;
+  --fg-muted:  #B8BCC2;
+  --fg-subtle: #8B9198;
+  --fg-faint:  #6A7077;
   --fg-invert: var(--off-black);
 
-  --border:        #4a4640;
-  --border-strong: #5a5650;
-  --border-subtle: #3d3a34;
+  --border:        #555B64;
+  --border-strong: #69707B;
+  --border-subtle: #444951;
 
-  /* Accent: a desaturated sage. The previous ember accent doubled
-     down on the warm slate bg and made everything read as a "piss
-     filter" — a cool sage breaks the monotony, sits comfortably
-     against warm taupe/grey neutrals, and stays muted enough that
-     focus rings + chip on-states don't scream. accent-fg stays white
-     so filled accent buttons (Save, etc.) keep contrast. */
-  --accent:        #8AA89A;
-  --accent-hover:  #7A988A;
-  --accent-subtle: rgba(138,168,154,0.18);
-  --accent-fg:     #FFFFFF;
+  /* Accent: a soft, modern blue. The previous sage accent was chosen
+     to offset a warm taupe bg, but with this new cooler slate we use
+     a crisp blue to keep things legible and clean. */
+  --accent:        #89B4FA;
+  --accent-hover:  #B4BEFE;
+  --accent-subtle: rgba(137, 180, 250, 0.18);
+  --accent-fg:     #12141A;
 
-  --success-subtle: rgba(106,196,154,0.16);
-  --warning-subtle: rgba(232,211,112,0.16);
-  --danger-subtle:  rgba(255,106,0,0.16);
-  --info-subtle:    rgba(155,126,232,0.16);
+  --success-subtle: rgba(166, 227, 161, 0.16);
+  --warning-subtle: rgba(249, 226, 175, 0.16);
+  --danger-subtle:  rgba(243, 139, 168, 0.16);
+  --info-subtle:    rgba(137, 180, 250, 0.16);
 
   /* Shadows tuned for the medium-dark surface: stronger than light
      mode's barely-there shadows, softer than dark mode's deep blacks. */

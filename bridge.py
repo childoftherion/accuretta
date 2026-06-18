@@ -2951,6 +2951,33 @@ def tool_forget(args: dict) -> dict:
     return {"removed": before - len(memories), "total": len(memories)}
 
 
+def tool_edit_memory(args: dict) -> dict:
+    mid = (args.get("id") or "").strip()
+    text = (args.get("text") or "").strip()
+    if not mid or not text:
+        return {"error": "id and text required"}
+    text = text[:MEMORIES_TEXT_CAP]
+    tags = args.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    tags = [str(t).strip().lower()[:24] for t in tags if str(t).strip()][:5]
+    
+    memories = _load_memories()
+    found = False
+    for m in memories:
+        if m.get("id") == mid:
+            m["text"] = text
+            if tags:
+                m["tags"] = tags
+            m["updated"] = int(time.time())
+            found = True
+            break
+    if not found:
+        return {"error": f"memory id {mid} not found"}
+    _save_memories(memories)
+    return {"saved": True, "id": mid}
+
+
 def _select_memories_for_prompt() -> list[dict]:
     """Pick the most useful memories for the system prompt — favor recent + used."""
     memories = _load_memories()
@@ -7503,6 +7530,19 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_forget,
     },
+    "edit_memory": {
+        "description": "Edit an existing long-term memory by id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "the memory id"},
+                "text": {"type": "string", "description": "the updated text"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "updated tags"},
+            },
+            "required": ["id", "text"],
+        },
+        "fn": tool_edit_memory,
+    },
     # ---- desktop automation (gated behind settings + approvals) ----
     "screenshot": {
         "description": (
@@ -8651,11 +8691,16 @@ TOOL_CALL_GEMMA_RE = re.compile(
     r"<\|tool_call>\s*call\s*:\s*([\w.\-]+)\s*\{([\s\S]*?)\}\s*"
     r"(?:<tool_call\|>|(?=<\|tool_call>)|$)",
     re.IGNORECASE)
+# Qwen native tool-call dialect. Format:
+#   <|function_calls_begin|><|function_call|>{"name":"...","arguments":"..."}<|function_calls_end|>
+TOOL_CALL_QWEN_RE = re.compile(
+    r"<\|function_call\|>\s*(\{[\s\S]*?\})\s*(?:<\|function_calls_end\|>|(?=<\|function_call\|>)|$)",
+    re.IGNORECASE)
 # Heuristic: model emitted tool-call syntax but no parser matched it.
 # When this fires with zero parsed calls, the reply is almost certainly
 # a hallucination from a chat-template mismatch.
 TOOL_SYNTAX_HINT_RE = re.compile(
-    r"<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|<\|tool_call>|```tool_call",
+    r"<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|<\|tool_call>|```tool_call|<\|function_calls_begin\|>",
     re.IGNORECASE)
 
 
@@ -8867,6 +8912,14 @@ def extract_tool_calls(text: str) -> list[dict]:
             for item in arr:
                 if isinstance(item, dict):
                     _add(item)
+
+    # 5. Qwen native tool-call dialect
+    for m in TOOL_CALL_QWEN_RE.finditer(text):
+        parsed = repair_tool_args(m.group(1))
+        # Qwen's JSON structure has {"name": "...", "arguments": "{...}"} where arguments is often a stringified JSON.
+        if isinstance(parsed, dict) and "arguments" in parsed and isinstance(parsed["arguments"], str):
+            parsed["arguments"] = repair_tool_args(parsed["arguments"])
+        _add(parsed)
 
     # 5. <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call>
     #    (Hermes-3 / GLM-4 / some Qwen3 finetunes — XML-tag dialect)
@@ -9415,8 +9468,8 @@ decide what to do based on what the user asked:
 (B) user is chatting, greeting, asking a question, or asking for clarification:
     → reply in normal prose. one or two sentences. do NOT invent a webpage out of "hello".
 
-(C) user explicitly asks for a file operation ("save that to disk", "read this file", "list the workspace"):
-    → call the appropriate tool ONCE (write_file / read_file / list_directory). then confirm in one short sentence. for write_file, pull the content from the previous turn's ```html``` block — do NOT regenerate it.
+(C) user explicitly asks for a file operation ("save that to disk", "read this file", "remember this"):
+    → call the appropriate tool ONCE (write_file / read_file / list_directory / remember). then confirm in one short sentence. for write_file, pull the content from the previous turn's ```html``` block — do NOT regenerate it.
 
 formatting rules for the ```html``` fence:
 1. real characters only — real newlines, real quotes (").
@@ -9443,7 +9496,7 @@ rules:
 2. final answer goes OUTSIDE think tags — never end a turn with only tools or thinking
 3. workspace folders are listed below — use them, don't ask
 4. only say "saved"/"wrote" if write_file returned success THIS turn
-5. call remember(text,tags?) for durable facts (≤220 chars)
+5. call remember(text,tags?) for new facts, edit_memory(id,text,tags) to update, and forget(id) to drop.
 6. desktop: enabled={settings.get("desktop_enabled", False)}. if disabled, tell user to enable in Settings. observe before act (describe_screen → decide → act → verify). only allowlisted apps. every action needs approval.
 7. CHAIN TOOLS AGGRESSIVELY: when the user asks you to read a file, read it immediately after finding it. do not stop after list_directory. when asked to write, write immediately after confirming the path. complete tasks in the fewest tool calls possible. never ask the user "shall i read it?" or "would you like me to proceed?" — just do it.
 8. NEVER re-emit full file content you already generated in a previous turn. if the user asks you to save something you already built, call write_file with the content but do NOT dump the full code in the visible chat text — just confirm "saved to <path>".
@@ -9488,10 +9541,10 @@ you may occasionally append exactly one of these to the very end of your respons
     # === MEMORIES (most useful only, not all) ===
     mems = _select_memories_for_prompt()
     if mems:
-        mem_lines = ["mem:"]
+        mem_lines = ["past user instructions & preferences (from your memory):"]
         for m in mems[:3]:
             tag = f"[{m.get('tags',[None])[0]}]" if m.get('tags') else ""
-            mem_lines.append(f"- {m.get('text','')[:100]}{tag}")
+            mem_lines.append(f"- (id: {m.get('id', 'unknown')}) {m.get('text','')} {tag}")
         parts.append("\n".join(mem_lines))
 
     # === SYSTEM CONTEXT (summarized) ===
@@ -11042,6 +11095,74 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(202, {"job_id": job_id, "status": "queued"})
         if p == "/api/chat":
             return self._handle_chat(body)
+        if p == "/api/shutdown":
+            save = bool(body.get("save"))
+            if save:
+                messages = body.get("messages") or []
+                text_history = []
+                for m in messages:
+                    role = m.get("role", "")
+                    if role in ("user", "assistant"):
+                        text_history.append(f"{role.upper()}: {m.get('content')}")
+                history_str = "\n\n".join(text_history)[-20000:]
+                
+                prompt = (
+                    "System: You are a summarizer. Summarize this session in 1-3 sentences. "
+                    "Focus on what was worked on, any decisions made, and unresolved threads. Be concise.\n\n"
+                    "Conversation:\n" + history_str + "\n\n"
+                    "Provide your response exactly in this format:\n"
+                    "SUMMARY: <your 1-3 sentence summary>\n"
+                    "TAGS: <tag1>, <tag2>, <tag3>\n"
+                )
+                
+                settings = get_settings()
+                payload = {
+                    "model": settings.get("model", ""),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 1500,
+                    "stream": False,
+                }
+                try:
+                    res = llama_post("/v1/chat/completions", payload, timeout=120)
+                    content = res.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    summary = ""
+                    tags = []
+                    lines = content.strip().split("\n")
+                    for line in lines:
+                        if line.startswith("SUMMARY:"):
+                            summary = line.replace("SUMMARY:", "").strip()
+                        elif line.startswith("TAGS:"):
+                            tags_str = line.replace("TAGS:", "").strip()
+                            tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+                    
+                    if not summary:
+                        summary = content.strip()
+                        
+                    if summary:
+                        memories = _load_memories()
+                        new_mem = {
+                            "id": uuid.uuid4().hex[:12],
+                            "text": summary,
+                            "tags": tags,
+                            "created": int(time.time()),
+                            "use_count": 0
+                        }
+                        memories.append(new_mem)
+                        _save_memories(memories)
+                except Exception as e:
+                    print("Shutdown summary error:", e)
+            
+            def hard_exit():
+                time.sleep(1)
+                try:
+                    _llama.stop()
+                    _vision_llama.stop()
+                except:
+                    pass
+                os._exit(0)
+            threading.Thread(target=hard_exit, daemon=True).start()
+            return self._send_json(200, {"ok": True})
         if p == "/api/cancel":
             cid = (body.get("chat_id") or "").strip()
             if not cid:

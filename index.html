@@ -157,6 +157,7 @@
           <button class="iconbtn" id="btn-faq" title="FAQ / About"><i class="ph ph-question"></i></button>
           <span class="grow"></span>
           <button class="iconbtn" id="btn-settings" title="Settings"><i class="ph ph-gear-six"></i></button>
+          <button class="iconbtn" id="btn-shutdown-side" title="Shutdown"><i class="ph ph-power"></i></button>
         </div>
       </div>
     </div>
@@ -195,6 +196,7 @@
       <div class="mm-sep"></div>
       <button class="mm-item" data-mm="settings"><i class="ph ph-gear-six"></i>Settings</button>
       <button class="mm-item" data-mm="faq"><i class="ph ph-question"></i>FAQ</button>
+      <button class="mm-item" data-mm="shutdown"><i class="ph ph-power"></i>Shutdown</button>
     </div>
 
     <div class="status-line" id="status-line"></div>
@@ -354,6 +356,31 @@
     <button class="mobile-tab" data-mtab="settings"><i class="ph ph-gear-six"></i><span>Settings</span></button>
   </nav>
 </div>
+
+<!-- ====== SHUTDOWN MODAL ====== -->
+<div class="modal-scrim" id="shutdown-scrim"></div>
+<aside class="modal" id="shutdown-modal" aria-hidden="true">
+  <div class="modal-head">
+    <i class="ph ph-power"></i>
+    <h3>Shutdown Accuretta</h3>
+    <button class="iconbtn" id="btn-close-shutdown"><i class="ph ph-x"></i></button>
+  </div>
+  <div class="modal-body" style="text-align: center; padding-top: 1rem;">
+    <p style="margin-bottom: 2rem;">Save session summary before closing?</p>
+    
+    <div id="shutdown-loader" class="hidden" style="margin-bottom: 2rem;">
+      <div class="apple-loader">
+        <div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div><div></div>
+      </div>
+      <p style="margin-top: 1rem; color: var(--text-muted); font-size: 0.9em;">Summarizing session...</p>
+    </div>
+
+    <div id="shutdown-actions" style="display: flex; gap: 1rem; justify-content: center;">
+      <button class="btn accent" id="btn-shutdown-save" style="flex: 1;">Save & Close</button>
+      <button class="btn" id="btn-shutdown-no-save" style="flex: 1;">Close Without Saving</button>
+    </div>
+  </div>
+</aside>
 
 <!-- ====== FAQ MODAL ====== -->
 <div class="modal-scrim" id="faq-scrim"></div>
