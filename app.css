@@ -127,11 +127,11 @@ button {
   display: inline-block;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .splash-logo-light {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .splash-logo-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .splash-logo-dark {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .splash-logo-dark {
   display: inline-block;
 }
 
@@ -365,7 +365,7 @@ button {
 
 /* Brand mark: two pre-loaded <img>s, one per theme variant.
    Default (light theme) shows the dark-slab mark on the light sidebar;
-   :is([data-theme="dark"], [data-theme="dim"]) flips to the white-slab mark on the dark sidebar.
+   :is([data-theme="dark"]) flips to the white-slab mark on the dark sidebar.
    Keeping both in the DOM means the toggle is instant — no fetch lag. */
 .brand img,
 .brand .brand-mark {
@@ -378,11 +378,11 @@ button {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-light {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-dark {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .brand .brand-mark-dark {
   display: inline-block;
 }
 
@@ -863,7 +863,7 @@ button {
   overflow: hidden;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .cost-widget {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .cost-widget {
   background: rgba(22, 22, 28, 0.55) !important;
   backdrop-filter: blur(12px) !important;
   border: 1px solid rgba(255, 255, 255, 0.05) !important;
@@ -968,7 +968,7 @@ button {
   transition: all var(--dur-fast) var(--ease-fluid);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select {
   background-color: rgba(255, 255, 255, 0.03) !important;
   border: 1px solid rgba(255, 255, 255, 0.08) !important;
 }
@@ -979,7 +979,7 @@ button {
   background-color: var(--bg-inset) !important;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select:hover {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select:hover {
   background-color: rgba(255, 255, 255, 0.06) !important;
   border-color: rgba(255, 255, 255, 0.15) !important;
 
@@ -998,7 +998,7 @@ button {
 }
 
 /* Specific dark/dim theme override to force dark backgrounds */
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select option {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .cost-select option {
   background-color: #1a1a1f !important;
   color: #f5f5f7 !important;
 
@@ -1086,7 +1086,7 @@ button {
   overflow: hidden;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge {
   background: rgba(22, 22, 28, 0.55) !important;
   backdrop-filter: blur(12px) !important;
   border: 1px solid rgba(255, 255, 255, 0.05) !important;
@@ -1144,7 +1144,7 @@ button {
   opacity: 0.45 !important;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge svg circle:first-child {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge svg circle:first-child {
   stroke: rgba(255, 255, 255, 0.15) !important;
   opacity: 0.6 !important;
 }
@@ -1628,10 +1628,7 @@ button {
 
 /* dim theme: matches the dark neutral-taupe user bubble. Light cream
    text on the dark taupe stays readable; cool lilac would clash. */
-[data-theme="dim"] .avatar.user {
-  background: #2D2925;
-  color: #F0EBE0;
-}
+
 
 /* aurora theme: matches the dark spruce and neon green-cyan user bubble. */
 [data-theme="aurora"] .avatar.user {
@@ -1680,11 +1677,11 @@ button {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-light {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-dark {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .avatar-mark-dark {
   display: block;
 }
 
@@ -1753,44 +1750,20 @@ button {
 /* dim theme: swap to a darker cool-slate — clearly darker than the page
    bg so the bubble reads as carved-in rather than floating.
    Crisp white/gray text + a soft dark glow keep readability. */
-[data-theme="dim"] .bubble.user {
-  background: #2B2F36 !important;
-  color: #E8EAED !important;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.40) !important;
-}
 
-[data-theme="dim"] .bubble.user p,
-[data-theme="dim"] .bubble.user strong,
-[data-theme="dim"] .bubble.user em,
-[data-theme="dim"] .bubble.user span {
-  color: #E8EAED !important;
-  -webkit-text-fill-color: #E8EAED !important;
-}
+
+
 
 /* Inline code / pre inside the user bubble */
-[data-theme="dim"] .bubble.user code,
-[data-theme="dim"] .bubble.user pre {
-  background: rgba(232, 234, 237, 0.10) !important;
-  color: #E8EAED !important;
-}
 
-[data-theme="dim"] .bubble.user .code-card-body {
-  color: #E8EAED !important;
-}
 
-[data-theme="dim"] .bubble.user .code-card-body .code-line::before {
-  color: rgba(232, 234, 237, 0.45);
-}
 
-[data-theme="dim"] .bubble.user .cc-act {
-  color: rgba(232, 234, 237, 0.65);
-}
 
-[data-theme="dim"] .bubble.user .cc-act:hover {
-  color: #E8EAED;
-  background: rgba(232, 234, 237, 0.10);
-  border-color: rgba(232, 234, 237, 0.20);
-}
+
+
+
+
+
 
 /* aurora theme user bubble matching the custom dark spruce and neon green-cyan glow */
 [data-theme="aurora"] .bubble.user {
@@ -2213,43 +2186,43 @@ button {
   color: var(--fg-muted);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-keyword {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-keyword {
   color: #C8A8FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-string {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-string {
   color: #B5E29B;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-number {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-number {
   color: #F4A261;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-comment {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-comment {
   color: var(--fg-faint);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-fn {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-fn {
   color: #7CC0FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-tag {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-tag {
   color: #C8A8FF;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-attr {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-attr {
   color: #F4B57A;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-var {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-var {
   color: #F4A261;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-decorator {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-decorator {
   color: #F4B57A;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tok-punct {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tok-punct {
   color: var(--fg-muted);
 }
 
@@ -2609,16 +2582,24 @@ button {
   margin: 2px 0;
 }
 
+.md-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 10px 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
 .md-table {
   border-collapse: collapse;
-  margin: 10px 0;
   font-size: 0.92em;
-  width: auto;
-  max-width: 100%;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
+  width: 100%;
+  max-width: none;
+  background: transparent;
+  border: none;
+  border-radius: 0;
   display: table;
 }
 
@@ -3420,9 +3401,9 @@ button {
     inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .chip.on,
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .toolbar-overflow-menu .chip.on,
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .preview-overflow-menu .chip.on {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .chip.on,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .toolbar-overflow-menu .chip.on,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .preview-overflow-menu .chip.on {
   color: var(--accent-hover);
 }
 
@@ -3447,7 +3428,7 @@ button {
 /* Beat the dark/dim .chip.on color override above — composer chips
    stay on the brighter --accent for the outline-tint look, not the
    even-darker --accent-hover. */
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .composer-tools>.chip.on {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .composer-tools>.chip.on {
   color: var(--accent);
 }
 
@@ -3624,7 +3605,7 @@ button {
   flex-shrink: 0;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .model-pill .model-pill-vision,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .model-pill .model-pill-vision,
 .dark .model-pill .model-pill-vision {
   background: color-mix(in srgb, var(--mint-3) 22%, transparent);
   color: var(--mint);
@@ -4814,7 +4795,7 @@ button {
   flex-direction: column;
   gap: 10px;
   z-index: var(--z-toast);
-  max-width: 460px;
+  max-width: min(460px, calc(100vw - 40px));
 }
 
 .approval {
@@ -4831,6 +4812,9 @@ button {
   color: var(--fg);
   position: relative;
   overflow: hidden;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
 }
 
 /* Left accent stripe */
@@ -4981,11 +4965,11 @@ button {
   50% { opacity: 0.45; }
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending {
   color: #f0c44a;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending .pill-dot {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-pending .pill-dot {
   background: rgba(232, 178, 40, 0.18);
   color: #f0c44a;
 }
@@ -5000,11 +4984,11 @@ button {
   color: #2f7a3a;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved {
   color: #95e0a8;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved .pill-dot {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-approved .pill-dot {
   background: rgba(106, 196, 154, 0.20);
   color: #95e0a8;
 }
@@ -5019,11 +5003,11 @@ button {
   color: #c44141;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied {
   color: #ff9b9b;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied .pill-dot {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .status-pill-soft.is-denied .pill-dot {
   background: rgba(231, 108, 108, 0.18);
   color: #ff9b9b;
 }
@@ -5109,7 +5093,7 @@ button {
 .approval .appr-cmd-fn   { color: var(--accent); font-weight: 600; }
 .approval .appr-cmd-arg  { color: var(--fg); }
 .approval .appr-cmd-val  { color: var(--accent); }
-.approval .appr-cmd-shell { color: var(--fg); white-space: pre-wrap; }
+.approval .appr-cmd-shell { color: var(--fg); white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
 
 /* ---- inline info line ---- */
 .approval .appr-info-line {
@@ -6988,7 +6972,7 @@ body,
   padding: 12px 16px !important;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .ctx-gauge {
   background: rgba(22, 22, 28, 0.55) !important;
   backdrop-filter: blur(12px) !important;
   border: 1px solid rgba(255, 255, 255, 0.05) !important;
@@ -7873,11 +7857,11 @@ body,
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.ok {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.ok {
   color: #95e0a8;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.err {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .pycheck-banner.err {
   color: #ff9b9b;
 }
 
@@ -7963,7 +7947,7 @@ body,
   border-bottom-color: color-mix(in srgb, var(--danger, #c92a2a) 40%, var(--border));
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .doc-preview-banner.err {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .doc-preview-banner.err {
   color: #ff9b9b;
 }
 
@@ -8027,7 +8011,7 @@ body,
   height: 100%;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]),
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]),
 .dark {
   .bubble.agent {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
@@ -8668,7 +8652,7 @@ body,
   font-size: 11px;
   font-weight: 600;
 }
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .tool-group-green-pill {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .tool-group-green-pill {
   background: color-mix(in srgb, #51cf66 18%, transparent);
   color: #51cf66;
 }
@@ -8794,7 +8778,7 @@ body,
 .term-err {
   color: var(--danger, #c92a2a);
 }
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .term-err {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .term-err {
   color: #ff8787;
 }
 .term-cursor {
@@ -8941,11 +8925,11 @@ body,
   display: inline-block;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .welcome-logo-light {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .welcome-logo-light {
   display: none;
 }
 
-:is([data-theme="dark"], [data-theme="dim"], [data-theme="aurora"], [data-theme="nebula"]) .welcome-logo-dark {
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]) .welcome-logo-dark {
   display: inline-block;
 }
 
@@ -9176,4 +9160,4 @@ body,
     box-shadow 0.65s cubic-bezier(0.16, 1, 0.3, 1),
     border-color 0.65s cubic-bezier(0.16, 1, 0.3, 1),
     background 0.65s cubic-bezier(0.16, 1, 0.3, 1);
-}
+}

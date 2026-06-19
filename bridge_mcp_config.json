@@ -3,6 +3,12 @@
     "test_python": {
       "command": "python",
       "args": ["test_mcp_server.py"]
+    },
+    "shodan": {
+      "command": "mcp-shodan",
+      "env": {
+        "SHODAN_API_KEY": ""
+      }
     }
   }
 }

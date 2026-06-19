@@ -1165,7 +1165,7 @@
           .replace(/`([^`]+)`/g, "<code>$1</code>");
         const thead = "<thead><tr>" + headerCells.map((c, k) => `<th style="text-align:${aligns[k] || "left"}">${inline(c)}</th>`).join("") + "</tr></thead>";
         const tbody = "<tbody>" + rows.map(r => "<tr>" + r.map((c, k) => `<td style="text-align:${aligns[k] || "left"}">${inline(c)}</td>`).join("") + "</tr>").join("") + "</tbody>";
-        blocks.push(`<table class="md-table">${thead}${tbody}</table>`);
+        blocks.push(`<div class="md-table-wrapper"><table class="md-table">${thead}${tbody}</table></div>`);
         i2 = j;
         continue;
       }

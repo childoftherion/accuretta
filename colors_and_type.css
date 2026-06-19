@@ -299,67 +299,57 @@
    is the OLED-burn-in nudge baked in for free.
    ============================================================ */
 [data-theme="dim"] {
-  --bg:        #3E4249;
-  --bg-raised: #4A4F57;
-  --bg-sunken: #32363B;
-  --bg-inset:  #555B64;
+  --bg:        #c4b8aa;
+  --bg-raised: #ebdacc;
+  --bg-sunken: #a49381;
+  --bg-inset:  #b5a89a;
 
-  --glass-bg:       rgba(74, 79, 87, 0.72);
-  --glass-border:   rgba(255, 255, 255, 0.05);
+  --glass-bg:       rgba(235, 218, 204, 0.72);
+  --glass-border:   rgba(255, 255, 255, 0.2);
 
-  --bg-gradient: linear-gradient(180deg, #444951 0%, #3E4249 38%, #363940 100%);
+  --bg-gradient: linear-gradient(180deg, #d4c8ba 0%, #c4b8aa 38%, #b5a89a 100%);
 
-  --fg:        #E8EAED;
-  --fg-muted:  #B8BCC2;
-  --fg-subtle: #8B9198;
-  --fg-faint:  #6A7077;
-  --fg-invert: var(--off-black);
+  --fg:        #3a3128;
+  --fg-muted:  #5c5044;
+  --fg-subtle: #7a6e61;
+  --fg-faint:  #998c7e;
+  --fg-invert: #ffffff;
 
-  --border:        #555B64;
-  --border-strong: #69707B;
-  --border-subtle: #444951;
+  --border:        #b1a394;
+  --border-strong: #968777;
+  --border-subtle: #d6ccbf;
 
-  /* Accent: a soft, modern blue. The previous sage accent was chosen
-     to offset a warm taupe bg, but with this new cooler slate we use
-     a crisp blue to keep things legible and clean. */
-  --accent:        #89B4FA;
-  --accent-hover:  #B4BEFE;
-  --accent-subtle: rgba(137, 180, 250, 0.18);
-  --accent-fg:     #12141A;
+  --accent:        #6b5a4a;
+  --accent-hover:  #524437;
+  --accent-subtle: rgba(107, 90, 74, 0.12);
+  --accent-fg:     #ffffff;
 
-  --success-subtle: rgba(166, 227, 161, 0.16);
-  --warning-subtle: rgba(249, 226, 175, 0.16);
-  --danger-subtle:  rgba(243, 139, 168, 0.16);
-  --info-subtle:    rgba(137, 180, 250, 0.16);
+  --success-subtle: rgba(100, 160, 100, 0.16);
+  --warning-subtle: rgba(200, 150, 50, 0.16);
+  --danger-subtle:  rgba(200, 80, 80, 0.16);
+  --info-subtle:    rgba(107, 90, 74, 0.16);
 
-  /* Shadows tuned for the medium-dark surface: stronger than light
-     mode's barely-there shadows, softer than dark mode's deep blacks. */
-  --shadow-xs: 0 1px 0 rgba(0,0,0,0.18);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.22), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.05);
-  --shadow-lg: 0 12px 32px rgba(0,0,0,0.32), 0 0 0 1px rgba(255,255,255,0.05);
-  --shadow-pop: 0 22px 64px rgba(0,0,0,0.40), 0 0 0 1px rgba(255,255,255,0.06);
+  --shadow-xs: 0 1px 0 rgba(70, 50, 40, 0.08);
+  --shadow-sm: 0 1px 2px rgba(70, 50, 40, 0.12), 0 0 0 1px rgba(255,255,255,0.3);
+  --shadow-md: 0 4px 12px rgba(70, 50, 40, 0.15), 0 0 0 1px rgba(255,255,255,0.4);
+  --shadow-lg: 0 12px 32px rgba(70, 50, 40, 0.20), 0 0 0 1px rgba(255,255,255,0.4);
+  --shadow-pop: 0 22px 64px rgba(70, 50, 40, 0.25), 0 0 0 1px rgba(255,255,255,0.5);
 
-  --shadow-inset: inset 0 1px 0 rgba(0,0,0,0.15), inset 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-inset: inset 0 1px 0 rgba(70, 50, 40, 0.1), inset 0 0 0 1px rgba(255,255,255,0.2);
 
-  /* Soft-button shadows: gentle inset white highlight + moderate dark
-     drop. Less intense than dark mode (where the surrounding panel is
-     much darker so a deeper drop is needed for the same depth read). */
-  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.10),
-                       0 1px 1px rgba(0,0,0,0.16),
-                       0 2px 5px rgba(0,0,0,0.18),
-                       0 0 0 1px rgba(255,255,255,0.04);
-  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.14),
-                       0 3px 7px rgba(0,0,0,0.22),
-                       0 7px 14px rgba(0,0,0,0.22),
-                       0 0 0 1px rgba(255,255,255,0.06);
-  --btn-shadow-active: inset 0 1px 3px rgba(0,0,0,0.25),
-                       0 0 0 1px rgba(255,255,255,0.04);
-  /* Send button: warm gradient matching the warm dim palette. Same
-     hue family as light theme but slightly muted glow for the medium
-     surrounding background. */
-  --btn-send-gradient: linear-gradient(135deg, #ff8d5a 0%, #ff5e9c 60%, #b07cff 100%);
-  --btn-send-glow:     0 6px 18px rgba(255, 141, 90, 0.32);
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.5),
+                       0 1px 1px rgba(70, 50, 40, 0.08),
+                       0 2px 5px rgba(70, 50, 40, 0.10),
+                       0 0 0 1px rgba(255,255,255,0.2);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.6),
+                       0 3px 7px rgba(70, 50, 40, 0.12),
+                       0 7px 14px rgba(70, 50, 40, 0.12),
+                       0 0 0 1px rgba(255,255,255,0.3);
+  --btn-shadow-active: inset 0 1px 3px rgba(70, 50, 40, 0.15),
+                       0 0 0 1px rgba(255,255,255,0.2);
+
+  --btn-send-gradient: linear-gradient(135deg, #c4b8aa 0%, #a49381 100%);
+  --btn-send-glow:     0 6px 18px rgba(164, 147, 129, 0.35);
 }
 
 /* Apply the gradient at the page level only — children with their own
