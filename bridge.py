@@ -443,6 +443,11 @@ DEFAULT_SETTINGS = {
     "num_predict": -1,
     "temperature": 0.7,
     "top_p": 0.9,
+    "top_k": 40,
+    "min_p": 0.05,
+    "repeat_penalty": 1.1,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
     "keep_alive": "30m",
     "theme": "light",
     "auto_approve_read": True,
@@ -9577,10 +9582,11 @@ def llama_options(settings: dict) -> dict:
     Unlike Ollama, llama-server treats ctx size / GPU layers / batch / threads
     as server-launch flags — not per-request. We only ship per-request
     sampling/predict params here."""
-    opt: dict = {
-        "temperature": float(settings.get("temperature") or 0.7),
-        "top_p": float(settings.get("top_p") or 0.9),
-    }
+    opt: dict = {}
+    t = settings.get("temperature")
+    opt["temperature"] = float(t) if t is not None and t != "" else 0.7
+    p = settings.get("top_p")
+    opt["top_p"] = float(p) if p is not None and p != "" else 0.9
     # Pass through additional sampler params if set. These prevent the model
     # from looping or producing low-diversity output.
     for key, default in (("top_k", 40), ("min_p", 0.05),
