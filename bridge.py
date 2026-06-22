@@ -9203,12 +9203,12 @@ def describe_image(b64: str, hint: str = "") -> str:
         prompt_text = f"Describe this image. Context: {hint}"
         
     payload = {
-        "model": "vision",
+        "model": get_settings().get("model", "local") if VISION_LLAMA == LLAMA else "vision",
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_clean}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_clean}"}},
                     {"type": "text", "text": prompt_text}
                 ]
             }
@@ -10999,6 +10999,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(400, {"error": "path required"})
             if not safe_exists(target):
                 return self._send_json(400, {"error": f"file not found: {target}"})
+            
+            s = get_settings()
+            if target != _llama.loaded_model():
+                # Clear the explicit projector path on model switch so we don't
+                # crash trying to load an incompatible mmproj. Auto-detect will
+                # find the correct one if it exists.
+                s["mmproj_path"] = ""
+                save_json(SETTINGS_FILE, s)
+                
             res = _llama.start(target)
             if res.get("ok"):
                 s = get_settings()
@@ -12344,7 +12353,25 @@ def find_mmproj_for(model_path: str) -> str:
                 shared += 1
         return (same_dir, -shared, len(p.name))
     candidates.sort(key=score)
-    return str(candidates[0].resolve())
+    best = candidates[0]
+    best_same_dir, best_neg_shared, _ = score(best)
+    
+    # If the projector shares at least one token with the model, it's a safe match.
+    if best_neg_shared < 0:
+        return str(best.resolve())
+        
+    # If it shares NO tokens (e.g. generic "mmproj-BF16.gguf"), only auto-load it
+    # if it's the ONLY other .gguf file in the directory. In a crowded directory,
+    # blindly attaching a generic projector to every model causes crashes.
+    try:
+        ggufs_in_dir = list(mp.parent.glob("*.gguf"))
+        if len(ggufs_in_dir) <= 2:
+            return str(best.resolve())
+    except Exception:
+        pass
+        
+    print(f"[llama] skipped generic projector {best.name} for {mp.name} (too ambiguous in a crowded directory)")
+    return ""
 
 
 def scan_gguf_dir(root: str) -> list[dict]:

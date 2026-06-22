@@ -2823,9 +2823,16 @@
               `<pre style="white-space:pre-wrap;font-family:inherit;margin:0;font-style:normal;">${esc(tail)}</pre>` +
             `</div>`;
         } else {
-          const msg = hadTools
-            ? "model ended turn without a reply — ask it what it found, or try again"
-            : "No response — try raising Max reply tokens in Settings.";
+          let msg = "No response — the model may have crashed or hit a context limit. Check the backend console for errors.";
+          if (hadTools) {
+            msg = "model ended turn without a reply — ask it what it found, or try again";
+          } else if (state.settings.num_predict > 0 && state.settings.num_predict < 50) {
+            msg = `No response — Max reply tokens is set very low (${state.settings.num_predict}). Try raising it in Settings.`;
+          } else if (state.settings.num_predict === 0) {
+            msg = "No response — Max reply tokens is set to 0. Try raising it in Settings.";
+          } else if ((images && images.length > 0) && (state.settings.spec_strategy === "draft-mtp" || state.settings.enable_speculative)) {
+            msg = "No response — Speculative Decoding often crashes when processing images. Try disabling it in Settings.";
+          }
           bubble.innerHTML =
             `<i class="quiet-icon ph ph-info"></i>` +
             `<span class="quiet-text">${esc(msg)}</span>`;
