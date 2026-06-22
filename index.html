@@ -229,8 +229,7 @@
                 <button class="chip" id="toggle-tailwind" title="Inject the Tailwind Play CDN into generated HTML and ask the model to use Tailwind classes"><i class="ph ph-wind"></i>Tailwind CDN</button>
                 <button class="chip" id="toggle-multifile" title="Have the model emit a small folder structure (index.html, style.css, script.js, assets/) — preview inlines it, Export Project zips the files separately"><i class="ph ph-folder-simple"></i>Multi-file</button>
                 <div class="overflow-section-label">Network</div>
-                <button class="chip" id="quick-netscan-mothership" title="Inserts a prompt asking the model to scan THIS machine's active TCP/UDP connections and recent DNS, then flag anything weird"><i class="ph ph-radio"></i>Sniff mothership</button>
-                <button class="chip" id="quick-netscan-device" title="Coming soon — sniff the device you're browsing from. Needs a small netagent installed there."><i class="ph ph-laptop"></i>Sniff this device</button>
+                <button class="chip" id="quick-netscan-mothership" title="Inserts a prompt asking the model to scan THIS machine's active TCP/UDP connections and recent DNS, then flag anything weird"><i class="ph ph-radio"></i>Netscan inference device</button>
 
               </div>
             </div>
@@ -399,7 +398,7 @@
     <b>Agent</b> — model calls tools to list files, read, write, run powershell. every write/run asks for your approval first.<br>
     <b>Auto</b> — bridge picks IDE vs. Agent based on what you asked.</p>
 
-    <div class="faq-q">what is sniff mothership?</div>
+    <div class="faq-q">what is netscan inference device?</div>
     <p>a one-click prompt under the <svg class="faq-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/></svg> button that asks the model to scan <i>this</i> machine's active TCP/UDP connections, listening ports, and recent DNS cache, then flag anything weird (unknown processes phoning home, suspicious remote IPs, etc.). a chart card renders inline showing connection counts, top processes, and top remote endpoints — favicons fetched from DuckDuckGo. all data is gathered locally via PowerShell — nothing leaves your machine.</p>
 
     <div class="faq-q">does it render markdown?</div>
@@ -811,7 +810,7 @@
   </div>
 </div>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=202606221248"></script>
 <script>
   // Splash fade-out timer. Lives inline (not in app.js) so it fires
   // independently of when app.js finishes loading — the splash hides on

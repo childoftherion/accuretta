@@ -1053,6 +1053,12 @@
   function renderMarkdown(text) {
     if (!text) return "";
 
+    // === FAILSAFE: STRIP CASCADE TAGS ===
+    // Force-strip proactive tags right before the renderer so they can never bleed into the UI.
+    text = text.replace(/(?:<|&lt;|\\<)cascade(?:>|&gt;|\\>)([\s\S]*?)(?:<|&lt;|\\<)\/cascade(?:>|&gt;|\\>)/gi, "");
+    text = text.replace(/(?:<|&lt;|\\<)cascade[\s\S]*$/gi, "");
+    text = text.replace(/(?:<|&lt;|\\<)c(?:a(?:s(?:c(?:a(?:d(?:e)?)?)?)?)?)?$/gi, "");
+
     // === REWRITE write_file TOOL_CALL BACK TO ```html``` FENCE ===
     // Some models (Qwen3, DeepSeek-distilled) ignore IDE-mode prompts and wrap
     // the requested HTML inside a `write_file` tool_call. Bridge intercepts it
@@ -2251,6 +2257,7 @@
 
     let visible = m.content || "";
     let thoughtChip = "";
+    let cascadeChips = "";
     if (m.role === "assistant") {
       const { thinking, content } = splitThinking(visible);
       visible = content;
@@ -2265,6 +2272,14 @@
             <div class="think-content hidden">${esc(thinking)}</div>
           </div>`;
       }
+      const cascadeRes = splitCascade(visible);
+      visible = cascadeRes.content;
+      if (cascadeRes.cascade && cascadeRes.cascade.length > 0) {
+        let btns = cascadeRes.cascade.map(text => 
+          `<button class="cascade-chip" data-prompt="${esc(text)}"><i class="ph ph-sparkle"></i>${esc(text)}</button>`
+        ).join("");
+        cascadeChips = `<div class="cascade-container">${btns}</div>`;
+      }
     }
 
     const tokTip = m.tokens ? ` title="${m.tokens.toLocaleString()} tokens"` : "";
@@ -2273,8 +2288,20 @@
       <div class="bubble-col">
         ${thoughtChip}
         <div class="bubble ${m.role === "user" ? "user" : "agent"}">${renderMarkdown(visible)}</div>
+        ${cascadeChips}
         <div class="bubble-meta"${tokTip}>${m.role === "user" ? "you" : (state.settings.model || "agent")} · ${relTime(m.t)}</div>
       </div>`;
+    
+    // Attach cascade click listeners
+    row.querySelectorAll(".cascade-chip").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const prompt = btn.dataset.prompt;
+        send({ prompt, invisible: true });
+        const container = btn.parentElement;
+        container.style.opacity = "0.5";
+        container.style.pointerEvents = "none";
+      });
+    });
     // Single copy action under every bubble. Same .bubble-actions row used
     // for the assistant's regenerate strip — keeps placement consistent
     // (under the bubble, on whichever edge the bubble-col flexes to). The
@@ -2925,6 +2952,36 @@
     content = content.replace(/\s*\[\/?\s*$/, ""); // bare "[" or "[/" with nothing after
     return { thinking: thinking.trim(), content };
   }
+
+  function splitCascade(buf) {
+    let cascade = null;
+    let content = buf;
+    
+    // Match <cascade>, \<cascade\>, or &lt;cascade&gt;
+    const cascadeRe = /(?:<|&lt;|\\<)cascade(?:>|&gt;|\\>)([\s\S]*?)(?:<|&lt;|\\<)\/cascade(?:>|&gt;|\\>)/i;
+    const match = cascadeRe.exec(buf);
+    
+    if (match) {
+      try {
+        // Unescape entities and replace smart quotes
+        let jsonStr = match[1].trim()
+            .replace(/['‘’]/g, '"')
+            .replace(/&quot;/g, '"');
+        cascade = JSON.parse(jsonStr);
+        if (!Array.isArray(cascade)) cascade = null;
+      } catch (e) {
+        cascade = null;
+      }
+      content = buf.replace(cascadeRe, "").trim();
+    } else {
+      // Hide partial tags while streaming (handles <, \<, and &lt;)
+      content = content.replace(/(?:<|&lt;|\\<)cascade[\s\S]*$/i, "").trim();
+      // Catch even smaller partials like `<cas` at the absolute end of the stream
+      content = content.replace(/(?:<|&lt;|\\<)c(?:a(?:s(?:c(?:a(?:d(?:e)?)?)?)?)?)?$/i, "").trim();
+    }
+    
+    return { cascade, content };
+  }
   function updateThinkLine(row, running, label) {
     const container = row.querySelector(".think-container");
     if (!container) return;
@@ -2994,7 +3051,10 @@
           }
         }
       }
-      const { thinking, content } = splitThinking(newBuf);
+      let { thinking, content } = splitThinking(newBuf);
+      const cascadeRes = splitCascade(content);
+      content = cascadeRes.content;
+      
       if (thinking && ctx.row) {
         // first few words of current thinking snippet, shimmering
         const preview = thinking.split(/\s+/).slice(-12).join(" ");
@@ -6519,18 +6579,9 @@
 
     // Network: quick prompt insert for "scan this machine"
     $("#quick-netscan-mothership")?.addEventListener("click", () => {
-      const ta = $("#composer-input");
-      if (!ta) return;
       const tmpl = "Run a network snapshot on this machine (call network_snapshot). Then: list the active TCP connections grouped by process, flag anything that looks unusual (unknown processes, connections to suspicious IPs/domains, unexpected open ports), summarize the recent DNS queries, and tell me whether anything warrants a closer look.";
-      const cur = ta.value.trim();
-      ta.value = cur ? cur + "\n\n" + tmpl : tmpl;
-      ta.focus();
-      autoResize(ta);
       $("#toolbar-overflow-menu")?.classList.remove("open");
-    });
-    $("#quick-netscan-device")?.addEventListener("click", () => {
-      $("#toolbar-overflow-menu")?.classList.remove("open");
-      toast("Sniff-this-device needs a netagent on the remote box — coming soon.", "info", 3500, "netagent-soon");
+      send({ prompt: tmpl, invisible: true });
     });
 
     // preview: screenshot the iframe to PNG

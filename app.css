@@ -9161,3 +9161,55 @@ body,
     border-color 0.65s cubic-bezier(0.16, 1, 0.3, 1),
     background 0.65s cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+/* ========================================================= */
+/* CASCADE SUGGESTION CHIPS                                  */
+/* ========================================================= */
+
+.cascade-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0;
+  transition: opacity 0.3s var(--ease-out);
+}
+
+.cascade-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--btn-bg, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 9999px; /* pill shape */
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 100%; /* mobile safeguard */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.cascade-chip i {
+  font-size: 14px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.cascade-chip:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--fg-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.cascade-chip:active {
+  transform: translateY(0);
+  box-shadow: none;
+}

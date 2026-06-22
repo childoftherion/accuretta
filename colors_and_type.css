@@ -299,57 +299,59 @@
    is the OLED-burn-in nudge baked in for free.
    ============================================================ */
 [data-theme="dim"] {
-  --bg:        #c4b8aa;
-  --bg-raised: #ebdacc;
-  --bg-sunken: #a49381;
-  --bg-inset:  #b5a89a;
+  /* Warm, cozy charcoal (Gruvbox-inspired). A rich, comfortable dark theme
+     that isn't flat or depressing, featuring soft sage green accents. */
+  --bg:        #282828;
+  --bg-raised: #3c3836;
+  --bg-sunken: #1d2021;
+  --bg-inset:  #32302f;
 
-  --glass-bg:       rgba(235, 218, 204, 0.72);
-  --glass-border:   rgba(255, 255, 255, 0.2);
+  --glass-bg:       rgba(60, 56, 54, 0.75);
+  --glass-border:   rgba(255, 255, 255, 0.06);
 
-  --bg-gradient: linear-gradient(180deg, #d4c8ba 0%, #c4b8aa 38%, #b5a89a 100%);
+  --bg-gradient: linear-gradient(180deg, #32302f 0%, #282828 40%, #1d2021 100%);
 
-  --fg:        #3a3128;
-  --fg-muted:  #5c5044;
-  --fg-subtle: #7a6e61;
-  --fg-faint:  #998c7e;
-  --fg-invert: #ffffff;
+  --fg:        #ebdbb2;
+  --fg-muted:  #a89984;
+  --fg-subtle: #928374;
+  --fg-faint:  #665c54;
+  --fg-invert: #282828;
 
-  --border:        #b1a394;
-  --border-strong: #968777;
-  --border-subtle: #d6ccbf;
+  --border:        #504945;
+  --border-strong: #665c54;
+  --border-subtle: #3c3836;
 
-  --accent:        #6b5a4a;
-  --accent-hover:  #524437;
-  --accent-subtle: rgba(107, 90, 74, 0.12);
-  --accent-fg:     #ffffff;
+  --accent:        #8b9a82; /* Soft sage green */
+  --accent-hover:  #9ea996;
+  --accent-subtle: rgba(139, 154, 130, 0.15);
+  --accent-fg:     #1d2021; /* Dark text on sage looks better than white */
 
-  --success-subtle: rgba(100, 160, 100, 0.16);
-  --warning-subtle: rgba(200, 150, 50, 0.16);
-  --danger-subtle:  rgba(200, 80, 80, 0.16);
-  --info-subtle:    rgba(107, 90, 74, 0.16);
+  --success-subtle: rgba(152, 151, 26, 0.15);
+  --warning-subtle: rgba(215, 153, 33, 0.15);
+  --danger-subtle:  rgba(204, 36, 29, 0.15);
+  --info-subtle:    rgba(69, 133, 136, 0.15);
 
-  --shadow-xs: 0 1px 0 rgba(70, 50, 40, 0.08);
-  --shadow-sm: 0 1px 2px rgba(70, 50, 40, 0.12), 0 0 0 1px rgba(255,255,255,0.3);
-  --shadow-md: 0 4px 12px rgba(70, 50, 40, 0.15), 0 0 0 1px rgba(255,255,255,0.4);
-  --shadow-lg: 0 12px 32px rgba(70, 50, 40, 0.20), 0 0 0 1px rgba(255,255,255,0.4);
-  --shadow-pop: 0 22px 64px rgba(70, 50, 40, 0.25), 0 0 0 1px rgba(255,255,255,0.5);
+  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255,255,255,0.03);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-pop: 0 22px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255,255,255,0.06);
 
-  --shadow-inset: inset 0 1px 0 rgba(70, 50, 40, 0.1), inset 0 0 0 1px rgba(255,255,255,0.2);
+  --shadow-inset: inset 0 1px 0 rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255,255,255,0.02);
 
-  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.5),
-                       0 1px 1px rgba(70, 50, 40, 0.08),
-                       0 2px 5px rgba(70, 50, 40, 0.10),
-                       0 0 0 1px rgba(255,255,255,0.2);
-  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.6),
-                       0 3px 7px rgba(70, 50, 40, 0.12),
-                       0 7px 14px rgba(70, 50, 40, 0.12),
-                       0 0 0 1px rgba(255,255,255,0.3);
-  --btn-shadow-active: inset 0 1px 3px rgba(70, 50, 40, 0.15),
-                       0 0 0 1px rgba(255,255,255,0.2);
+  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.05),
+                       0 1px 1px rgba(0, 0, 0, 0.2),
+                       0 2px 5px rgba(0, 0, 0, 0.3),
+                       0 0 0 1px rgba(255,255,255,0.04);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.08),
+                       0 3px 7px rgba(0, 0, 0, 0.3),
+                       0 7px 14px rgba(0, 0, 0, 0.4),
+                       0 0 0 1px rgba(255,255,255,0.06);
+  --btn-shadow-active: inset 0 1px 3px rgba(0, 0, 0, 0.4),
+                       0 0 0 1px rgba(255,255,255,0.03);
 
-  --btn-send-gradient: linear-gradient(135deg, #c4b8aa 0%, #a49381 100%);
-  --btn-send-glow:     0 6px 18px rgba(164, 147, 129, 0.35);
+  --btn-send-gradient: linear-gradient(135deg, #8b9a82 0%, #6e7c66 100%);
+  --btn-send-glow:     0 6px 18px rgba(139, 154, 130, 0.25);
 }
 
 /* Apply the gradient at the page level only — children with their own

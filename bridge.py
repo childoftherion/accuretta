@@ -9507,7 +9507,8 @@ rules:
 8. NEVER re-emit full file content you already generated in a previous turn. if the user asks you to save something you already built, call write_file with the content but do NOT dump the full code in the visible chat text — just confirm "saved to <path>".
 
 keep responses tight."""
-    parts.append(core)
+    cascade_rule = "\n\nproactive suggestions: if there are obvious, highly actionable next steps for the user, output up to 3 short suggestions at the absolute end of your message in this exact format: <cascade>[\"Action 1\", \"Action 2\"]</cascade>. Only do this if genuinely applicable. Keep suggestions under 5 words."
+    parts.append(core + cascade_rule)
 
     # === EMOTION STICKERS ===
     parts.append("""visual stickers:
@@ -9824,8 +9825,13 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                 _set_cancel_resp(chat_id, None)
 
             if cancel_ev.is_set():
-                emit({"type": "notice", "note": "stopped by user"})
-                return None
+                try:
+                    emit({"type": "notice", "note": "stopped by user"})
+                except Exception:
+                    pass
+                partial = {"role": "assistant", "content": "".join(content_buf)}
+                partial["_appended_intermediate"] = list(conversation[_start_len:])
+                return partial
 
             full_text = "".join(content_buf)
 
@@ -9937,6 +9943,11 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                     "content": compress_tool_result(name, result, _trunc),
                 })
             rounds += 1
+    except Exception as e:
+        print(f"run_chat_turn interrupted: {e}")
+        partial = {"role": "assistant", "content": "".join(content_buf) if 'content_buf' in locals() else ""}
+        partial["_appended_intermediate"] = list(conversation[_start_len:]) if 'conversation' in locals() else []
+        return partial
     finally:
         _chat_emitters.pop(chat_id, None)
         _unregister_cancel(chat_id)
