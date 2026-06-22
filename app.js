@@ -1082,12 +1082,18 @@
     text = text.replace(/<\|python_tag\|>[\s\S]*?(<\|eom_id\|>|<\|eot_id\|>)/gi, "");
     // Mistral native:  [TOOL_CALLS][{...}]
     text = text.replace(/\[TOOL_CALLS\]\s*\[[\s\S]*?\]/gi, "");
+    // Gemma 4 native: <|tool_call>call:NAME{...}<tool_call|>
+    text = text.replace(/<\|tool_call>[\s\S]*?(?:<tool_call\|>)/gi, "");
+    // Self-closing XML tag: <tool_call name="..." />
+    text = text.replace(/<tool_call\s+[^>]*?\/>/gi, "");
+    
     // Partial / streaming open-only forms — the closer hasn't arrived yet,
     // so the regex above can't catch them and the user sees raw tag spam
     // flicker mid-stream. Strip from the open tag to end-of-text.
     text = text.replace(/<tool_call>[\s\S]*$/gi, "");
     text = text.replace(/<call:[a-zA-Z0-9_\-]+>[\s\S]*$/gi, "");
     text = text.replace(/<\|python_tag\|>[\s\S]*$/gi, "");
+    text = text.replace(/<\|tool_call>[\s\S]*$/gi, "");
     text = text.replace(/\[TOOL_CALLS\][\s\S]*$/gi, "");
     text = text.replace(/```tool_call[\s\S]*$/gi, "");
     text = text.replace(/```json\s*\{[\s\S]*?"name"[\s\S]*?\}\s*```/gi, "");
@@ -1097,7 +1103,9 @@
     text = text.replace(/<invoke>[\s\S]*?<\/invoke>/gi, "");
     text = text.replace(/<tool>[\s\S]*?<\/tool>/gi, "");
     text = text.replace(/\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}/g, "");
+    text = text.replace(/\{\s*"function"\s*:\s*"[^"]+"\s*,\s*"parameter(?:s)?"\s*:\s*\{[\s\S]*?\}\s*\}/g, "");
     text = text.replace(/\[[\s\S]*?\{[\s\S]*?"name"[\s\S]*?"arguments"[\s\S]*?\}[\s\S]*?\]/g, "");
+    text = text.replace(/\[[\s\S]*?\{[\s\S]*?"function"[\s\S]*?"parameter(?:s)?"[\s\S]*?\}[\s\S]*?\]/g, "");
     text = text.replace(/\*\*Tool call:.*?\*\*/gi, "");
     text = text.replace(/\*\*Function call:.*?\*\*/gi, "");
     text = text.replace(/Calling\s+\w+\s*\(.*?\)\s*\.\.\./gi, "");
@@ -2292,16 +2300,7 @@
         <div class="bubble-meta"${tokTip}>${m.role === "user" ? "you" : (state.settings.model || "agent")} · ${relTime(m.t)}</div>
       </div>`;
     
-    // Attach cascade click listeners
-    row.querySelectorAll(".cascade-chip").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const prompt = btn.dataset.prompt;
-        send({ prompt, invisible: true });
-        const container = btn.parentElement;
-        container.style.opacity = "0.5";
-        container.style.pointerEvents = "none";
-      });
-    });
+    // (Cascade click listeners are now handled via event delegation on #chat-inner)
     // Single copy action under every bubble. Same .bubble-actions row used
     // for the assistant's regenerate strip — keeps placement consistent
     // (under the bubble, on whichever edge the bubble-col flexes to). The
@@ -2549,7 +2548,11 @@
       <button type="button" class="bubble-action" data-act="regen" title="Regenerate"><i class="ph ph-arrow-counter-clockwise"></i></button>
       <button type="button" class="bubble-action" data-act="copy" title="Copy"><i class="ph ph-copy"></i></button>
     `;
-    actions.querySelector('[data-act="regen"]').addEventListener("click", regenerateLast);
+    const regenBtn = actions.querySelector('[data-act="regen"]');
+    regenBtn.addEventListener("click", regenerateLast);
+    // If the last reply came back empty, pulse the retry button so the user
+    // knows what to click. Cleared on the next turn (see streamChat).
+    if (state.attentionRetry) regenBtn.classList.add("attention");
     actions.querySelector('[data-act="copy"]').addEventListener("click", async (e) => {
       const btn = e.currentTarget;
       const text = bubble?.innerText || "";
@@ -2741,6 +2744,9 @@
     const regenerate = !!(opts && opts.regenerate);
     const bubble = agentRow.querySelector("#stream-bubble");
     const toolStack = agentRow.querySelector("#tool-stack");
+    // Cleared each turn; the empty-reply branch sets it true so the retry
+    // button pulses for attention until a real reply lands.
+    state.attentionRetry = false;
     let buf = "";
     const toolCards = new Map();
 
@@ -2834,15 +2840,21 @@
       // without a visible answer, surface what we have so the user isn't
       // staring at nothing. Promote the tail of thinking if it's substantive.
       if (bubble && bubble.classList.contains("hidden")) {
-        const { thinking } = splitThinking(buf);
+        const { thinking, content } = splitThinking(buf);
+        const cascadeRes = splitCascade(content);
+        const hasCascade = cascadeRes.cascade && cascadeRes.cascade.length > 0;
         const hadTools = toolStack && toolStack.children.length > 0;
-        bubble.classList.remove("hidden");
-        bubble.classList.add("quiet");
-        // All three empty-state branches render as: leading info icon +
-        // italic message text. The CSS for .bubble.quiet handles the flex
-        // layout, padding, and accent-tinted icon — see .quiet-icon there.
-        if (thinking && thinking.length > 40) {
-          const tail = thinking.length > 900 ? "…" + thinking.slice(-900) : thinking;
+        
+        if (!hasCascade) {
+          bubble.classList.remove("hidden");
+          bubble.classList.add("quiet");
+          // Reply came back empty/incomplete — flag so the retry button pulses.
+          state.attentionRetry = true;
+          // All three empty-state branches render as: leading info icon +
+          // italic message text. The CSS for .bubble.quiet handles the flex
+          // layout, padding, and accent-tinted icon — see .quiet-icon there.
+          if (!hadTools && thinking && thinking.length > 40) {
+            const tail = thinking.length > 900 ? "…" + thinking.slice(-900) : thinking;
           bubble.innerHTML =
             `<i class="quiet-icon ph ph-info"></i>` +
             `<div class="quiet-text">` +
@@ -2863,6 +2875,7 @@
           bubble.innerHTML =
             `<i class="quiet-icon ph ph-info"></i>` +
             `<span class="quiet-text">${esc(msg)}</span>`;
+          }
         }
       }
     }
@@ -2892,6 +2905,14 @@
       if (openIdx >= 0) {
         content = buf.slice(0, openIdx);
         thinking = buf.slice(openIdx);
+        
+        // Implicit close: if the model forgot to close the think tag but started a
+        // native tool call, treat the tool call opener as the end of the thinking block.
+        const implicitCloseIdx = thinking.search(/<\/?tool_call>|<\|tool_call>|<call:[a-zA-Z0-9_\-]+>|\[TOOL_CALLS\]|```tool_call/i);
+        if (implicitCloseIdx > 0) {
+          content += thinking.slice(implicitCloseIdx);
+          thinking = thinking.slice(0, implicitCloseIdx);
+        }
       } else {
         content = buf;
       }
@@ -2932,13 +2953,10 @@
       // visible bubble is clean.
       /<\|"\|>/g,
       /<\|'\|>/g,
-      // Gemma 4 tool-call wrapper tokens. Same reasoning: valid calls are
-      // already parsed and extracted by the bridge; only stray openers /
-      // closers / partial bodies would reach the visible content path.
-      /<\|tool_call>(?:call\s*:)?/gi,
-      /<tool_call\|>/gi,
-      /<\|tool_response>(?:response\s*:)?/gi,
-      /<tool_response\|>/gi,
+      // Note: we DO NOT strip <|tool_call> tags here anymore. If we strip
+      // the tags here, the naked body (NAME{...}) bleeds into the UI because
+      // renderMarkdown won't be able to find the start/end bounds to strip
+      // the whole block. renderMarkdown handles it instead.
     ];
     for (const re of junk) { thinking = thinking.replace(re, ""); content = content.replace(re, ""); }
     // Trailing partial-tag stripper. Catches the case where the stream cuts
@@ -3064,6 +3082,24 @@
           thinkContent.textContent = thinking;
         }
       }
+      
+      // Render live cascade chips into the parent container regardless of other content
+      if (cascadeRes.cascade && cascadeRes.cascade.length > 0) {
+        let btns = cascadeRes.cascade.map(text => 
+          `<button class="cascade-chip" data-prompt="${esc(text)}"><i class="ph ph-sparkle"></i>${esc(text)}</button>`
+        ).join("");
+        let container = ctx.row.querySelector(".cascade-container");
+        if (!container) {
+          container = document.createElement("div");
+          container.className = "cascade-container";
+          bubble.parentNode.appendChild(container);
+        }
+        container.innerHTML = btns;
+      } else {
+        let container = ctx.row.querySelector(".cascade-container");
+        if (container) container.remove();
+      }
+
       if (content.trim()) {
         bubble.classList.remove("hidden");
         // Detect an in-progress LARGE code fence. The full markdown render
@@ -3242,6 +3278,25 @@
         }
         updateToolGroupHead(toolStack);
       }
+    } else if (evt.type === "tool_dialect_warning") {
+      // Display dialect parsing errors so the user knows the tool didn't run.
+      // Rendered as a distinct system notice — visually separated from the
+      // model's prose so it doesn't read as model output.
+      bubble.classList.remove("hidden");
+      bubble.innerHTML += `<div class="dialect-warn"><i class="ph ph-warning"></i><span><strong>Warning:</strong> ${esc(evt.message)}</span></div>`;
+    } else if (evt.type === "tools_unavailable") {
+      // Model can't do tools (e.g. Gemma). Render as a persistent sibling ABOVE
+      // the bubble — NOT inside it, since bubble.innerHTML gets replaced as
+      // content streams. Reuses the .dialect-warn notice styling.
+      let note = row && row.querySelector(".tools-off-note");
+      if (!note && bubble && bubble.parentNode) {
+        note = document.createElement("div");
+        note.className = "dialect-warn tools-off-note";
+        bubble.parentNode.insertBefore(note, bubble);
+      }
+      if (note) {
+        note.innerHTML = `<i class="ph ph-warning"></i><span><strong>Tools off:</strong> ${esc(evt.message)}</span>`;
+      }
     } else if (evt.type === "context_trimmed") {
       // Conveyor belt elision notice — show a single pill above the agent
       // row's tool stack. Replaces any prior pill from this turn so re-rounds
@@ -3365,18 +3420,17 @@
         if (finalBubble) {
           const { content: finalContent } = splitThinking(full);
           if (finalContent.trim()) {
-            finalBubble.classList.remove("hidden");
             const rendered = renderMarkdown(finalContent);
             if (rendered && rendered.trim()) {
+              finalBubble.classList.remove("hidden");
               finalBubble.innerHTML = rendered;
+              enhanceCodeBlocks(finalBubble);
+              setTimeout(() => scrollToBottom(true), 50);
             } else {
-              // renderMarkdown returned empty (all content was tool-call-stripped
-              // or similar) — fall back to escaped raw text so the bubble shows
-              // SOMETHING instead of staring blank back at the user.
-              finalBubble.innerHTML = `<pre style="white-space:pre-wrap;font-family:inherit;margin:0;">${esc(finalContent)}</pre>`;
+              // All content was tool-call-stripped. Keep the bubble hidden.
+              finalBubble.innerHTML = "";
+              finalBubble.classList.add("hidden");
             }
-            enhanceCodeBlocks(finalBubble);
-            setTimeout(() => scrollToBottom(true), 50);
           }
           updateThinkLine(lastRow, false);
         }
@@ -5851,6 +5905,19 @@
     // Restore all-time persistent token totals
     state._allTimeTokOut = parseInt(localStorage.getItem("accuretta:all-tok-out") || "0", 10) || 0;
     state._allTimeTokIn  = parseInt(localStorage.getItem("accuretta:all-tok-in")  || "0", 10) || 0;
+    // Collapsible: start minimized to save vertical space; remember the choice.
+    const widget = $("#cost-widget");
+    const toggle = $("#cost-widget-toggle");
+    if (widget && toggle) {
+      const expanded = localStorage.getItem("accuretta:cost-expanded") === "1";
+      widget.classList.toggle("collapsed", !expanded);
+      toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+      toggle.addEventListener("click", () => {
+        const isExpanded = !widget.classList.toggle("collapsed");
+        toggle.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+        localStorage.setItem("accuretta:cost-expanded", isExpanded ? "1" : "0");
+      });
+    }
     // Wire up dropdown
     const sel = $("#cost-select");
     if (sel) {
@@ -6915,6 +6982,19 @@
 
     // ----- collapsible reasoning header click delegation -----
     $("#chat-inner")?.addEventListener("click", (e) => {
+      // cascade chip click delegation
+      const cascadeBtn = e.target.closest(".cascade-chip");
+      if (cascadeBtn) {
+        const prompt = cascadeBtn.dataset.prompt;
+        if (prompt) send({ prompt, invisible: true });
+        const container = cascadeBtn.parentElement;
+        if (container) {
+          container.style.opacity = "0.5";
+          container.style.pointerEvents = "none";
+        }
+        return;
+      }
+
       const thinkHeader = e.target.closest(".think-header");
       if (!thinkHeader) return;
       const container = thinkHeader.closest(".think-container");

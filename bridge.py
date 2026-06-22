@@ -1,5 +1,5 @@
 """
-Accuretta bridge — local Ollama proxy + tools + approvals + static server.
+Accuretta bridge — local llama.cpp proxy + tools + approvals + static server.
 
 One process. Serves the frontend (index.html / app.js / app.css / Design Change)
 and exposes JSON/SSE endpoints for chat streaming, tool invocation, workspace,
@@ -8444,9 +8444,6 @@ def tools_for_llama() -> list[dict]:
     return out
 
 
-# back-compat alias — some old call sites may still use the ollama name.
-tools_for_ollama = tools_for_llama
-
 
 def tools_for_prompt() -> str:
     lines = ["Available tools (call via <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>):"]
@@ -8701,11 +8698,17 @@ TOOL_CALL_GEMMA_RE = re.compile(
 TOOL_CALL_QWEN_RE = re.compile(
     r"<\|function_call\|>\s*(\{[\s\S]*?\})\s*(?:<\|function_calls_end\|>|(?=<\|function_call\|>)|$)",
     re.IGNORECASE)
+# Self-closing XML tag dialect (often output by models like Gemma when prompted
+# with certain schemas, or Llama 3 when hallucinating XML):
+#   <tool_call name="..." arguments='...'/>
+TOOL_CALL_SELFCLOSING_RE = re.compile(
+    r"<tool_call\s+([^>]+)/>",
+    re.IGNORECASE)
 # Heuristic: model emitted tool-call syntax but no parser matched it.
 # When this fires with zero parsed calls, the reply is almost certainly
 # a hallucination from a chat-template mismatch.
 TOOL_SYNTAX_HINT_RE = re.compile(
-    r"<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|<\|tool_call>|```tool_call|<\|function_calls_begin\|>",
+    r'<call:[a-zA-Z]|<\|python_tag\|>|\[TOOL_CALLS\]|<tool_call>|<\|tool_call>|```tool_call|<\|function_calls_begin\|>|\{"name"\s*:\s*"',
     re.IGNORECASE)
 
 
@@ -8782,6 +8785,45 @@ def repair_tool_args(raw) -> dict:
         return v if isinstance(v, dict) else {"value": v}
     except Exception:
         pass
+    # Escape literal newlines/tabs inside JSON string values — Gemma and
+    # other local models emit real \n characters inside "content":"..." when
+    # the value contains code.  json.loads rejects unescaped control chars.
+    def _esc_ctrl_in_strings(t: str) -> str:
+        out = []
+        in_s = False
+        esc2 = False
+        for ch in t:
+            if in_s:
+                if esc2:
+                    esc2 = False
+                    out.append(ch)
+                elif ch == '\\':
+                    esc2 = True
+                    out.append(ch)
+                elif ch == '"':
+                    in_s = False
+                    out.append(ch)
+                elif ch == '\n':
+                    out.append('\\n')
+                elif ch == '\r':
+                    out.append('\\r')
+                elif ch == '\t':
+                    out.append('\\t')
+                else:
+                    out.append(ch)
+            else:
+                if ch == '"':
+                    in_s = True
+                out.append(ch)
+        return "".join(out)
+    s_esc = _esc_ctrl_in_strings(s)
+    if s_esc != s:
+        try:
+            v = json.loads(s_esc)
+            return v if isinstance(v, dict) else {"value": v}
+        except Exception:
+            pass
+        s = s_esc  # use the escaped version for subsequent attempts
     # try JS-style → JSON repair (unquoted keys + Windows-path backslashes)
     try:
         v = json.loads(_js_to_json(s))
@@ -8983,30 +9025,100 @@ def extract_tool_calls(text: str) -> list[dict]:
             args = {}
         _add({"name": name, "arguments": args})
 
-    # 7. Bare JSON tool call (no wrapper) — LAST-CHANCE fallback. Some
+    # 7. Self-closing XML tag dialect: <tool_call name="..." arguments='...'/>
+    for m in TOOL_CALL_SELFCLOSING_RE.finditer(text):
+        attrs = m.group(1)
+        name_m = re.search(r"name=(['\"])(.*?)\1", attrs, re.IGNORECASE)
+        args_m = re.search(r"arguments=(['\"])(.*?)\1", attrs, re.IGNORECASE)
+        if name_m and args_m:
+            name = name_m.group(2)
+            # Some models emit html-encoded JSON in the attribute
+            args_str = args_m.group(2).replace('&quot;', '"').replace('&apos;', "'").replace('&#39;', "'")
+            _add({"name": name, "arguments": repair_tool_args(args_str)})
+
+    # 8. Bare JSON tool call (no wrapper) — LAST-CHANCE fallback. Some
     # fine-tunes and chat-template-confused merges emit raw
     # {"name":"...","arguments":{...}} right in the assistant turn without
-    # any <tool_call> tags. Only fires when parsers 1-6 found nothing AND
-    # the JSON blob carries BOTH "name" and "arguments" / "parameters" keys
-    # — keeps false positives down on models that casually quote tool-call
-    # examples in prose. Balanced-brace scan respects string contents so
-    # braces inside string values don't break span detection.
-    if not calls and ('"name"' in text or "'name'" in text):
-        for s, e in _find_balanced_json_objects(text):
+    # any <tool_call> tags. Also catches Qwen's native bare format:
+    # {"function":"...","parameter":{...}}. Only fires when parsers 1-6 found nothing.
+    if not calls and ('"name"' in text or "'name'" in text or '"function"' in text or "'function'" in text):
+        spans = _find_balanced_json_objects(text)
+        for s, e in spans:
             chunk = text[s:e]
-            if '"name"' not in chunk and "'name'" not in chunk:
+            if '"name"' not in chunk and "'name'" not in chunk and '"function"' not in chunk and "'function'" not in chunk:
                 continue
             parsed = repair_tool_args(chunk)
             if not isinstance(parsed, dict):
                 continue
-            nm = parsed.get("name") or parsed.get("tool")
+            nm = parsed.get("name") or parsed.get("tool") or parsed.get("function")
             if not nm:
                 continue
-            if "arguments" not in parsed and "parameters" not in parsed:
+            if "arguments" not in parsed and "parameters" not in parsed and "parameter" not in parsed:
                 continue
             if "parameters" in parsed and "arguments" not in parsed:
                 parsed["arguments"] = parsed.pop("parameters")
+            elif "parameter" in parsed and "arguments" not in parsed:
+                parsed["arguments"] = parsed.pop("parameter")
             _add(parsed)
+
+        # 8b. Truncated bare JSON — model ran out of tokens mid-object so
+        # _find_balanced_json_objects found no balanced span.  Locate the
+        # first '{' that precedes a '"name"' key and hand the remainder to
+        # repair_tool_args which can close missing braces and fix literal
+        # newlines inside JSON strings.
+        if not calls:
+            # Find candidate start positions: every { that begins what
+            # looks like a tool-call JSON object.
+            _name_hint = re.compile(r'\{\s*"(?:name|function)"', re.IGNORECASE)
+            for m in _name_hint.finditer(text):
+                tail = text[m.start():]
+                # Escape literal newlines inside JSON string values so
+                # json.loads has a chance.  We do this by finding runs
+                # inside "..." and replacing \n → \\n.
+                def _escape_literal_newlines(s: str) -> str:
+                    out = []
+                    in_str = False
+                    esc = False
+                    for ch in s:
+                        if in_str:
+                            if esc:
+                                esc = False
+                                out.append(ch)
+                            elif ch == '\\':
+                                esc = True
+                                out.append(ch)
+                            elif ch == '"':
+                                in_str = False
+                                out.append(ch)
+                            elif ch == '\n':
+                                out.append('\\n')
+                            elif ch == '\r':
+                                out.append('\\r')
+                            elif ch == '\t':
+                                out.append('\\t')
+                            else:
+                                out.append(ch)
+                        else:
+                            if ch == '"':
+                                in_str = True
+                            out.append(ch)
+                    return "".join(out)
+
+                escaped = _escape_literal_newlines(tail)
+                parsed = repair_tool_args(escaped)
+                if not isinstance(parsed, dict):
+                    continue
+                nm = parsed.get("name") or parsed.get("tool") or parsed.get("function")
+                if not nm:
+                    continue
+                if "arguments" not in parsed and "parameters" not in parsed and "parameter" not in parsed:
+                    continue
+                if "parameters" in parsed and "arguments" not in parsed:
+                    parsed["arguments"] = parsed.pop("parameters")
+                elif "parameter" in parsed and "arguments" not in parsed:
+                    parsed["arguments"] = parsed.pop("parameter")
+                _add(parsed)
+                break  # one tool call is enough for the truncated case
 
     return calls
 
@@ -9113,15 +9225,6 @@ def _tools_spec_overhead_tokens(tools_json: str) -> int:
     return overhead
 
 
-# back-compat shims — old call sites; rewritten to go through llama-server.
-def ollama_get(path: str) -> dict:  # type: ignore[no-redef]
-    return llama_get(path)
-
-
-def ollama_post(path: str, payload: dict) -> dict:  # type: ignore[no-redef]
-    return llama_post(path, payload)
-
-
 def _parse_size_to_b(s: str) -> float:
     """parse '7.6B' / '13b' / '70B' -> billions of params. Returns 0.0 on fail."""
     if not s:
@@ -9175,10 +9278,6 @@ def llama_post_stream(path: str, payload: dict, base: str | None = None):
         method="POST",
     )
     return urllib.request.urlopen(req, timeout=None)
-
-
-# back-compat: old name some callers may still use
-ollama_post_stream = llama_post_stream
 
 
 def describe_image(b64: str, hint: str = "") -> str:
@@ -9481,8 +9580,6 @@ formatting rules for the ```html``` fence:
 2. never JSON-escape: no literal \\n, \\t, or \\" sequences inside the fence.
 3. never wrap the fence inside a tool call. the bare fence IS the answer for case (A).
 
-tool format (only for case C): <tool_call>{{"name":"...","arguments":{{...}}}}</tool_call>
-
 status/thinking goes in <think>...</think> tags. the visible answer (prose, fence, or tool result confirmation) goes OUTSIDE think tags."""
     else:
         core = f"""you are accuretta, a local agent on the user's machine.
@@ -9494,8 +9591,6 @@ modes:
 - AGENT: call tools. windows/system32 blocked. all writes need approval.
 - AUTO: bridge picks based on request.
 
-tool format: <tool_call>{{"name":"...","arguments":{{...}}}}</tool_call>
-
 rules:
 1. status/thinking goes in <think>...</think> tags (UI shows as status line)
 2. final answer goes OUTSIDE think tags — never end a turn with only tools or thinking
@@ -9505,14 +9600,14 @@ rules:
 6. desktop: enabled={settings.get("desktop_enabled", False)}. if disabled, tell user to enable in Settings. observe before act (describe_screen → decide → act → verify). only allowlisted apps. every action needs approval.
 7. CHAIN TOOLS AGGRESSIVELY: when the user asks you to read a file, read it immediately after finding it. do not stop after list_directory. when asked to write, write immediately after confirming the path. complete tasks in the fewest tool calls possible. never ask the user "shall i read it?" or "would you like me to proceed?" — just do it.
 8. NEVER re-emit full file content you already generated in a previous turn. if the user asks you to save something you already built, call write_file with the content but do NOT dump the full code in the visible chat text — just confirm "saved to <path>".
+9. proactive suggestions: if there are obvious, highly actionable next steps for the user, output up to 3 short suggestions at the end of your message in this exact format: <cascade>["Action 1", "Action 2"]</cascade>. Only do this if genuinely applicable. Keep suggestions under 5 words.
 
 keep responses tight."""
-    cascade_rule = "\n\nproactive suggestions: if there are obvious, highly actionable next steps for the user, output up to 3 short suggestions at the absolute end of your message in this exact format: <cascade>[\"Action 1\", \"Action 2\"]</cascade>. Only do this if genuinely applicable. Keep suggestions under 5 words."
-    parts.append(core + cascade_rule)
+    parts.append(core)
 
     # === EMOTION STICKERS ===
     parts.append("""visual stickers:
-you may occasionally append exactly one of these to the very end of your response. do NOT use regular unicode emojis.
+you may occasionally append exactly one of these to the absolute end of your response (after any <cascade> tags). do NOT use regular unicode emojis.
 - ![celebrate](/accuMOTION/accu_CELEBRATE.png)
 - ![cool](/accuMOTION/accu_COOL.png)
 - ![frustrated](/accuMOTION/accu_FRUSTRATED.png)
@@ -9606,10 +9701,16 @@ def llama_options(settings: dict) -> dict:
     return opt
 
 
-# back-compat alias
-ollama_options = llama_options
 
 
+
+def _is_gemma_model(name: str | None) -> bool:
+    """Gemma emits a non-JSON, Python-shaped function-call dialect (triple-quoted
+    strings, its own <|tool_call> token syntax) that neither llama.cpp's native
+    parser nor our text fallback can reliably decode — tool calls silently no-op
+    while the model narrates fake success. We force these into chat-only mode.
+    See the dialect notes near TOOL_CALL_GEMMA_RE and the in-app FAQ."""
+    return "gemma" in (name or "").lower()
 
 
 def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
@@ -9857,6 +9958,23 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                             "name": name,
                             "arguments": args,
                         })
+                
+                if parsed_calls:
+                    # Strip fallback tool-call blocks so they don't leak into the UI as clear text
+                    full_text = re.sub(r"(?:<|&lt;|\\<)?tool_call(?:>|&gt;|\\>)?[\s\S]*?((?:<|&lt;|\\<)?/tool_call(?:>|&gt;|\\>)?|$)", "", full_text, flags=re.IGNORECASE)
+                    full_text = re.sub(r"```tool_call[\s\S]*?(?:```|$)", "", full_text, flags=re.IGNORECASE)
+                    full_text = re.sub(r"\[TOOL_CALLS\][\s\S]*?(?:\]|$)", "", full_text, flags=re.IGNORECASE)
+                    if '"name"' in full_text or "'name'" in full_text or '"function"' in full_text or "'function'" in full_text:
+                        for s, e in reversed(_find_balanced_json_objects(full_text)):
+                            chunk = full_text[s:e]
+                            try:
+                                parsed = json.loads(chunk)
+                                if isinstance(parsed, dict) and (parsed.get("name") or parsed.get("function", {}).get("name")):
+                                    full_text = full_text[:s] + full_text[e:]
+                            except Exception:
+                                pass
+                    full_text = full_text.strip()
+
                 # diagnostic — model emitted tool-call syntax but nothing
                 # parsed. Almost always a chat-template / dialect mismatch,
                 # which means the rest of the reply is hallucinated narration
@@ -11478,6 +11596,24 @@ class Handler(BaseHTTPRequestHandler):
         # disabling tools entirely just causes existential-crisis spirals
         # ("can I use write_file? am I allowed to? what mode am I in?").
         use_tools = True
+        # Guardrail: Gemma's tool-call format (Python-shaped, non-JSON) isn't
+        # reliably parseable by llama.cpp or our text fallback, so tool calls
+        # silently no-op while the model narrates fake success. Force chat-only
+        # mode and tell the user why. We check EVERY model identifier (settings
+        # name, configured path, and the model actually loaded by llama-server)
+        # so a stale field can't let Gemma slip through with tools enabled.
+        # See in-app FAQ: "why are tools disabled when i load a gemma model?".
+        tools_off_reason = ""
+        _s = get_settings()
+        _model_ids = (_s.get("model"), _s.get("model_path"), _llama.loaded_model())
+        if use_tools and any(_is_gemma_model(m) for m in _model_ids):
+            use_tools = False
+            tools_off_reason = (
+                "Gemma uses a non-JSON, Python-style function-call format that "
+                "llama.cpp can't reliably parse, so tool calls silently fail. "
+                "Accuretta runs Gemma in chat-only mode. For agentic/tool work "
+                "(file edits, PowerShell, git), switch to Qwen, GLM, Llama, or GPT-OSS."
+            )
         system_prompt = build_system_prompt(include_tools=use_tools, chat_mode=mode)
         msgs: list[dict] = [{"role": "system", "content": system_prompt}]
         # Replay the FULL stored history including intermediate-assistant
@@ -11540,6 +11676,8 @@ class Handler(BaseHTTPRequestHandler):
             broadcast_event(evt)
 
         emit({"type": "chat_start", "chat_id": chat_id})
+        if tools_off_reason:
+            emit({"type": "tools_unavailable", "message": tools_off_reason})
         tok = _current_chat_id.set(chat_id)
         try:
             final = run_chat_turn(chat_id, msgs, use_tools=use_tools, emit=emit)
@@ -13031,8 +13169,6 @@ def llama_ping(timeout: float = 2.0, base_url: str = None) -> bool:
         return False
 
 
-# back-compat alias for any stray callers
-ollama_ping = llama_ping
 
 
 def wait_for_llama(wait_seconds: int = 30) -> bool:

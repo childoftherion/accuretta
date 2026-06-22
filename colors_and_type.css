@@ -288,70 +288,67 @@
 }
 
 /* ============================================================
-   DIM MODE — the OLED-friendly middle ground.
-   Lighter than dark (so reading is easier when the eyes want
-   more brightness) but never goes near pure white (which would
-   risk burn-in on OLED panels and feel harsh after long sessions).
-   Warm slate palette keeps tonal continuity with the warm light
-   theme; ember accent stays as the brand colour because it sits
-   well against both ends. Mid-grey backgrounds also distribute
-   pixel wear better than either pure black or pure white, which
-   is the OLED-burn-in nudge baked in for free.
+   DIM — warm "Taupe" theme (Claude-esque beige).
+   A light, cozy palette: warm greige paper, soft brown text, and a
+   rust-maroon clay accent. Dimmer and warmer than the crisp default
+   light theme — restful for long sessions without going dark.
+   Replaces the old Gruvbox charcoal + sage that read as "sad".
    ============================================================ */
 [data-theme="dim"] {
-  /* Warm, cozy charcoal (Gruvbox-inspired). A rich, comfortable dark theme
-     that isn't flat or depressing, featuring soft sage green accents. */
-  --bg:        #282828;
-  --bg-raised: #3c3836;
-  --bg-sunken: #1d2021;
-  --bg-inset:  #32302f;
+  /* Warm DARK "dim" — soft espresso-taupe surfaces, cream text, rust-maroon
+     clay accent. Close to dark mode but warmer and a touch lighter. */
+  --bg:        #4D463B;
+  --bg-raised: #5A5246;
+  --bg-sunken: #413A32;
+  --bg-inset:  #524A3D;
 
-  --glass-bg:       rgba(60, 56, 54, 0.75);
-  --glass-border:   rgba(255, 255, 255, 0.06);
+  --glass-bg:       rgba(90, 82, 70, 0.78);
+  --glass-border:   rgba(245, 238, 224, 0.07);
 
-  --bg-gradient: linear-gradient(180deg, #32302f 0%, #282828 40%, #1d2021 100%);
+  --bg-gradient: linear-gradient(180deg, #554C3D 0%, #4D463B 45%, #433A30 100%);
 
-  --fg:        #ebdbb2;
-  --fg-muted:  #a89984;
-  --fg-subtle: #928374;
-  --fg-faint:  #665c54;
-  --fg-invert: #282828;
+  --fg:        #EAE1D0;
+  --fg-muted:  #B5AA94;
+  --fg-subtle: #968C77;
+  --fg-faint:  #6F6655;
+  --fg-invert: #322D25;
 
-  --border:        #504945;
-  --border-strong: #665c54;
-  --border-subtle: #3c3836;
+  --border:        #6C6353;
+  --border-strong: #807660;
+  --border-subtle: #635A4B;
 
-  --accent:        #8b9a82; /* Soft sage green */
-  --accent-hover:  #9ea996;
-  --accent-subtle: rgba(139, 154, 130, 0.15);
-  --accent-fg:     #1d2021; /* Dark text on sage looks better than white */
+  --accent:        #A14B3D; /* rust-maroon clay — kept per your call */
+  --accent-hover:  #B5564A; /* brighten on hover against the dark bg */
+  --accent-subtle: rgba(161, 75, 61, 0.22);
+  --accent-fg:     #F5EEE0; /* cream text on the maroon accent */
 
-  --success-subtle: rgba(152, 151, 26, 0.15);
-  --warning-subtle: rgba(215, 153, 33, 0.15);
-  --danger-subtle:  rgba(204, 36, 29, 0.15);
-  --info-subtle:    rgba(69, 133, 136, 0.15);
+  --success-subtle: rgba(106, 135, 89, 0.20);
+  --warning-subtle: rgba(191, 138, 47, 0.20);
+  --danger-subtle:  rgba(178, 58, 47, 0.20);
+  --info-subtle:    rgba(150, 140, 120, 0.18);
 
-  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255,255,255,0.03);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.04);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.05);
-  --shadow-pop: 0 22px 64px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255,255,255,0.06);
+  /* Deeper shadows for the dark surface, with a faint warm top highlight. */
+  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.25);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(245, 238, 224, 0.03);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(245, 238, 224, 0.04);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.50), 0 0 0 1px rgba(245, 238, 224, 0.05);
+  --shadow-pop: 0 22px 64px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(245, 238, 224, 0.06);
 
-  --shadow-inset: inset 0 1px 0 rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255,255,255,0.02);
+  --shadow-inset: inset 0 1px 0 rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(245, 238, 224, 0.02);
 
-  --btn-shadow-rest:   inset 0 1px 0 rgba(255,255,255,0.05),
-                       0 1px 1px rgba(0, 0, 0, 0.2),
-                       0 2px 5px rgba(0, 0, 0, 0.3),
-                       0 0 0 1px rgba(255,255,255,0.04);
-  --btn-shadow-hover:  inset 0 1px 0 rgba(255,255,255,0.08),
-                       0 3px 7px rgba(0, 0, 0, 0.3),
-                       0 7px 14px rgba(0, 0, 0, 0.4),
-                       0 0 0 1px rgba(255,255,255,0.06);
-  --btn-shadow-active: inset 0 1px 3px rgba(0, 0, 0, 0.4),
-                       0 0 0 1px rgba(255,255,255,0.03);
+  --btn-shadow-rest:   inset 0 1px 0 rgba(245, 238, 224, 0.06),
+                       0 1px 1px rgba(0, 0, 0, 0.18),
+                       0 2px 5px rgba(0, 0, 0, 0.28),
+                       0 0 0 1px rgba(245, 238, 224, 0.04);
+  --btn-shadow-hover:  inset 0 1px 0 rgba(245, 238, 224, 0.09),
+                       0 3px 7px rgba(0, 0, 0, 0.30),
+                       0 7px 14px rgba(0, 0, 0, 0.38),
+                       0 0 0 1px rgba(245, 238, 224, 0.06);
+  --btn-shadow-active: inset 0 1px 3px rgba(0, 0, 0, 0.40),
+                       0 0 0 1px rgba(245, 238, 224, 0.03);
 
-  --btn-send-gradient: linear-gradient(135deg, #8b9a82 0%, #6e7c66 100%);
-  --btn-send-glow:     0 6px 18px rgba(139, 154, 130, 0.25);
+  --btn-send-gradient: linear-gradient(135deg, #A14B3D 0%, #883E32 100%);
+  --btn-send-glow:     0 6px 18px rgba(161, 75, 61, 0.28);
 }
 
 /* Apply the gradient at the page level only — children with their own

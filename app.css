@@ -881,6 +881,34 @@ button {
   gap: 4px;
   position: relative;
   z-index: 1;
+  /* doubles as the collapse toggle — reset button chrome */
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cost-widget-chev {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  font-size: 14px;
+  color: var(--fg-faint);
+  transition: transform var(--dur-base, 0.2s) var(--ease-out, ease), color var(--dur-fast, 0.12s) ease;
+}
+.cost-widget-head:hover .cost-widget-chev {
+  color: var(--fg-muted);
+}
+.cost-widget:not(.collapsed) .cost-widget-chev {
+  transform: rotate(180deg);
+}
+.cost-widget.collapsed .cost-breakdown,
+.cost-widget.collapsed .cost-pills {
+  display: none;
 }
 
 .cost-widget-label {
@@ -2798,6 +2826,40 @@ button {
 
 .ctx-trim-pill .ctx-trim-info:hover {
   color: var(--accent);
+}
+
+/* Dialect-parse warning — a system notice, deliberately styled apart from
+   model prose (smaller, muted, warning-tinted, left accent bar + icon) so it
+   never reads as something the model said. */
+.dialect-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  background: var(--warning-subtle);
+  border-left: 3px solid var(--warning);
+  border-radius: 6px;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.dialect-warn span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dialect-warn i {
+  font-size: 14px;
+  color: var(--warning);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dialect-warn strong {
+  color: var(--warning);
+  font-weight: 600;
 }
 
 /* ONE persistent strip per agent turn: wrench head shows live activity
@@ -6183,6 +6245,25 @@ pre.code-block:hover .copy-code,
   font-size: 14px;
 }
 
+/* Empty/incomplete reply — gently bounce the regenerate button so the user
+   knows to click it. Apple-esque spring: a quick overshoot then a rest beat,
+   tinted with the accent so it reads as "click me" without being obnoxious. */
+@keyframes retry-nudge {
+  0%, 70%, 100% { transform: translateY(0) scale(1); }
+  82%           { transform: translateY(-3px) scale(1.14); }
+  90%           { transform: translateY(0) scale(0.97); }
+  96%           { transform: translateY(-1px) scale(1.03); }
+}
+.bubble-action[data-act="regen"].attention {
+  animation: retry-nudge 1.5s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-action[data-act="regen"].attention { animation: none; }
+}
+
 /* ---- command palette ---- */
 .palette-scrim {
   position: fixed;
@@ -7616,6 +7697,11 @@ body,
   .side-foot .cost-widget-label {
     font-size: 9px !important;
 
+  }
+
+  .side-foot .cost-widget-chev {
+    font-size: 12px;
+    top: 0;
   }
 
   .side-foot .cost-widget-amount,
