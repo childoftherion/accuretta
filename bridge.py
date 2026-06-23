@@ -433,6 +433,9 @@ DEFAULT_SETTINGS = {
     "vision_model": "lighton-ocr",
     # desktop automation (off by default — opt-in, gated behind approvals)
     "desktop_enabled": False,
+    # red-team recon suite (off by default — opt-in; keeps ~13 recon tools out
+    # of the prompt for normal coding turns)
+    "red_team_enabled": False,
     "desktop_app_allowlist": [],            # e.g. ["notepad", "chrome", "code"]; matched case-insensitive against exe/launch target
     "desktop_max_actions_per_minute": 30,   # hard rate limit for agent-driven actions
     "desktop_auto_approve_read": True,      # screenshot/describe/list_windows never require approval
@@ -459,7 +462,7 @@ DEFAULT_SETTINGS = {
     "ide_multifile": False,         # tell the model to emit a small folder structure (index.html / style.css / script.js / assets/)
     # reasoning / thinking (Qwen3-family and other reasoner models)
     "enable_thinking": True,        # when False, suppress <think> blocks entirely via chat_template_kwargs
-    "thinking_budget": 2048,        # cap tokens the model spends thinking before it must answer. -1 = unlimited
+    "thinking_budget": 4096,        # HARNESS-enforced cap on thinking tokens (we count + force-close; the model's template can't be trusted to honor it). -1 = unlimited
     "max_tool_rounds": 60,          # how many tool-call rounds the model may run per user turn before forced stop
     "preserve_prior_thinking": True,# rewrite prior <think>…</think> as plain text so it survives chat-template stripping
     # llama-server lifecycle (bridge spawns it for us)
@@ -687,6 +690,140 @@ def truncate_messages(msgs: list[dict], max_tokens: int, reserve: int = 256) -> 
     if anchor and keep and anchor[0] is keep[0]:
         return system + keep
     return system + anchor + keep
+
+
+# ---- rolling conversation summary -----------------------------------------
+# Instead of letting truncate_messages DELETE the middle of a long conversation
+# (which loses "we hit bug X, fixed it by Y" and makes the model repeat fixed
+# mistakes), we compress the oldest turns into a dense summary folded into the
+# system message. Recent turns stay raw; only the old middle becomes gist.
+_SUMMARY_KEEP_RAW = 16        # most-recent messages always replayed verbatim
+_SUMMARY_TRIGGER = 28         # fold once un-summarized count exceeds this
+_SUMMARY_INSTR = (
+    "You are compressing an earlier slice of a coding-assistant conversation into a dense, "
+    "factual summary for the assistant's OWN future reference. Merge the PRIOR SUMMARY (if any) "
+    "with the NEW MESSAGES into one updated summary. Preserve precisely: decisions made; bugs or "
+    "mistakes found AND how they were fixed (so they are not repeated); constraints and requirements "
+    "the user stated; important file paths, function names, and identifiers; and the current state of "
+    "the work. Use terse bullet points, no pleasantries, no preamble. Keep it under ~220 words."
+)
+
+
+def _render_msgs_for_summary(slice_msgs: list[dict]) -> str:
+    out = []
+    for m in slice_msgs:
+        role = m.get("role")
+        if role not in ("user", "assistant", "tool"):
+            continue
+        c = m.get("content", "")
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+        c = str(c or "")
+        if role == "tool":
+            c = "[tool result] " + c[:500]
+        elif m.get("tool_calls"):
+            names = ", ".join((tc.get("function", {}) or {}).get("name", "") for tc in m.get("tool_calls", []))
+            c = (c[:600] + f" [called tools: {names}]").strip()
+        else:
+            c = c[:1200]
+        if c.strip():
+            out.append(f"{role}: {c}")
+    return "\n".join(out)
+
+
+def _update_rolling_summary(old_summary: str, slice_msgs: list[dict]) -> str:
+    """One non-streaming model call: merge old summary + new slice into an
+    updated summary. Returns old_summary unchanged on any failure (never raises)."""
+    rendered = _render_msgs_for_summary(slice_msgs)
+    if not rendered.strip():
+        return old_summary
+    user = ""
+    if old_summary:
+        user += f"PRIOR SUMMARY:\n{old_summary}\n\n"
+    user += f"NEW MESSAGES:\n{rendered}"
+    payload = {
+        "model": "local",
+        "messages": [
+            {"role": "system", "content": _SUMMARY_INSTR},
+            {"role": "user", "content": user[:14000]},
+        ],
+        "stream": False, "temperature": 0.2, "max_tokens": 450,
+    }
+    try:
+        resp = llama_post("/v1/chat/completions", payload, timeout=90)
+        txt = ((resp.get("choices") or [{}])[0].get("message", {}).get("content", "") or "").strip()
+        return txt or old_summary
+    except Exception:
+        return old_summary
+
+
+def _maybe_roll_summary(chat: dict) -> bool:
+    """Fold the oldest un-kept turns of `chat` into chat['rolling_summary'].
+    Mutates chat in place. Returns True if the summary advanced (caller persists)."""
+    msgs = chat.get("messages", [])
+    through = int(chat.get("summary_through", 0) or 0)
+    if (len(msgs) - through) <= _SUMMARY_TRIGGER:
+        return False
+    end = len(msgs) - _SUMMARY_KEEP_RAW   # fold everything older than the raw-keep window
+    if end <= through:
+        return False
+    new_summary = _update_rolling_summary(chat.get("rolling_summary", ""), msgs[through:end])
+    if new_summary and new_summary != chat.get("rolling_summary", ""):
+        chat["rolling_summary"] = new_summary
+        chat["summary_through"] = end
+        return True
+    return False
+
+
+def tool_pin_note(args: dict) -> dict:
+    """Pin a fact, decision, or fix to THIS session. Pins are injected verbatim
+    into the system prompt every turn and NEVER trimmed or summarized away — use
+    them for the critical 'do not undo / do not repeat' items (a bug's root cause
+    and fix, a user constraint, a chosen approach)."""
+    note = (args.get("note") or "").strip()
+    if not note:
+        return {"error": "note required"}
+    cid = _get_current_chat()
+    if not cid:
+        return {"error": "no active chat to pin to"}
+    chats = get_chats()
+    chat = chats.get("chats", {}).get(cid)
+    if not chat:
+        return {"error": "active chat not found"}
+    note = note[:300]
+    pins = chat.get("pins") or []
+    if note in pins:
+        return {"already_pinned": note, "total_pins": len(pins)}
+    pins.append(note)
+    chat["pins"] = pins[-20:]   # keep the 20 most-recent
+    save_json(CHATS_FILE, chats)
+    return {"pinned": note, "total_pins": len(chat["pins"]),
+            "note": "Pinned for this session — stays in context permanently, won't be trimmed."}
+
+
+def tool_unpin_note(args: dict) -> dict:
+    """Remove a pin from this session by exact text or 1-based index."""
+    cid = _get_current_chat()
+    if not cid:
+        return {"error": "no active chat"}
+    chats = get_chats()
+    chat = chats.get("chats", {}).get(cid)
+    if not chat:
+        return {"error": "active chat not found"}
+    pins = chat.get("pins") or []
+    target = args.get("note")
+    idx = args.get("index")
+    removed = None
+    if target and target in pins:
+        pins.remove(target)
+        removed = target
+    elif isinstance(idx, int) and 1 <= idx <= len(pins):
+        removed = pins.pop(idx - 1)
+    else:
+        return {"error": "pin not found", "current_pins": pins}
+    chat["pins"] = pins
+    save_json(CHATS_FILE, chats)
+    return {"unpinned": removed, "total_pins": len(pins)}
 
 
 # ---- system context (ACCURETTA.md) ----------------------------------------
@@ -1532,6 +1669,48 @@ def _extract_pdf_text(path: str) -> dict:
     }
 
 
+# ---- file read-state tracking (anti-stale / anti-clobber) -----------------
+# Record each file's on-disk hash WHEN THE MODEL READS IT, per chat. If it then
+# tries to fully overwrite a file it never read (or that changed since it read),
+# we stop the clobber — the #1 cause of "it undid its own fix" on long tasks.
+_chat_file_reads: dict[str, dict[str, str]] = {}
+_chat_file_reads_lock = threading.Lock()
+
+
+def _file_md5(path: str) -> str:
+    import hashlib
+    try:
+        return hashlib.md5(Path(path).read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _record_file_read(path: str) -> None:
+    cid = _get_current_chat()
+    if not cid:
+        return
+    h = _file_md5(path)
+    if h:
+        with _chat_file_reads_lock:
+            _chat_file_reads.setdefault(cid, {})[normalize_path(path)] = h
+
+
+def _file_staleness(path: str) -> str:
+    """'' = the model's view is current. Otherwise a short reason it may be stale."""
+    cid = _get_current_chat()
+    if not cid or not os.path.isfile(path):
+        return ""
+    npath = normalize_path(path)
+    with _chat_file_reads_lock:
+        seen = _chat_file_reads.get(cid, {}).get(npath)
+    if seen is None:
+        return "never read this session"
+    cur = _file_md5(path)
+    if cur and cur != seen:
+        return "changed since you last read it"
+    return ""
+
+
 def tool_read_file(args: dict) -> dict:
     path = normalize_path(args.get("path") or "")
     if not path or not os.path.isfile(path):
@@ -1560,7 +1739,12 @@ def tool_read_file(args: dict) -> dict:
     # 64KB byte cap stays in place so a single read can never blow context;
     # offset just lets the model walk through a large file chunk by chunk.
     offset = max(0, int(args.get("offset") or 0))
-    BYTE_CAP = 64 * 1024
+    # 20KB chunk: large enough to see a function or a chunk of HTML in one read,
+    # small enough that the serialized result stays UNDER the read_file result
+    # cap (32000) so compress_tool_result never elides it a second time. Keep
+    # these two numbers in sync — that double-truncation is what made models
+    # thrash on large files.
+    BYTE_CAP = 20 * 1024
     try:
         try:
             full_text = Path(path).read_text(encoding="utf-8")
@@ -1569,6 +1753,7 @@ def tool_read_file(args: dict) -> dict:
         total_size = len(full_text.encode("utf-8", errors="replace"))
         lines = full_text.splitlines(keepends=True)
         total_lines = len(lines)
+        _record_file_read(path)  # the model has now seen this file's current state
         if offset >= total_lines and total_lines > 0:
             return {
                 "path": path,
@@ -1606,12 +1791,14 @@ def tool_read_file(args: dict) -> dict:
             "truncated": truncated,
         }
         if truncated:
+            out["next_offset"] = end
             out["hint"] = (
-                f"Showing lines {offset}-{end - 1} of {total_lines} "
-                f"(stopped at {BYTE_CAP // 1024}KB chunk cap). "
-                f"To read the rest, call read_file again with offset={end}. "
-                f"Calling with the SAME args will return the SAME chunk — "
-                f"the file is fixed on disk; retrying won't get different bytes."
+                f"This is the COMPLETE, untruncated chunk for lines {offset}-{end - 1} "
+                f"of {total_lines}. To read the next chunk, call read_file with "
+                f"offset={end}. To jump straight to the part you need instead of "
+                f"paging, call grep_files (search for a string) or read_skeleton "
+                f"(code structure/signatures). Retrying with the same args returns "
+                f"the same bytes — the file is fixed on disk."
             )
         return out
     except Exception as e:
@@ -1663,6 +1850,30 @@ def tool_write_file(args: dict) -> dict:
         return {"error": "path outside workspace. Add folder in Workspace panel."}
     if is_ignored(path):
         return {"error": f"path ignored by .accurettaignore: {path}"}
+    # Anti-clobber: refuse a full overwrite of an existing file the model hasn't
+    # read this session (or that changed since it read) — it would be writing
+    # from a stale mental model. read_file first, or pass force=true to override.
+    if os.path.isfile(path) and not bool(args.get("force")):
+        stale = _file_staleness(path)
+        if stale:
+            return {"error": (f"write blocked: this file exists and was {stale}. Call read_file on it "
+                              f"first so you overwrite the CURRENT contents, not a stale assumption — "
+                              f"then write_file again. If you truly mean to replace the whole file, pass "
+                              f"force=true."),
+                    "path": path, "reason": stale}
+    # Rewrite-loop breaker: refuse the Nth full rewrite of the same file in a
+    # single turn. The model can't verify a fresh version is actually better, so
+    # it spirals ("this is a mess, let me rewrite from scratch") forever. Force
+    # it into targeted edits instead.
+    _npath = normalize_path(path)
+    _prior = _write_count(_npath)
+    if os.path.isfile(path) and _prior >= REWRITE_LOOP_LIMIT and not bool(args.get("force_rewrite")):
+        return {"error": (f"rewrite loop blocked: you have already rewritten this file {_prior} time(s) this "
+                          f"turn and it IS saved. STOP rewriting from scratch — you cannot verify a fresh "
+                          f"version is better and you are spiralling. Instead: if a SPECIFIC thing is wrong, "
+                          f"fix that one thing with edit_file; otherwise the file is DONE — tell the user it's "
+                          f"ready. Only pass force_rewrite=true with a concrete reason (e.g. a real syntax error)."),
+                "path": path, "rewrites_this_turn": _prior}
     approval = request_approval(
         title="Write file",
         command=f'Set-Content -Path "{path}" -Value <{len(content)} chars>',
@@ -1679,7 +1890,9 @@ def tool_write_file(args: dict) -> dict:
                 pass
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(content, encoding="utf-8")
-        
+        _record_file_read(path)  # our hash now matches what we just wrote
+        _record_write(_npath)    # count this rewrite for the loop-breaker
+
         import difflib
         diff = list(difflib.unified_diff(
             old_text.splitlines(keepends=True),
@@ -1697,8 +1910,12 @@ def tool_write_file(args: dict) -> dict:
         lint_err = _run_linter(path)
         if lint_err:
             return {"error": f"File written, BUT linter found errors. Please fix them immediately:\n{lint_err}"}
-            
-        return {"ok": True, "path": path, "bytes": len(content.encode("utf-8")), "added": added, "deleted": deleted}
+
+        result = {"ok": True, "path": path, "bytes": len(content.encode("utf-8")), "added": added, "deleted": deleted}
+        if _write_count(_npath) >= 2:
+            result["warning"] = ("you have now rewritten this file from scratch. If it still isn't right, make a "
+                                 "TARGETED edit_file fix next — do NOT rewrite the whole file again, you'll spiral.")
+        return result
     except Exception as e:
         return {"error": str(e)}
 
@@ -1801,7 +2018,8 @@ def tool_edit_file(args: dict) -> dict:
                 deleted += 1
 
         Path(path).write_text(modified, encoding="utf-8")
-        
+        _record_file_read(path)  # keep our hash current after our own edit
+
         lint_err = _run_linter(path)
         if lint_err:
             return {"error": f"Edit applied, BUT linter found errors. Please fix them immediately:\n{lint_err}"}
@@ -6787,6 +7005,970 @@ def tool_audit_http_headers(args: dict) -> dict:
         "tls": tls_info
     }
 
+# ============================================================
+# AUTHORIZED RECON TOOLS
+# Low-and-slow reconnaissance for AUTHORIZED security testing only. The UI
+# gates these behind an explicit "do you have authorization?" prompt; the
+# tools themselves are strictly read-only (no exploitation, no payloads,
+# no writes). Designed to be quieter than nmap: capped concurrency,
+# randomized port order, jitter between probes. stdlib-only.
+# ============================================================
+
+_RECON_TOP_PORTS = [
+    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 161, 389, 443, 445,
+    465, 587, 636, 993, 995, 1433, 1521, 1723, 2049, 2375, 2376, 3000,
+    3306, 3389, 5432, 5601, 5900, 5985, 5986, 6379, 7001, 8000, 8008,
+    8080, 8081, 8443, 8888, 9000, 9092, 9200, 9300, 11211, 27017,
+]
+_RECON_PORT_NAMES = {
+    21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http",
+    110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap",
+    161: "snmp", 389: "ldap", 443: "https", 445: "smb", 465: "smtps",
+    587: "submission", 636: "ldaps", 993: "imaps", 995: "pop3s",
+    1433: "mssql", 1521: "oracle", 1723: "pptp", 2049: "nfs", 2375: "docker",
+    2376: "docker-tls", 3000: "dev-http", 3306: "mysql", 3389: "rdp",
+    5432: "postgres", 5601: "kibana", 5900: "vnc", 5985: "winrm",
+    5986: "winrm-tls", 6379: "redis", 7001: "weblogic", 8080: "http-alt",
+    8443: "https-alt", 9200: "elasticsearch", 11211: "memcached",
+    27017: "mongodb",
+}
+
+
+def _recon_clean_host(raw: str) -> str:
+    """Strip scheme/path/query/port and whitespace; return the bare host."""
+    h = (raw or "").strip()
+    if "://" in h:
+        h = h.split("://", 1)[1]
+    h = h.split("/", 1)[0].split("?", 1)[0]
+    if h.count(":") == 1:  # drop a trailing :port
+        h = h.split(":", 1)[0]
+    return h.strip().strip(".")
+
+
+def _recon_resolve(host: str) -> dict:
+    """Resolve a host to its IPs. {"ips":[...]} or {"error":...}."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+        return {"ips": sorted({i[4][0] for i in infos})}
+    except Exception as e:
+        return {"error": f"could not resolve {host}: {e}"}
+
+
+def _recon_http_doh(name: str, rtype: str, timeout: float = 6.0) -> list:
+    """DNS-over-HTTPS query via dns.google. Returns a list of answer strings."""
+    url = f"https://dns.google/resolve?name={urllib.parse.quote(name)}&type={rtype}"
+    req = urllib.request.Request(url, headers={"Accept": "application/dns-json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8", "replace"))
+    return [a.get("data", "").strip('"') for a in (data.get("Answer") or [])]
+
+
+def tool_recon_port_scan(args: dict) -> dict:
+    """Stealthy TCP-connect port scan: capped concurrency, randomized order,
+    jitter between probes. Deliberately quieter than nmap. Read-only."""
+    host = _recon_clean_host(args.get("host") or args.get("target") or "")
+    if not host:
+        return {"error": "host required"}
+    res = _recon_resolve(host)
+    if "error" in res:
+        return res
+    target_ip = res["ips"][0]
+    ports = args.get("ports")
+    if ports:
+        try:
+            port_list = [int(p) for p in ports if 0 < int(p) < 65536]
+        except Exception:
+            return {"error": "ports must be a list of integers"}
+    else:
+        port_list = list(_RECON_TOP_PORTS)
+    random.shuffle(port_list)  # randomized order = less obvious sweep pattern
+    timeout = max(0.3, min(float(args.get("timeout") or 1.5), 5.0))
+    concurrency = max(1, min(int(args.get("concurrency") or 8), 32))
+    jitter_ms = max(0, min(int(args.get("jitter_ms") or 40), 1000))
+
+    def probe(port):
+        if jitter_ms:
+            time.sleep(random.uniform(0, jitter_ms / 1000.0))
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            if s.connect_ex((target_ip, port)) == 0:
+                banner = ""
+                try:
+                    s.settimeout(0.8)
+                    banner = s.recv(96).decode("latin-1", "replace").strip()[:80]
+                except Exception:
+                    pass
+                return {"port": port, "service": _RECON_PORT_NAMES.get(port, "unknown"), "banner": banner}
+        except Exception:
+            pass
+        finally:
+            try: s.close()
+            except Exception: pass
+        return None
+
+    open_ports = []
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="recon-scan") as ex:
+        for r in ex.map(probe, port_list):
+            if r:
+                open_ports.append(r)
+    open_ports.sort(key=lambda x: x["port"])
+    return {
+        "host": host, "resolved_ip": target_ip, "all_ips": res["ips"],
+        "scanned": len(port_list), "open_count": len(open_ports),
+        "open_ports": open_ports,
+        "note": "TCP connect scan (randomized order + jitter). Authorized targets only.",
+    }
+
+
+def _recon_cert_from_der(der: bytes) -> dict | None:
+    """Parse a DER cert with `cryptography` if available; else None."""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.backends import default_backend
+    except Exception:
+        return None
+    try:
+        c = x509.load_der_x509_certificate(der, default_backend())
+        try:
+            cn = c.subject.rfc4514_string()
+        except Exception:
+            cn = ""
+        try:
+            issuer = c.issuer.rfc4514_string()
+        except Exception:
+            issuer = ""
+        sans = []
+        try:
+            ext = c.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            sans = ext.value.get_values_for_type(x509.DNSName)
+        except Exception:
+            pass
+        return {
+            "subject": cn, "issuer": issuer,
+            "not_before": c.not_valid_before_utc.isoformat(),
+            "not_after": c.not_valid_after_utc.isoformat(),
+            "san": sans[:50],
+            "self_signed": (cn == issuer and cn != ""),
+        }
+    except Exception:
+        return None
+
+
+def tool_recon_tls_audit(args: dict) -> dict:
+    """Inspect a host's TLS: negotiated protocol/cipher, certificate subject,
+    issuer, SANs, expiry, and validation status. Flags weak protocols and
+    expired/self-signed certs. Read-only."""
+    host = _recon_clean_host(args.get("host") or args.get("target") or "")
+    if not host:
+        return {"error": "host required"}
+    port = int(args.get("port") or 443)
+    timeout = max(2.0, min(float(args.get("timeout") or 6.0), 15.0))
+    findings = []
+
+    # First pass: verify against system CAs to learn validation status.
+    validated = False
+    verify_error = ""
+    cert_dict = {}
+    try:
+        vctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with vctx.wrap_socket(raw, server_hostname=host) as ss:
+                cert_dict = ss.getpeercert() or {}
+        validated = True
+    except ssl.SSLCertVerificationError as e:
+        verify_error = str(getattr(e, "verify_message", "") or e)
+    except Exception as e:
+        return {"error": f"TLS connect failed to {host}:{port}: {e}"}
+
+    # Second pass: grab protocol/cipher and the raw cert regardless of trust.
+    proto = cipher = None
+    der = b""
+    try:
+        nctx = ssl.create_default_context()
+        nctx.check_hostname = False
+        nctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with nctx.wrap_socket(raw, server_hostname=host) as ss:
+                proto = ss.version()
+                cipher = ss.cipher()  # (name, tls_version, bits)
+                der = ss.getpeercert(binary_form=True) or b""
+    except Exception:
+        pass
+
+    parsed = _recon_cert_from_der(der) if der else None
+    # Prefer the validated dict's fields when present.
+    subject = issuer = not_after = ""
+    sans = []
+    if cert_dict:
+        subject = dict(x[0] for x in cert_dict.get("subject", []) if x).get("commonName", "")
+        issuer = dict(x[0] for x in cert_dict.get("issuer", []) if x).get("commonName", "")
+        not_after = cert_dict.get("notAfter", "")
+        sans = [v for (k, v) in cert_dict.get("subjectAltName", []) if k == "DNS"][:50]
+    elif parsed:
+        subject, issuer, not_after = parsed["subject"], parsed["issuer"], parsed["not_after"]
+        sans = parsed.get("san", [])
+        if parsed.get("self_signed"):
+            findings.append("certificate appears self-signed")
+
+    if proto and proto in ("TLSv1", "TLSv1.1", "SSLv3", "SSLv2"):
+        findings.append(f"weak protocol negotiated: {proto}")
+    if not validated and verify_error:
+        findings.append(f"did not validate against system CAs: {verify_error}")
+    # Expiry check
+    days_left = None
+    try:
+        import datetime as _dt
+        if cert_dict.get("notAfter"):
+            exp = _dt.datetime.strptime(cert_dict["notAfter"], "%b %d %H:%M:%S %Y %Z")
+            days_left = (exp - _dt.datetime.utcnow()).days
+        elif parsed and parsed.get("not_after"):
+            exp = _dt.datetime.fromisoformat(parsed["not_after"].replace("Z", "+00:00"))
+            days_left = (exp - _dt.datetime.now(_dt.timezone.utc)).days
+    except Exception:
+        pass
+    if days_left is not None:
+        if days_left < 0:
+            findings.append(f"certificate EXPIRED {abs(days_left)} days ago")
+        elif days_left < 21:
+            findings.append(f"certificate expires soon ({days_left} days)")
+
+    return {
+        "host": host, "port": port, "validated": validated,
+        "protocol": proto, "cipher": cipher[0] if cipher else None,
+        "cipher_bits": cipher[2] if cipher else None,
+        "subject": subject, "issuer": issuer, "not_after": not_after,
+        "days_until_expiry": days_left, "san": sans,
+        "findings": findings or ["no obvious TLS issues"],
+    }
+
+
+def tool_recon_http_fingerprint(args: dict) -> dict:
+    """Fetch a URL and fingerprint the server: status, redirect chain, Server /
+    X-Powered-By, page title, notable headers, and cookies. Read-only."""
+    url = (args.get("url") or args.get("target") or "").strip()
+    if not url:
+        return {"error": "url required"}
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + _recon_clean_host(url)
+    timeout = max(2.0, min(float(args.get("timeout") or 8.0), 20.0))
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=ctx))
+    chain = []
+    cur = url
+    final_headers = {}
+    status = None
+    body = ""
+    for _ in range(6):
+        req = urllib.request.Request(cur, headers={"User-Agent": ua})
+        try:
+            resp = opener.open(req, timeout=timeout)
+            status = resp.status
+            final_headers = {k: v for k, v in resp.headers.items()}
+            body = resp.read(20000).decode("utf-8", "replace")
+            break
+        except urllib.error.HTTPError as e:
+            status = e.code
+            loc = e.headers.get("Location")
+            final_headers = {k: v for k, v in e.headers.items()}
+            if loc and 300 <= e.code < 400 and len(chain) < 5:
+                chain.append({"from": cur, "status": e.code, "to": loc})
+                cur = urllib.parse.urljoin(cur, loc)
+                continue
+            break
+        except Exception as e:
+            return {"error": f"request failed: {e}", "url": cur}
+
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()[:160]
+    notable = {}
+    for h in ("Server", "X-Powered-By", "X-AspNet-Version", "Via", "X-Generator",
+              "Content-Type", "Strict-Transport-Security", "Content-Security-Policy"):
+        for k, v in final_headers.items():
+            if k.lower() == h.lower():
+                notable[h] = v
+                break
+    cookies = [c.split(";")[0] for k, v in final_headers.items()
+               if k.lower() == "set-cookie" for c in [v]]
+    return {
+        "url": url, "final_url": cur, "status": status,
+        "title": title, "redirect_chain": chain,
+        "server": notable.get("Server", ""),
+        "powered_by": notable.get("X-Powered-By", ""),
+        "notable_headers": notable, "cookies": cookies[:10],
+    }
+
+
+def tool_recon_subdomains(args: dict) -> dict:
+    """Passive subdomain enumeration via certificate transparency logs
+    (crt.sh). No active brute-forcing. Read-only."""
+    domain = _recon_clean_host(args.get("domain") or args.get("target") or "")
+    if not domain:
+        return {"error": "domain required"}
+    timeout = max(4.0, min(float(args.get("timeout") or 15.0), 30.0))
+    url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "accuretta-recon"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            rows = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"error": f"crt.sh query failed: {e}"}
+    subs = set()
+    for row in rows:
+        for name in str(row.get("name_value", "")).splitlines():
+            name = name.strip().lstrip("*.").lower()
+            if name.endswith(domain) and name != domain:
+                subs.add(name)
+    return {
+        "domain": domain, "count": len(subs),
+        "subdomains": sorted(subs)[:300],
+        "source": "certificate transparency (crt.sh) — passive",
+    }
+
+
+def tool_recon_dns(args: dict) -> dict:
+    """Enumerate DNS records (A, AAAA, MX, NS, TXT, SOA, CNAME) via
+    DNS-over-HTTPS. Read-only."""
+    domain = _recon_clean_host(args.get("domain") or args.get("target") or "")
+    if not domain:
+        return {"error": "domain required"}
+    records = {}
+    for rtype in ("A", "AAAA", "MX", "NS", "TXT", "SOA", "CNAME"):
+        try:
+            ans = _recon_http_doh(domain, rtype)
+            if ans:
+                records[rtype] = ans[:50]
+        except Exception:
+            continue
+    if not records:
+        return {"error": f"no DNS records resolved for {domain}", "domain": domain}
+    return {"domain": domain, "records": records, "source": "DNS-over-HTTPS (dns.google)"}
+
+
+_RECON_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def _recon_fetch(url: str, timeout: float = 8.0, max_bytes: int = 8000) -> dict:
+    """Single GET (TLS verification off so self-signed targets still respond).
+    Returns {status, headers, body, url} or {error, url}."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers={"User-Agent": _RECON_UA})
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    try:
+        resp = opener.open(req, timeout=timeout)
+        body = resp.read(max_bytes).decode("utf-8", "replace")
+        return {"status": resp.status, "headers": {k: v for k, v in resp.headers.items()},
+                "body": body, "url": resp.url}
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read(max_bytes).decode("utf-8", "replace")
+        except Exception:
+            pass
+        return {"status": e.code, "headers": {k: v for k, v in e.headers.items()},
+                "body": body, "url": url}
+    except Exception as e:
+        return {"error": str(e), "url": url}
+
+
+_RECON_COMMON_PATHS = [
+    "admin/", "administrator/", "login", "wp-admin/", "wp-login.php",
+    "phpmyadmin/", "manager/html", "console/", "dashboard/", "portal/",
+    ".env", ".git/HEAD", ".git/config", ".svn/entries", ".DS_Store",
+    "config.php", "config.json", "config.yml", "config.yaml", "settings.py",
+    "web.config", "wp-config.php.bak", "wp-config.php~", "backup.zip",
+    "backup.sql", "backup.tar.gz", "db.sql", "dump.sql", "database.sql",
+    ".htaccess", ".htpasswd", "id_rsa", ".aws/credentials", "credentials.json",
+    "robots.txt", "sitemap.xml", "server-status", "server-info", "status",
+    "actuator", "actuator/health", "actuator/env", "actuator/heapdump",
+    "metrics", "phpinfo.php", "info.php", "test.php", "debug", "trace",
+    "api/", "api/v1/", "swagger.json", "swagger-ui/", "openapi.json",
+    "graphql", ".well-known/security.txt", "graphiql",
+    ".gitlab-ci.yml", "Dockerfile", "docker-compose.yml", ".github/workflows/",
+]
+
+
+_RECON_WAF_MARKERS = [
+    "attention required! | cloudflare", "/cdn-cgi/", "cf-error-details",
+    "you have been blocked", "request blocked", "access denied",
+    "ddos protection by cloudflare", "incapsula incident id", "akamai reference",
+    "web application firewall", "forbidden - blocked",
+]
+
+
+def _recon_classify_body(status, headers, body):
+    """Label a response so callers never mistake a block/SPA page for a finding:
+    'waf_challenge' | 'html_page' | 'json' | 'other'."""
+    ct = ""
+    for k, v in (headers or {}).items():
+        if k.lower() == "content-type":
+            ct = (v or "").lower()
+            break
+    bl = (body or "").lower()
+    if any(m in bl for m in _RECON_WAF_MARKERS):
+        return "waf_challenge"
+    head = bl[:300]
+    if "<!doctype html" in head or "<html" in head:
+        return "html_page"
+    stripped = (body or "").lstrip()
+    if ct.startswith("application/json") or stripped[:1] in ("{", "["):
+        return "json"
+    return "other"
+
+
+def _recon_baseline(base, timeout):
+    """Probe a guaranteed-nonexistent path to learn catch-all behavior. If the
+    site returns 200 for garbage, bare 200s mean nothing and must be diffed."""
+    rnd = "zz" + "".join(random.choice("abcdefghijklmnop0123456789") for _ in range(22)) + "/"
+    r = _recon_fetch(urllib.parse.urljoin(base, rnd), timeout=timeout, max_bytes=6000)
+    body = r.get("body", "") or ""
+    return {"status": r.get("status"), "size": len(body), "body": body,
+            "is_catchall": r.get("status") == 200,
+            "classification": _recon_classify_body(r.get("status"), r.get("headers"), body)}
+
+
+def _recon_same_as_baseline(r, baseline):
+    """True if a response is effectively the catch-all page (same status, near
+    identical size) — i.e. NOT a real distinct resource."""
+    if not baseline.get("is_catchall"):
+        return False
+    body = r.get("body", "") or ""
+    return r.get("status") == baseline.get("status") and abs(len(body) - baseline.get("size", 0)) < 64
+
+
+def tool_recon_content_discovery(args: dict) -> dict:
+    """AUTHORIZED RECON. Probe a base URL for a high-value path list. Establishes
+    a catch-all baseline first (random path) so SPA/WAF sites that return 200 for
+    everything don't produce false positives — only responses that DIFFER from
+    the baseline (and aren't WAF challenges) are reported. Read-only."""
+    base = (args.get("url") or args.get("target") or "").strip()
+    if not base:
+        return {"error": "url required"}
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + _recon_clean_host(base)
+    base = base.rstrip("/") + "/"
+    paths = args.get("wordlist") or list(_RECON_COMMON_PATHS)
+    random.shuffle(paths)
+    timeout = max(2.0, min(float(args.get("timeout") or 6.0), 15.0))
+    concurrency = max(1, min(int(args.get("concurrency") or 6), 20))
+    jitter_ms = max(0, min(int(args.get("jitter_ms") or 60), 1000))
+    baseline = _recon_baseline(base, timeout)
+
+    def probe(path):
+        if jitter_ms:
+            time.sleep(random.uniform(0, jitter_ms / 1000.0))
+        r = _recon_fetch(urllib.parse.urljoin(base, path), timeout=timeout, max_bytes=6000)
+        st = r.get("status")
+        if not st or st == 404 or st >= 500:
+            return None
+        cls = _recon_classify_body(st, r.get("headers"), r.get("body"))
+        if cls == "waf_challenge":
+            return None  # blocked, not a real find
+        if _recon_same_as_baseline(r, baseline):
+            return None  # catch-all 200, not a distinct resource
+        clen = r.get("headers", {}).get("Content-Length", "") or str(len(r.get("body", "") or ""))
+        return {"path": path, "status": st, "size": clen, "type": cls,
+                "url": urllib.parse.urljoin(base, path)}
+
+    found = []
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="recon-disc") as ex:
+        for r in ex.map(probe, paths):
+            if r:
+                found.append(r)
+    found.sort(key=lambda x: (x["status"], x["path"]))
+    note = "non-404 responses that DIFFER from the catch-all baseline."
+    if baseline["is_catchall"]:
+        note += " NOTE: site returns 200 for unknown paths (SPA/catch-all) — a bare 200 is NOT proof a path exists."
+    if baseline["classification"] == "waf_challenge":
+        note += " A WAF/Cloudflare challenge is active; results may be filtered."
+    return {"base": base, "tested": len(paths), "found_count": len(found),
+            "catchall_detected": baseline["is_catchall"],
+            "waf_detected": baseline["classification"] == "waf_challenge",
+            "found": found, "note": note}
+
+
+def tool_recon_check_exposure(args: dict) -> dict:
+    """AUTHORIZED RECON. Targeted check for high-signal exposures and interprets
+    them: readable .git, .env secrets, directory listing, Spring actuator,
+    Apache server-status. Returns findings with severity + evidence. Read-only."""
+    base = (args.get("url") or args.get("target") or "").strip()
+    if not base:
+        return {"error": "url required"}
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + _recon_clean_host(base)
+    base = base.rstrip("/") + "/"
+    timeout = max(2.0, min(float(args.get("timeout") or 7.0), 15.0))
+    findings = []
+    baseline = _recon_baseline(base, timeout)
+
+    def real(r):
+        """A genuinely distinct 200 — not the catch-all page, not a WAF block."""
+        if r.get("status") != 200 or "body" not in r:
+            return False
+        if _recon_same_as_baseline(r, baseline):
+            return False
+        if _recon_classify_body(r.get("status"), r.get("headers"), r.get("body")) == "waf_challenge":
+            return False
+        return True
+
+    # exposed git repo — body must actually be a git ref, not HTML
+    r = _recon_fetch(urllib.parse.urljoin(base, ".git/HEAD"), timeout)
+    if real(r) and r["body"].strip().startswith("ref:"):
+        findings.append({"severity": "high", "issue": "exposed .git repository",
+                         "evidence": r["body"].strip()[:80],
+                         "impact": "full source + history is reconstructable (git-dumper)."})
+    # exposed env file — body must contain KEY=VALUE lines, not an HTML/SPA page
+    r = _recon_fetch(urllib.parse.urljoin(base, ".env"), timeout)
+    if real(r) and _recon_classify_body(r.get("status"), r.get("headers"), r["body"]) != "html_page" \
+            and re.search(r"^[A-Z][A-Z0-9_]{2,}\s*=", r["body"], re.MULTILINE):
+        keys = re.findall(r"^([A-Z][A-Z0-9_]{2,})\s*=", r["body"], re.MULTILINE)
+        findings.append({"severity": "critical", "issue": "exposed .env file",
+                         "evidence": "keys: " + ", ".join(keys[:8]),
+                         "impact": "application secrets / credentials disclosed."})
+    # spring actuator — body must actually be actuator JSON, not just a 200
+    r = _recon_fetch(urllib.parse.urljoin(base, "actuator/env"), timeout)
+    if real(r) and ('"propertySources"' in r["body"] or '"activeProfiles"' in r["body"]):
+        findings.append({"severity": "high", "issue": "Spring Boot actuator/env exposed",
+                         "evidence": "propertySources/activeProfiles present in JSON",
+                         "impact": "configuration and secrets retrievable."})
+    r = _recon_fetch(urllib.parse.urljoin(base, "actuator/heapdump"), timeout)
+    cls = _recon_classify_body(r.get("status"), r.get("headers"), r.get("body"))
+    if real(r) and cls not in ("html_page", "waf_challenge") and len(r.get("body", "")) > 2000:
+        findings.append({"severity": "high", "issue": "Spring Boot actuator/heapdump exposed",
+                         "evidence": "non-HTML binary heap dump served",
+                         "impact": "full heap (secrets, sessions) retrievable."})
+    # apache server-status — needs the actual status page signature
+    r = _recon_fetch(urllib.parse.urljoin(base, "server-status"), timeout)
+    if real(r) and "Apache Server Status" in r["body"]:
+        findings.append({"severity": "medium", "issue": "Apache server-status exposed",
+                         "evidence": "Apache Server Status page reachable",
+                         "impact": "active requests, client IPs, internal vhosts disclosed."})
+    # directory listing on the root
+    r = _recon_fetch(base, timeout)
+    if r.get("status") == 200 and re.search(r"<title>Index of /", r.get("body", ""), re.IGNORECASE):
+        findings.append({"severity": "medium", "issue": "directory listing enabled",
+                         "evidence": "Index of / autoindex page",
+                         "impact": "filesystem contents browsable."})
+    # .DS_Store — magic-byte validated
+    r = _recon_fetch(urllib.parse.urljoin(base, ".DS_Store"), timeout, max_bytes=64)
+    if r.get("status") == 200 and r.get("body", "").startswith("\x00\x00\x00\x01Bud1"):
+        findings.append({"severity": "low", "issue": "exposed .DS_Store",
+                         "evidence": "Bud1 magic present",
+                         "impact": "directory/file names enumerable."})
+
+    note = "validated exposures only (content-checked, baseline-diffed)."
+    if baseline["is_catchall"]:
+        note += " Site returns 200 for unknown paths (SPA/catch-all) — bare 200s were rejected."
+    if baseline["classification"] == "waf_challenge":
+        note += " A WAF/Cloudflare challenge is active."
+    return {"base": base, "catchall_detected": baseline["is_catchall"],
+            "waf_detected": baseline["classification"] == "waf_challenge",
+            "finding_count": len(findings),
+            "findings": findings or [{"severity": "info", "issue": "no validated high-signal exposures found"}],
+            "note": note}
+
+
+_RECON_TAKEOVER_FINGERPRINTS = [
+    ("AWS S3", "NoSuchBucket"),
+    ("AWS S3", "The specified bucket does not exist"),
+    ("GitHub Pages", "There isn't a GitHub Pages site here"),
+    ("Heroku", "No such app"),
+    ("Heroku", "herokucdn.com/error-pages/no-such-app"),
+    ("Fastly", "Fastly error: unknown domain"),
+    ("Shopify", "Sorry, this shop is currently unavailable"),
+    ("Surge.sh", "project not found"),
+    ("Bitbucket", "Repository not found"),
+    ("Ghost", "The thing you were looking for is no longer here"),
+    ("Pantheon", "The gods are wise"),
+    ("Tumblr", "Whatever you were looking for doesn't currently exist"),
+    ("Readthedocs", "unknown to Read the Docs"),
+    ("Wordpress", "Do you want to register"),
+    ("Help Scout", "No settings were found for this company"),
+]
+
+
+def tool_recon_subdomain_takeover(args: dict) -> dict:
+    """AUTHORIZED RECON. Check subdomains for dangling CNAME takeover: resolves
+    the CNAME, fetches the host, matches known orphaned-service fingerprints.
+    Read-only (no claiming performed)."""
+    subs = args.get("subdomains")
+    if isinstance(subs, str):
+        subs = [subs]
+    if not subs:
+        one = args.get("domain") or args.get("target") or ""
+        subs = [one] if one else []
+    subs = [_recon_clean_host(s) for s in subs if s]
+    if not subs:
+        return {"error": "provide `subdomains` (list) or `domain`"}
+    subs = subs[:80]
+    timeout = max(2.0, min(float(args.get("timeout") or 7.0), 15.0))
+    vulnerable = []
+    checked = []
+
+    for sub in subs:
+        cnames = []
+        try:
+            cnames = _recon_http_doh(sub, "CNAME", timeout=6.0)
+        except Exception:
+            pass
+        cname = cnames[0].rstrip(".") if cnames else ""
+        body = ""
+        for scheme in ("https://", "http://"):
+            r = _recon_fetch(scheme + sub, timeout=timeout, max_bytes=4000)
+            if "body" in r:
+                body = r["body"]
+                break
+        hit = None
+        for service, fp in _RECON_TAKEOVER_FINGERPRINTS:
+            if fp.lower() in body.lower():
+                hit = service
+                break
+        checked.append({"subdomain": sub, "cname": cname, "takeoverable": bool(hit)})
+        if hit:
+            vulnerable.append({"subdomain": sub, "cname": cname, "service": hit,
+                               "evidence": f"orphaned-service fingerprint for {hit}"})
+    return {"checked_count": len(checked), "vulnerable_count": len(vulnerable),
+            "vulnerable": vulnerable, "checked": checked,
+            "note": "fingerprint match = likely claimable. Confirm before reporting."}
+
+
+def tool_recon_cve_match(args: dict) -> dict:
+    """AUTHORIZED RECON. Map a component + version to known CVEs via OSV.dev.
+    Best coverage for OSS packages (npm, PyPI, Go, Maven, etc.) — feed it the
+    components you find in exposed package.json / requirements / JS libs."""
+    name = (args.get("package") or args.get("product") or "").strip()
+    if not name:
+        return {"error": "package/product required"}
+    version = (args.get("version") or "").strip()
+    ecosystem = (args.get("ecosystem") or "").strip()
+    query = {}
+    if version:
+        query["version"] = version
+    pkg = {"name": name}
+    if ecosystem:
+        pkg["ecosystem"] = ecosystem
+    query["package"] = pkg
+    try:
+        data = json.dumps(query).encode("utf-8")
+        req = urllib.request.Request("https://api.osv.dev/v1/query", data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            res = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"error": f"OSV query failed: {e}"}
+    vulns = []
+    for v in (res.get("vulns") or [])[:40]:
+        sev = ""
+        for s in (v.get("severity") or []):
+            sev = s.get("score", "") or sev
+        vulns.append({"id": v.get("id"), "summary": (v.get("summary") or "")[:160],
+                      "severity": sev, "aliases": (v.get("aliases") or [])[:5]})
+    return {"package": name, "version": version, "ecosystem": ecosystem,
+            "vuln_count": len(vulns), "vulns": vulns,
+            "note": "OSV.dev — strongest for OSS packages; pass ecosystem for best precision."}
+
+
+_RECON_SQL_ERRORS = [
+    "sql syntax", "mysql_fetch", "you have an error in your sql",
+    "warning: mysql", "unclosed quotation mark", "quoted string not properly terminated",
+    "ora-0", "oracle error", "postgresql", "pg_query", "sqlite",
+    "sqlstate", "odbc", "microsoft ole db", "syntax error at or near",
+]
+
+
+def tool_recon_injection_probe(args: dict) -> dict:
+    """AUTHORIZED RECON. Non-destructive injection detection on URL query
+    parameters: reflected XSS (marker reflected unencoded) and error-based SQLi
+    (SQL error signatures after a quote). Sends benign probes only."""
+    url = (args.get("url") or args.get("target") or "").strip()
+    if not url:
+        return {"error": "url required"}
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + _recon_clean_host(url)
+    parsed = urllib.parse.urlparse(url)
+    qs = dict(urllib.parse.parse_qsl(parsed.query))
+    names = args.get("params") or list(qs.keys())
+    if not names:
+        return {"error": "no query parameters to test — provide `params` or a URL with ?key=value",
+                "hint": "e.g. https://site/search?q=test"}
+    timeout = max(2.0, min(float(args.get("timeout") or 8.0), 15.0))
+    marker = "acc" + "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(6))
+    xss_payload = f"{marker}<svg/onload=1>"
+    findings = []
+
+    def build(param, value):
+        newqs = dict(qs)
+        newqs[param] = value
+        return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(newqs)))
+
+    for param in names:
+        # reflected XSS
+        r = _recon_fetch(build(param, xss_payload), timeout=timeout, max_bytes=20000)
+        if "body" in r and xss_payload in r["body"]:
+            findings.append({"param": param, "type": "reflected XSS",
+                             "severity": "high", "evidence": "payload reflected unencoded"})
+        elif "body" in r and marker in r["body"]:
+            findings.append({"param": param, "type": "reflection (encoded)",
+                             "severity": "info", "evidence": "marker reflected but encoded/sanitized"})
+        # error-based SQLi
+        r2 = _recon_fetch(build(param, "'\""), timeout=timeout, max_bytes=20000)
+        body_l = (r2.get("body") or "").lower()
+        hit = next((sig for sig in _RECON_SQL_ERRORS if sig in body_l), None)
+        if hit:
+            findings.append({"param": param, "type": "error-based SQLi",
+                             "severity": "high", "evidence": f"SQL error signature: '{hit}'"})
+
+    return {"url": url, "tested_params": names, "finding_count": len(findings),
+            "findings": findings or [{"type": "none", "severity": "info",
+                                       "note": "no reflected XSS or SQL errors observed"}]}
+
+
+def _recon_tcp_cmd(host: str, port: int, payload: bytes, timeout: float = 4.0) -> bytes:
+    """Open a TCP socket, send payload, return up to 4KB of response."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        if payload:
+            s.sendall(payload)
+        return s.recv(4096)
+    finally:
+        try: s.close()
+        except Exception: pass
+
+
+def tool_recon_open_services(args: dict) -> dict:
+    """AUTHORIZED RECON. Check for UNAUTHENTICATED data services exposed to the
+    network: Redis, Elasticsearch, Docker API, Memcached. A live unauth hit is
+    often a direct way in. Read-only probes."""
+    host = _recon_clean_host(args.get("host") or args.get("target") or "")
+    if not host:
+        return {"error": "host required"}
+    timeout = max(2.0, min(float(args.get("timeout") or 4.0), 10.0))
+    findings = []
+
+    # Redis (6379): PING should return +PONG if no auth
+    try:
+        resp = _recon_tcp_cmd(host, 6379, b"PING\r\n", timeout)
+        if b"+PONG" in resp:
+            findings.append({"service": "Redis", "port": 6379, "severity": "critical",
+                             "state": "OPEN / no auth", "evidence": "+PONG to unauthenticated PING"})
+        elif b"NOAUTH" in resp:
+            findings.append({"service": "Redis", "port": 6379, "severity": "info",
+                             "state": "present, auth required", "evidence": "NOAUTH response"})
+    except Exception:
+        pass
+    # Elasticsearch (9200): root returns cluster JSON
+    r = _recon_fetch(f"http://{host}:9200/", timeout)
+    if r.get("status") == 200 and '"cluster_name"' in (r.get("body") or ""):
+        findings.append({"service": "Elasticsearch", "port": 9200, "severity": "high",
+                         "state": "OPEN / no auth", "evidence": "cluster info returned unauthenticated"})
+    # Docker API (2375): /version
+    r = _recon_fetch(f"http://{host}:2375/version", timeout)
+    if r.get("status") == 200 and "ApiVersion" in (r.get("body") or ""):
+        findings.append({"service": "Docker API", "port": 2375, "severity": "critical",
+                         "state": "OPEN / no auth", "evidence": "/version returned — full host control"})
+    # Memcached (11211): stats
+    try:
+        resp = _recon_tcp_cmd(host, 11211, b"stats\r\n", timeout)
+        if b"STAT " in resp:
+            findings.append({"service": "Memcached", "port": 11211, "severity": "high",
+                             "state": "OPEN / no auth", "evidence": "stats returned unauthenticated"})
+    except Exception:
+        pass
+
+    return {"host": host, "finding_count": len(findings),
+            "findings": findings or [{"service": "none", "severity": "info",
+                                       "state": "no exposed unauthenticated services found"}]}
+
+
+_RECON_DEFAULT_CREDS = [
+    ("admin", "admin"), ("admin", "password"), ("admin", "admin123"),
+    ("admin", ""), ("admin", "123456"), ("admin", "changeme"),
+    ("admin", "letmein"), ("root", "root"), ("root", "toor"),
+    ("administrator", "administrator"), ("administrator", "password"),
+    ("user", "user"), ("guest", "guest"), ("test", "test"),
+    ("tomcat", "tomcat"), ("postgres", "postgres"), ("sa", "sa"),
+]
+
+
+def _recon_try_login(url, mode, user, pw, opts, timeout):
+    """One login attempt. Returns (success: bool, status: int|None)."""
+    import base64
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    if mode == "basic":
+        token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        req = urllib.request.Request(url, headers={"User-Agent": _RECON_UA,
+                                                   "Authorization": "Basic " + token})
+        try:
+            resp = opener.open(req, timeout=timeout)
+            return resp.status not in (401, 403, 407), resp.status
+        except urllib.error.HTTPError as e:
+            return e.code not in (401, 403, 407), e.code
+        except Exception:
+            return False, None
+    # form mode
+    user_field = opts.get("user_field") or "username"
+    pass_field = opts.get("pass_field") or "password"
+    data = {user_field: user, pass_field: pw}
+    data.update(opts.get("extra_fields") or {})
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "User-Agent": _RECON_UA, "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        resp = opener.open(req, timeout=timeout)
+        text = resp.read(20000).decode("utf-8", "replace")
+        status, final_url = resp.status, resp.url
+    except urllib.error.HTTPError as e:
+        text = ""
+        try:
+            text = e.read(20000).decode("utf-8", "replace")
+        except Exception:
+            pass
+        status, final_url = e.code, url
+    except Exception:
+        return False, None
+    sm = opts.get("success_marker")
+    fm = opts.get("fail_marker")
+    if sm:
+        return (sm.lower() in text.lower()), status
+    if fm:
+        return (fm.lower() not in text.lower()), status
+    return (status in (301, 302, 303) or final_url != url), status
+
+
+def tool_recon_auth_spray(args: dict) -> dict:
+    """AUTHORIZED RECON ONLY. Credential spray / default-cred test against an
+    HTTP login (basic or form). Rate-limited, attempt-capped, stops on first
+    valid pair per user. For targets you are authorized to test."""
+    url = (args.get("url") or args.get("target") or "").strip()
+    if not url:
+        return {"error": "url required"}
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + _recon_clean_host(url)
+    mode = (args.get("mode") or "basic").lower()
+    if mode not in ("basic", "form"):
+        return {"error": "mode must be 'basic' or 'form'"}
+    timeout = max(2.0, min(float(args.get("timeout") or 8.0), 15.0))
+    delay = max(0.0, min(float(args.get("delay") or 0.4), 5.0))
+
+    users = args.get("usernames")
+    passwords = args.get("passwords")
+    if users and passwords:
+        pairs = [(u, p) for u in users for p in passwords]
+    elif users:
+        common = ["admin", "password", "123456", "changeme", "letmein", ""]
+        pairs = [(u, p) for u in users for p in common]
+    else:
+        pairs = list(_RECON_DEFAULT_CREDS)
+    # dedupe, cap total attempts
+    seen, capped = set(), []
+    for pr in pairs:
+        if pr not in seen:
+            seen.add(pr)
+            capped.append(pr)
+    max_attempts = max(1, min(int(args.get("max_attempts") or 120), 300))
+    capped = capped[:max_attempts]
+
+    valid, attempts, done_users = [], 0, set()
+    for (u, p) in capped:
+        if u in done_users:  # already cracked this user, skip rest of their pairs
+            continue
+        if attempts:
+            time.sleep(delay + random.uniform(0, delay))  # rate limit + jitter
+        attempts += 1
+        ok, status = _recon_try_login(url, mode, u, p, args, timeout)
+        if ok:
+            valid.append({"username": u, "password": p, "status": status})
+            done_users.add(u)
+    return {
+        "url": url, "mode": mode, "attempts": attempts,
+        "valid_count": len(valid), "valid": valid,
+        "note": ("VALID CREDENTIALS FOUND — verify and capture evidence." if valid
+                 else "no valid credentials in the tested set."),
+    }
+
+
+def tool_recon_capture_evidence(args: dict) -> dict:
+    """AUTHORIZED RECON. Fetch a URL and store the response as a proof artifact
+    under data/recon_evidence/ with a sha256 + snippet, so the report cites a
+    real file instead of a claim."""
+    import hashlib
+    url = (args.get("url") or "").strip()
+    if not url:
+        return {"error": "url required"}
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + _recon_clean_host(url)
+    label = re.sub(r"[^A-Za-z0-9_.-]", "_", (args.get("label") or "evidence"))[:60]
+    timeout = max(2.0, min(float(args.get("timeout") or 10.0), 20.0))
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    req = urllib.request.Request(url, headers={"User-Agent": _RECON_UA})
+    ctype = ""
+    try:
+        resp = opener.open(req, timeout=timeout)
+        raw, status = resp.read(5_000_000), resp.status
+        ctype = resp.headers.get("Content-Type", "")
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read(5_000_000)
+        except Exception:
+            raw = b""
+        status = e.code
+        try:
+            ctype = e.headers.get("Content-Type", "")
+        except Exception:
+            ctype = ""
+    except Exception as e:
+        return {"error": f"capture failed: {e}", "url": url}
+
+    evidence_dir = DATA / "recon_evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    host = _recon_clean_host(url)
+    path = evidence_dir / f"{ts}_{label}_{host}.dat"
+    try:
+        path.write_bytes(raw)
+    except Exception as e:
+        return {"error": f"could not save evidence: {e}"}
+    snippet_text = raw[:2000].decode("utf-8", "replace")
+    classification = _recon_classify_body(status, {"Content-Type": ctype}, snippet_text)
+    warning, likely = "", True
+    if classification == "waf_challenge":
+        warning = "captured content is a WAF/Cloudflare challenge page — NOT a real artifact. Do NOT report this as a finding."
+        likely = False
+    elif classification == "html_page":
+        warning = "captured content is a generic HTML page (possibly the site's own index/SPA) — confirm it is actually sensitive before treating as evidence."
+        likely = False
+    return {
+        "saved": str(path), "url": url, "status": status, "bytes": len(raw),
+        "content_type": ctype, "classification": classification,
+        "likely_evidence": likely, "warning": warning,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "snippet": raw[:400].decode("utf-8", "replace"),
+        "note": ("evidence stored — cite this artifact path + sha256 in the report." if likely
+                 else "stored, but this does NOT look like a real artifact — see `warning`."),
+    }
+
+
 # --- Tool 5: check_deps ---
 def tool_check_deps(args: dict) -> dict:
     """Check dependency manifests against OSV.dev vulnerabilities."""
@@ -7253,6 +8435,27 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_read_skeleton,
     },
+    "pin_note": {
+        "description": "Pin a fact, decision, or fix to THIS session so it stays in context permanently and is never trimmed. Use it the moment you fix a bug (record the root cause + the fix), make a design decision, or the user states a constraint — so you never undo it or repeat the mistake.",
+        "parameters": {
+            "type": "object",
+            "properties": {"note": {"type": "string", "description": "The fact/fix/decision to lock in (one sentence)."}},
+            "required": ["note"],
+        },
+        "fn": tool_pin_note,
+    },
+    "unpin_note": {
+        "description": "Remove a pin from this session by its exact text or 1-based index (use when a pinned decision is reversed or no longer applies).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string", "description": "Exact pin text to remove."},
+                "index": {"type": "integer", "description": "1-based index of the pin to remove."}
+            },
+            "required": [],
+        },
+        "fn": tool_unpin_note,
+    },
     "check_syntax": {
         "description": "Check the syntax of a Python or JS/TS file without executing it. Returns line numbers of any errors.",
         "parameters": {
@@ -7332,6 +8535,171 @@ TOOLS: dict[str, dict] = {
         },
         "fn": tool_audit_http_headers,
     },
+    "recon_port_scan": {
+        "description": "AUTHORIZED RECON ONLY. Stealthy TCP-connect port scan (capped concurrency, randomized order, jitter — quieter than nmap). Read-only. Use only against targets you are authorized to test.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Target hostname or IP."},
+                "ports": {"type": "array", "items": {"type": "integer"}, "description": "Optional explicit port list. Default = ~50 common ports."},
+                "timeout": {"type": "number", "description": "Per-port connect timeout seconds (default 1.5)."},
+                "concurrency": {"type": "integer", "description": "Max simultaneous probes (default 8, max 32). Lower = stealthier."},
+                "jitter_ms": {"type": "integer", "description": "Random delay before each probe in ms (default 40)."}
+            },
+            "required": ["host"],
+        },
+        "fn": tool_recon_port_scan,
+    },
+    "recon_tls_audit": {
+        "description": "AUTHORIZED RECON ONLY. Inspect a host's TLS: protocol, cipher, certificate subject/issuer/SANs/expiry, validation status. Flags weak protocols and expired/self-signed certs. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Target hostname."},
+                "port": {"type": "integer", "description": "TLS port (default 443)."}
+            },
+            "required": ["host"],
+        },
+        "fn": tool_recon_tls_audit,
+    },
+    "recon_http_fingerprint": {
+        "description": "AUTHORIZED RECON ONLY. Fetch a URL and fingerprint the server: status, redirect chain, Server/X-Powered-By, page title, notable headers, cookies. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Target URL (scheme optional; defaults to https)."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_http_fingerprint,
+    },
+    "recon_subdomains": {
+        "description": "AUTHORIZED RECON ONLY. Passive subdomain enumeration via certificate transparency logs (crt.sh). No active brute-forcing. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "Apex domain, e.g. example.com."}
+            },
+            "required": ["domain"],
+        },
+        "fn": tool_recon_subdomains,
+    },
+    "recon_dns": {
+        "description": "AUTHORIZED RECON ONLY. Enumerate DNS records (A, AAAA, MX, NS, TXT, SOA, CNAME) via DNS-over-HTTPS. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "Domain to enumerate, e.g. example.com."}
+            },
+            "required": ["domain"],
+        },
+        "fn": tool_recon_dns,
+    },
+    "recon_content_discovery": {
+        "description": "AUTHORIZED RECON ONLY. Probe a base URL for a high-value path list (admin panels, config/backup files, VCS dirs, API docs). Rate-limited + jittered. Reports non-404 paths. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Base URL or host."},
+                "wordlist": {"type": "array", "items": {"type": "string"}, "description": "Optional custom path list. Default = built-in high-value paths."},
+                "concurrency": {"type": "integer", "description": "Max simultaneous requests (default 6, max 20)."},
+                "jitter_ms": {"type": "integer", "description": "Random delay before each request (default 60)."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_content_discovery,
+    },
+    "recon_check_exposure": {
+        "description": "AUTHORIZED RECON ONLY. Targeted check for high-signal exposures and interprets them: readable .git, .env secrets, directory listing, Spring actuator, Apache server-status. Returns findings with severity + evidence. Read-only.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Base URL or host to check."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_check_exposure,
+    },
+    "recon_subdomain_takeover": {
+        "description": "AUTHORIZED RECON ONLY. Check subdomains for dangling-CNAME takeover by matching orphaned-service fingerprints (S3, GitHub Pages, Heroku, etc.). Read-only — does not claim anything.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subdomains": {"type": "array", "items": {"type": "string"}, "description": "Subdomains to check (e.g. from recon_subdomains)."},
+                "domain": {"type": "string", "description": "Single host shortcut if not passing a list."}
+            },
+            "required": [],
+        },
+        "fn": tool_recon_subdomain_takeover,
+    },
+    "recon_cve_match": {
+        "description": "AUTHORIZED RECON ONLY. Map a component + version to known CVEs via OSV.dev. Best for OSS packages (npm, PyPI, Go, Maven). Feed it components found in exposed package.json / requirements / JS libs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "package": {"type": "string", "description": "Component/package name."},
+                "version": {"type": "string", "description": "Version string."},
+                "ecosystem": {"type": "string", "description": "Optional: npm, PyPI, Go, Maven, etc. Improves precision."}
+            },
+            "required": ["package"],
+        },
+        "fn": tool_recon_cve_match,
+    },
+    "recon_injection_probe": {
+        "description": "AUTHORIZED RECON ONLY. Non-destructive injection detection on URL query parameters: reflected XSS and error-based SQLi. Sends only benign probes (a marker and a quote). Read-only intent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL including query string, e.g. https://site/search?q=test"},
+                "params": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit param names to test; default = params parsed from the URL."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_injection_probe,
+    },
+    "recon_open_services": {
+        "description": "AUTHORIZED RECON ONLY. Check for UNAUTHENTICATED data services exposed on the network (Redis, Elasticsearch, Docker API, Memcached). A live unauth hit is often a direct way in. Read-only probes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Target hostname or IP."}
+            },
+            "required": ["host"],
+        },
+        "fn": tool_recon_open_services,
+    },
+    "recon_auth_spray": {
+        "description": "AUTHORIZED RECON ONLY. Credential spray / default-cred test against an HTTP login (basic or form auth). Rate-limited, attempt-capped, stops on first valid pair per user. Only for targets you are authorized to test.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Login URL (basic-auth resource, or form POST endpoint)."},
+                "mode": {"type": "string", "description": "'basic' (HTTP Basic) or 'form' (POST). Default basic."},
+                "usernames": {"type": "array", "items": {"type": "string"}, "description": "Usernames to try. Omit to use the built-in default-cred list."},
+                "passwords": {"type": "array", "items": {"type": "string"}, "description": "Passwords to try against each username."},
+                "user_field": {"type": "string", "description": "Form mode: username field name (default 'username')."},
+                "pass_field": {"type": "string", "description": "Form mode: password field name (default 'password')."},
+                "success_marker": {"type": "string", "description": "Form mode: body string present ONLY on success."},
+                "fail_marker": {"type": "string", "description": "Form mode: body string present ONLY on failure."},
+                "delay": {"type": "number", "description": "Seconds between attempts (default 0.4). Higher = stealthier, lockout-safer."},
+                "max_attempts": {"type": "integer", "description": "Hard cap on total attempts (default 120, max 300)."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_auth_spray,
+    },
+    "recon_capture_evidence": {
+        "description": "AUTHORIZED RECON. Fetch a URL and store the response as a proof artifact under data/recon_evidence/ with a sha256 + snippet. Use to capture evidence of access (dumped file, admin page, authed response) so the report cites a real artifact.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL of the resource that proves access."},
+                "label": {"type": "string", "description": "Short label for the artifact filename (e.g. 'env_dump')."}
+            },
+            "required": ["url"],
+        },
+        "fn": tool_recon_capture_evidence,
+    },
     "check_deps": {
         "description": "Check dependency manifests against OSV.dev vulnerabilities. No approval needed.",
         "parameters": {
@@ -7371,12 +8739,14 @@ TOOLS: dict[str, dict] = {
         "fn": tool_read_file,
     },
     "write_file": {
-        "description": "Write or overwrite a file. Requires user approval. ONLY for new files or complete rewrites (>30 lines changed).",
+        "description": "Write or overwrite a file. Requires user approval. ONLY for new files or complete rewrites (>30 lines changed). For fixes to an existing file, prefer edit_file — repeatedly rewriting the whole file from scratch is blocked (use edit_file instead).",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
+                "force": {"type": "boolean", "description": "Override the anti-clobber guard to overwrite a file you haven't read this session. Use only when intentionally replacing the whole file."},
+                "force_rewrite": {"type": "boolean", "description": "Override the rewrite-loop guard to fully rewrite a file you already rewrote this turn. Use ONLY with a concrete reason (e.g. a real syntax error you must fix wholesale)."},
             },
             "required": ["path", "content"],
         },
@@ -8220,6 +9590,11 @@ _ANALYSIS_TOOL_NAMES = {
     "scan_apk", "decompile_apk", "ghidra_analyze",
     "binary_inspect", "yara_scan",
     "scan_secrets", "parse_evtx", "analyze_pcap", "check_deps",
+    "recon_port_scan", "recon_tls_audit", "recon_http_fingerprint",
+    "recon_subdomains", "recon_dns",
+    "recon_content_discovery", "recon_check_exposure", "recon_subdomain_takeover",
+    "recon_cve_match", "recon_injection_probe", "recon_open_services",
+    "recon_auth_spray", "recon_capture_evidence",
     "read_skeleton", "check_syntax", "run_tests",
     # git diffs and logs are bulky-by-design too — the model needs to read the
     # whole patch to write a sane commit message or to verify a push payload.
@@ -8234,6 +9609,11 @@ _ANALYSIS_TOOL_NAMES = {
 # scan_apk on a real-world APK with deep:true and 200 findings + a few
 # hundred exported components routinely lands in the 30-40 KB range.
 _TOOL_RESULT_CAPS = {
+    # read_file paginates its own 20KB chunks with an exact offset hint. Its
+    # result cap MUST sit above the serialized chunk, or compress_tool_result
+    # elides the content a SECOND time (head+tail) — mangling the chunk and the
+    # continuation hint, which makes models thrash ("output got truncated").
+    "read_file": 32000,
 
     "scan_secrets": 48000,
     "parse_evtx": 48000,
@@ -8241,6 +9621,17 @@ _TOOL_RESULT_CAPS = {
     "check_deps": 24000,
 
     "network_snapshot": 32000,
+    # recon_subdomains can return a few hundred CT-log subdomains; the rest
+    # are compact JSON. Give the suite room so the report isn't chopped.
+    "recon_subdomains": 32000,
+    "recon_dns": 16000,
+    "recon_port_scan": 16000,
+    "recon_content_discovery": 24000,
+    "recon_check_exposure": 16000,
+    "recon_subdomain_takeover": 24000,
+    "recon_cve_match": 24000,
+    "recon_injection_probe": 16000,
+    "recon_open_services": 16000,
     "scan_apk": 48000,
     "decompile_apk": 24000,
     # ghidra_analyze: imports + exports + 200 strings + decompiled function
@@ -8419,13 +9810,30 @@ def compress_tool_result(name: str, result: Any, cap: int) -> str:
     return _truncation_envelope(result, cap, len(s_full))
 
 
+# Red-team recon suite — gated behind `red_team_enabled` so a normal coding
+# turn doesn't carry ~13 tools it will never call (real token cost every turn).
+_RED_TEAM_TOOL_NAMES = {
+    "recon_dns", "recon_subdomains", "recon_tls_audit", "recon_http_fingerprint",
+    "recon_port_scan", "recon_content_discovery", "recon_check_exposure",
+    "recon_subdomain_takeover", "recon_cve_match", "recon_injection_probe",
+    "recon_open_services", "recon_auth_spray", "recon_capture_evidence",
+}
+
+
 def _active_tools() -> dict:
-    """Return TOOLS filtered by current settings — desktop tools only show
-    when enabled, so the model doesn't keep calling tools that will refuse."""
+    """Return TOOLS filtered by current settings — desktop tools only show when
+    desktop automation is enabled, and the red-team recon suite only when red
+    team mode is on, so a normal coding turn carries neither (and pays no token
+    cost for tools it can't or won't use)."""
     s = get_settings()
-    if s.get("desktop_enabled"):
+    excluded: set[str] = set()
+    if not s.get("desktop_enabled"):
+        excluded |= _DESKTOP_TOOL_NAMES
+    if not s.get("red_team_enabled"):
+        excluded |= _RED_TEAM_TOOL_NAMES
+    if not excluded:
         return TOOLS
-    return {k: v for k, v in TOOLS.items() if k not in _DESKTOP_TOOL_NAMES}
+    return {k: v for k, v in TOOLS.items() if k not in excluded}
 
 
 def tools_for_llama() -> list[dict]:
@@ -8589,6 +9997,26 @@ _chat_ctx = threading.local()
 
 def _reset_tool_call_history() -> None:
     _tool_call_history.calls = {}
+    _tool_call_history.writes = {}
+
+
+# Rewrite-loop breaker: count full write_file rewrites per path per turn so a
+# model that keeps "this is a mess, let me rewrite from scratch" (with no way to
+# verify it's actually broken) gets forced into targeted edits instead of
+# spiralling. Resets every turn alongside the tool-call history above.
+REWRITE_LOOP_LIMIT = 2  # original write + one rewrite; the next is blocked
+
+
+def _write_count(npath: str) -> int:
+    return (getattr(_tool_call_history, "writes", None) or {}).get(npath, 0)
+
+
+def _record_write(npath: str) -> None:
+    w = getattr(_tool_call_history, "writes", None)
+    if w is None:
+        w = {}
+        _tool_call_history.writes = w
+    w[npath] = w.get(npath, 0) + 1
 
 
 def _set_current_chat(chat_id: str) -> None:
@@ -9330,209 +10758,6 @@ def describe_image(b64: str, hint: str = "") -> str:
 
 # ---- system prompt ---------------------------------------------------------
 
-SYSTEM_PROMPT_BASE = """you are accuretta, a local agent running on the user's own machine.
-
-voice: precise, lowercase, unceremonious. no sales voice, no hype, no emoji.
-
-you have two modes, chosen by context:
-
-1. IDE mode. when the user asks you to build, design, or edit a web page / app,
-   reply with a single complete HTML document wrapped in a ```html ... ```
-   code block. include inline CSS and JS. the renderer will preview it live
-   and save a version the user can flip back to. when editing, rewrite the
-   whole document (do not emit partial diffs).
-
-2. Agent mode. when the user asks you to do something on their computer,
-   call tools. windows and system32 are off-limits; all writes and all
-   modify commands require the user to approve before running.
-
-tools are called by emitting:
-  <tool_call>{"name":"<tool>","arguments":{...}}</tool_call>
-one per line. after each tool result, continue reasoning. do not emit
-tool calls inside code blocks.
-
-feedback discipline — this is a chat UI, silence looks like a hang:
-- status narration ("looking in your screenshots folder…", "found 3
-  files, reading them now…") MUST go INSIDE <think>...</think> tags.
-  the UI renders thinking as a shimmering status line above the tool
-  cards; text outside think tags becomes the final answer bubble and
-  should NOT contain status pings.
-- emit one short <think> status ping before the first tool call and
-  between rounds. do not repeat the same ping word-for-word across
-  rounds — advance the state ("reading index.html…", "checking
-  script.py…", "drafting fixes…").
-- if a path isn't found, close thinking and tell the user in the
-  bubble what you tried and ask for the correct path.
-- CHAIN TOOLS AGGRESSIVELY: when the user asks you to read a file,
-  read it immediately after finding it. do not stop after list_directory.
-  when asked to write, write immediately after confirming the path.
-  complete tasks in the fewest tool calls possible. never ask the user
-  "shall i read it?" or "would you like me to proceed?" — just do it.
-- the final bubble must contain only the answer/summary (1–3
-  sentences when wrapping up a task), never status narration.
-- MANDATORY: every turn MUST end with visible text OUTSIDE of <think>
-  tags. ending a turn with only tool calls (or only thinking) looks
-  like a freeze — the user can't see it. after each tool round:
-    * if you have everything you need, answer the user's question
-      ("yes — the Test folder has index.html and script.py").
-    * if you need another tool, briefly say so before calling it
-      ("reading index.html now…") and emit the next call.
-    * if the user's request is complete, confirm it ("done. wrote
-      index.html. want me to check script.py too?").
-  never stop silently after a tool result. one short sentence beats
-  zero every time.
-- never fix or delete partial code without saying so first. if a file
-  is broken, read it, describe the problems, then propose the fix.
-  when the user confirms ("yes", "fix them", "do it"), CALL write_file
-  — do not just re-describe the fix.
-
-workspace resolution — the user almost always refers to their workspace:
-- "workspace folders" are listed at the end of this prompt. treat them
-  as authoritative roots. if the user says "the Test folder", "my Test
-  project", "the folder I added", etc. match it to the workspace entry
-  whose last path segment matches (case-insensitive) — do NOT ask which
-  folder unless there's a real ambiguity (two entries with the same
-  leaf name).
-- once matched, start with a list_dir on that root before asking the
-  user for the path.
-- only ask the user to clarify if there are zero matches or multiple
-  plausible matches.
-
-workspace refusal — do not loop on denied writes:
-- if write_file, edit_file, or delete_file returns
-  `"path outside workspace. Add folder in Workspace panel."`, STOP immediately.
-  do not retry with a different path, do not fall back to PowerShell, do not
-  try to create the file under a plausible-looking root. the user has not
-  configured a workspace that covers that path — only they can fix it.
-- respond in the bubble: name the path you tried, and tell the user to add
-  the parent folder in Settings -> Workspace folders, then ask them to retry.
-- the same rule applies to any tool that returns a sandbox / allowlist refusal
-  (e.g. `desktop_launch_app` refusing an app, `run_powershell` refusing a
-  destructive command without approval). one clear explanation, then stop.
-
-write honesty — never lie about persistence:
-- do NOT say "saved", "applied", "written", "fixed the file", or
-  "updated" unless you just called write_file (or the appropriate
-  mutating tool) for that file in THIS turn AND received a success
-  result. claims without a successful tool result are prohibited.
-- if you only showed the corrected code in chat, say exactly that:
-  "here's the proposed fix — confirm and I'll write it to <path>." do
-  not imply the change is on disk.
-- if write_file returned an error, surface it verbatim and stop.
-
-file editing discipline — use the right tool for the job:
-- edit_file is for surgical changes: changing a color, renaming a variable, adding one function, fixing a typo. old_text must be UNIQUE in the file. include 2-3 lines of surrounding context in old_text so the match is unambiguous.
-- write_file is ONLY for: creating a new file, or rewriting >30 lines at once.
-- examples:
-  GOOD edit_file: old_text="  background: blue;\\n  color: white;" new_text="  background: red;\\n  color: black;"
-  BAD edit_file: old_text="(entire 400-line file)" new_text="(entire 400-line file with one word changed)"
-  BAD: rewriting a file in chat text then also calling write_file — confirm "saved" and stop.
-
-memories — you have a persistent `remember(text, tags?)` tool:
-- at the end of a task, if you learned something durable (a working
-  command, the user's preferred style, where a project lives, a gotcha
-  that tripped you up), call remember with ONE short sentence (<=220
-  chars). tag with 1-3 short keywords.
-- what NOT to remember: the current task, chat transcript, one-off
-  paths you were just handed. those expire with the session.
-- existing memories are listed at the top of this prompt under
-  "learned memories" — read them first and lean on them instead of
-  re-deriving things. if a memory turns out wrong, call forget(id)
-  and remember the corrected version.
-
-desktop automation — the agent can see and drive the screen when enabled:
-- enabled state is in settings (`desktop_enabled`). if a desktop tool returns
-  "desktop automation is disabled", tell the user to enable it in
-  Settings -> Desktop automation and stop. do not keep retrying.
-- observe before you act. every desktop workflow is:
-  1. call `describe_screen` (or `list_windows`) to see current state,
-  2. decide the next single action,
-  3. call ONE action tool (launch/focus/click/type/keys/close),
-  4. call `describe_screen` again to confirm it worked,
-  5. repeat.
-- derive click coordinates from the vision description + list_windows
-  bounding boxes. never guess coordinates. if you can't locate a target,
-  say so and ask the user.
-- prefer keyboard shortcuts over clicks when available (ctrl+s, alt+f4,
-  ctrl+tab, win+r, etc.) — they are more reliable than coordinate clicks.
-- `desktop_launch_app` refuses anything not in the user's allowlist.
-  if an app isn't allowed, do NOT try workarounds (powershell, focus by
-  title after shelling out, etc.). tell the user: "'<app>' isn't in your
-  desktop allowlist - add it in Settings -> Desktop automation."
-- every action prompts the user to approve. if the user denies, stop
-  and report why you wanted it — don't retry with a slightly different
-  command.
-- every action respects the global panic/kill switch. if any tool
-  returns a panic error, stop the whole task and tell the user.
-
-behavioral guidelines to reduce common coding mistakes:
-- tradeoff: these guidelines bias toward caution over speed. for trivial tasks, use judgment.
-- think before coding: don't assume. don't hide confusion. surface tradeoffs.
-  * state your assumptions explicitly. if uncertain, ask.
-  * if multiple interpretations exist, present them - don't pick silently.
-  * if a simpler approach exists, say so. push back when warranted.
-  * if something is unclear, stop. name what's confusing. ask.
-- simplicity first: minimum code that solves the problem. nothing speculative.
-  * no features beyond what was asked.
-  * no abstractions for single-use code.
-  * no "flexibility" or "configurability" that wasn't requested.
-  * no error handling for impossible scenarios.
-  * if you write 200 lines and it could be 50, rewrite it.
-  * ask yourself: "would a senior engineer say this is overcomplicated?" if yes, simplify.
-- surgical changes: touch only what you must. clean up only your own mess.
-  * when editing existing code: don't "improve" adjacent code, comments, or formatting.
-  * don't refactor things that aren't broken.
-  * match existing style, even if you'd do it differently.
-  * if you notice unrelated dead code, mention it - don't delete it.
-  * when your changes create orphans: remove imports/variables/functions that YOUR changes made unused. don't remove pre-existing dead code unless asked.
-  * the test: every changed line should trace directly to the user's request.
-- goal-driven execution: define success criteria. loop until verified.
-  * transform tasks into verifiable goals (e.g. "Fix the bug" -> "Write a test that reproduces it, then make it pass").
-  * strong success criteria let you loop independently. weak criteria require constant clarification.
-
-keep responses tight. when reporting results, use the voice above.
-"""
-
-
-IDE_TAILWIND_ADDENDUM = """IDE addendum — Tailwind is ENABLED:
-- the renderer will inject the Tailwind Play CDN (`https://cdn.tailwindcss.com`)
-  into the preview automatically. do NOT add a <script> for it yourself.
-- style the page with Tailwind utility classes (flex, grid, rounded-2xl,
-  shadow-sm, text-slate-700, etc.). prefer Tailwind over hand-written CSS.
-- you may include a tiny `tailwind.config = { ... }` inline script before the
-  closing </head> when you need theme extensions or the `darkMode: 'class'`
-  hook — that is the Play-CDN config pattern.
-- avoid dumping raw <style> rules for things Tailwind already covers.
-  keep the result looking polished and modern by default.
-"""
-
-IDE_MULTIFILE_ADDENDUM = """IDE addendum — multi-file output is ENABLED:
-- when the task warrants separating concerns (more than a trivial page),
-  emit a small folder structure instead of a single HTML file. use fenced
-  code blocks with a `path=` info string, one per file:
-
-    ```html path=index.html
-    <!doctype html><html>... link style.css / script.js here ...</html>
-    ```
-
-    ```css path=style.css
-    /* stylesheet */
-    ```
-
-    ```js path=script.js
-    // client script
-    ```
-
-- ALWAYS include `path=index.html` as the entry point. other common paths:
-  `style.css`, `script.js`, `assets/...`. keep paths relative and
-  POSIX-style (forward slashes). no absolute paths, no `..`.
-- the renderer will inline linked css/js into the preview iframe so
-  `<link rel="stylesheet" href="style.css">` and `<script src="script.js">`
-  both work in the live preview. Export Project will zip the files
-  separately, preserving the stated paths.
-- for trivial single-page work, a single ```html ...``` block is still fine.
-"""
-
 
 def build_system_prompt(include_tools: bool, chat_mode: str = "auto") -> str:
     """Build a token-efficient system prompt. Target: < 1500 tokens total.
@@ -9601,6 +10826,9 @@ rules:
 7. CHAIN TOOLS AGGRESSIVELY: when the user asks you to read a file, read it immediately after finding it. do not stop after list_directory. when asked to write, write immediately after confirming the path. complete tasks in the fewest tool calls possible. never ask the user "shall i read it?" or "would you like me to proceed?" — just do it.
 8. NEVER re-emit full file content you already generated in a previous turn. if the user asks you to save something you already built, call write_file with the content but do NOT dump the full code in the visible chat text — just confirm "saved to <path>".
 9. proactive suggestions: if there are obvious, highly actionable next steps for the user, output up to 3 short suggestions at the end of your message in this exact format: <cascade>["Action 1", "Action 2"]</cascade>. Only do this if genuinely applicable. Keep suggestions under 5 words.
+10. editing: use edit_file for small changes (it verifies the match itself); write_file only for new files or full rewrites. after writing a file, TRUST it — you can't run it, so don't rewrite "to be safe". never rewrite the same file from scratch twice — imagined flaws aren't real flaws; fix a SPECIFIC defect with edit_file instead.
+11. don't loop on refusals: if a tool returns "path outside workspace" or a sandbox/approval refusal, STOP — name what you tried and tell the user how to fix it (add the folder, approve). do not retry variants or fall back to powershell.
+12. surgical & simple: write the minimum that solves the request — no speculative features, no abstractions for single-use code. when editing, touch ONLY what the task needs; don't refactor or restyle working code, match the existing style, and make every changed line trace to what was asked.
 
 keep responses tight."""
     parts.append(core)
@@ -9743,6 +10971,8 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
         max_tool_rounds = max(1, min(max_tool_rounds, 500))
         rounds = 0
         empty_retry_done = False
+        force_no_think = False   # set when the thinking-budget enforcer aborts a runaway
+        budget_retries = 0       # cap how many times we force-stop thinking per turn
         conversation = list(messages)
         # Anything appended past this index is the model's working memory
         # for THIS turn — intermediate assistant messages with tool_calls,
@@ -9799,6 +11029,11 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
             enable_thinking = settings.get("enable_thinking")
             if enable_thinking is not None:
                 tpl_kwargs["enable_thinking"] = bool(enable_thinking)
+            if force_no_think:
+                # Previous round blew the thinking budget — force a direct answer
+                # this round regardless of the model's default thinking mode.
+                tpl_kwargs["enable_thinking"] = False
+                force_no_think = False
             tb = settings.get("thinking_budget")
             try:
                 tb_int = int(tb) if tb is not None else 2048
@@ -9829,6 +11064,15 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
             # only recognizes inline <think>…</think>, so we re-wrap here and
             # forward as one continuous stream.
             reasoning_open = False
+            # Harness-enforced thinking budget. The model's chat template often
+            # IGNORES thinking_budget (Qwen3.6 ran 48k tokens on a 2048 cap), so
+            # we count reasoning chars ourselves and force-close a runaway.
+            think_chars = 0
+            think_overflow = False
+            try:
+                _think_cap = int(settings.get("thinking_budget") or 2048)
+            except Exception:
+                _think_cap = 2048
 
             try:
                 for raw in resp:
@@ -9874,6 +11118,17 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                             reasoning_open = True
                         content_buf.append(rpiece)
                         emit({"type": "delta", "content": rpiece})
+                        # Enforce the thinking budget the model's template ignores:
+                        # once reasoning exceeds the cap, force-close </think> and
+                        # break so we can re-prompt for a direct answer.
+                        if _think_cap > 0 and budget_retries < 2:
+                            think_chars += len(rpiece)
+                            if think_chars / CHARS_PER_TOKEN > _think_cap:
+                                content_buf.append("</think>")
+                                emit({"type": "delta", "content": "</think>"})
+                                reasoning_open = False
+                                think_overflow = True
+                                break
                     piece = delta.get("content") or ""
                     if piece:
                         if reasoning_open:
@@ -9933,6 +11188,28 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                 partial = {"role": "assistant", "content": "".join(content_buf)}
                 partial["_appended_intermediate"] = list(conversation[_start_len:])
                 return partial
+
+            # Thinking-budget enforcer tripped: we force-closed a runaway <think>
+            # block. Re-prompt ONCE (thinking disabled) feeding the planning tail
+            # back so the model continues straight into the answer.
+            if think_overflow:
+                budget_retries += 1
+                rounds += 1
+                tail = "".join(content_buf)[-2000:]
+                conversation.append({
+                    "role": "user",
+                    "content": (
+                        "[automatic note] You reached your thinking budget. Stop thinking now and write "
+                        "the COMPLETE final answer directly — full code/prose, no <think> block, no more "
+                        "planning. Continue from your planning so far:\n" + tail
+                    ),
+                })
+                emit({"type": "notice",
+                      "note": f"thinking budget ({_think_cap} tok) reached — writing the answer now"})
+                if rounds < max_tool_rounds:
+                    force_no_think = True
+                    continue
+                # too many rounds — fall through and finish with whatever we have
 
             full_text = "".join(content_buf)
 
@@ -11614,7 +12891,37 @@ class Handler(BaseHTTPRequestHandler):
                 "Accuretta runs Gemma in chat-only mode. For agentic/tool work "
                 "(file edits, PowerShell, git), switch to Qwen, GLM, Llama, or GPT-OSS."
             )
+        # Rolling summary: fold the oldest un-kept turns into a compact summary
+        # instead of letting truncate_messages delete them outright. Keeps the
+        # "we hit bug X, fixed it by Y" lessons alive so the model stops
+        # repeating mistakes it already fixed on long tasks. One extra (quick)
+        # model call fires only when old turns age out — every ~12 turns, not
+        # every turn. Fully graceful: any failure just keeps the prior summary.
+        if get_settings().get("summarize_history", True):
+            try:
+                if _maybe_roll_summary(chat):
+                    save_json(CHATS_FILE, chats)
+            except Exception:
+                traceback.print_exc()
         system_prompt = build_system_prompt(include_tools=use_tools, chat_mode=mode)
+        # Pinned facts/fixes — verbatim, highest priority, never trimmed.
+        _pins = chat.get("pins") or []
+        if _pins:
+            system_prompt += (
+                "\n\n=== PINNED FOR THIS SESSION (established facts/fixes — do NOT undo or repeat) ===\n"
+                + "\n".join(f"- {p}" for p in _pins)
+            )
+        _roll = chat.get("rolling_summary", "")
+        if _roll:
+            system_prompt += (
+                "\n\n=== EARLIER IN THIS SESSION (older turns condensed to save context; "
+                "treat these as established facts — do not redo work or re-ask) ===\n" + _roll
+            )
+        if use_tools:
+            system_prompt += (
+                "\n\nWhen you fix a bug, settle a design decision, or the user states a constraint, "
+                "call pin_note to lock it in for this session so you never undo it or repeat the mistake."
+            )
         msgs: list[dict] = [{"role": "system", "content": system_prompt}]
         # Replay the FULL stored history including intermediate-assistant
         # turns (with tool_calls) and tool-result messages from prior agentic
@@ -11625,7 +12932,10 @@ class Handler(BaseHTTPRequestHandler):
         # replay. On the text-only path we already inlined descriptions into
         # the user_text at append time, so list content is never reconstructed.
         replay_vision = _llama.is_vision_capable()
-        for m in chat["messages"]:
+        # Replay only turns NOT already folded into the rolling summary — this
+        # is what actually saves the window (the summary stands in for them).
+        _replay_from = int(chat.get("summary_through", 0) or 0)
+        for m in chat["messages"][_replay_from:]:
             role = m.get("role")
             if role not in ("user", "assistant", "tool"):
                 continue

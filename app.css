@@ -970,12 +970,34 @@ button {
 /* Provider pill selector — compact dropdown */
 .cost-pills {
   display: flex;
-
+  gap: 6px;
+  align-items: center;
   justify-content: flex-start;
   margin-top: 4px;
   position: relative;
   z-index: 2;
 }
+
+.cost-share-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-fluid), background var(--dur-fast) var(--ease-fluid), border-color var(--dur-fast) var(--ease-fluid);
+}
+.cost-share-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.cost-share-btn i { font-size: 14px; }
 
 .cost-select {
   font-family: var(--font-sans) !important;
@@ -1282,6 +1304,41 @@ button {
   transform: translate(-50%, -50%) scale(1);
   pointer-events: auto;
 }
+
+/* ---- authorized recon gate ---- */
+.recon-disclaimer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  background: var(--warning-subtle);
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin-bottom: 16px;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.recon-disclaimer i { color: var(--warning); font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.recon-disclaimer strong { color: var(--fg); }
+.recon-q { font-size: 14px; font-weight: 500; color: var(--fg); margin: 0 0 14px; }
+.recon-label { display: block; font-size: 12px; font-weight: 500; color: var(--fg-muted); margin-bottom: 6px; }
+.recon-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+.recon-input:focus { outline: none; border-color: var(--accent); }
+.recon-hint { font-size: 12px; color: var(--fg-subtle); line-height: 1.5; margin: 8px 0 16px; }
+.recon-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 
 .modal-head {
   display: flex;
@@ -1923,16 +1980,15 @@ button {
 
 }
 
-.bubble.agent {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-top-left-radius: 4px;
-
-  box-shadow: 
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 4px 16px rgba(0, 0, 0, 0.02);
-
+.bubble.agent:not(.quiet) {
+  /* Bubble-less assistant: text flows on the page like modern AI chats. Only
+     the user keeps a bubble. The .quiet empty-state keeps its card (excluded
+     above), and code cards render their own surface on the flat background. */
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 2px 0;
 }
 
 /* Empty-state / model-didn't-answer bubble. Used for three cases:
@@ -7115,7 +7171,7 @@ body,
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), var(--shadow-sm);
 }
 
-.bubble.agent:hover {
+.bubble.agent.quiet:hover {
   transform: translateY(-1px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05), var(--shadow-md);
 }
@@ -7725,6 +7781,12 @@ body,
     padding: 3px 18px 3px 8px !important;
   }
 
+  .side-foot .cost-share-btn {
+    width: 22px;
+    height: 22px;
+  }
+  .side-foot .cost-share-btn i { font-size: 12px; }
+
   .side-foot .ctx-gauge svg {
     width: 20px;
     height: 20px;
@@ -8099,7 +8161,7 @@ body,
 
 :is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"]),
 .dark {
-  .bubble.agent {
+  .bubble.agent.quiet {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
   }
 

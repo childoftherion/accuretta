@@ -2458,7 +2458,13 @@
     // Code-only bubbles: when the agent reply is essentially just one code
     // card, drop the bubble's padding and background so the card itself
     // becomes the surface — kills the "card inside a card" effect.
-    root.querySelectorAll(".bubble.agent").forEach(bubble => {
+    // Include `root` itself — the live/final render calls this with the
+    // bubble element directly, where querySelectorAll (descendants-only) would
+    // miss it; reload calls it with the row. Checking both keeps the slim
+    // code-only look consistent before and after a refresh.
+    const _agentBubbles = Array.from(root.querySelectorAll(".bubble.agent"));
+    if (root.matches && root.matches(".bubble.agent")) _agentBubbles.push(root);
+    _agentBubbles.forEach(bubble => {
       const meaningful = Array.from(bubble.children).filter(el => {
         if (el.nodeType !== 1) return false;
         if (el.tagName === "BR") return false;
@@ -5525,6 +5531,7 @@
 
     // desktop automation
     $("#sw-desktop-enabled")?.classList.toggle("on", !!s.desktop_enabled);
+    $("#sw-red-team-enabled")?.classList.toggle("on", !!s.red_team_enabled);
     const al = $("#set-desktop-allowlist");
     if (al) al.value = (s.desktop_app_allowlist || []).join("\n");
     fill("#set-desktop-rate", s.desktop_max_actions_per_minute || 30);
@@ -5604,6 +5611,7 @@
       theme: ($("#set-theme")?.value || "light"),
       allow_web_preview: $("#sw-web").classList.contains("on"),
       desktop_enabled: $("#sw-desktop-enabled")?.classList.contains("on") || false,
+      red_team_enabled: $("#sw-red-team-enabled")?.classList.contains("on") || false,
       desktop_app_allowlist: ($("#set-desktop-allowlist")?.value || "")
         .split("\n").map(x => x.trim()).filter(Boolean),
       desktop_max_actions_per_minute: Math.max(1, Math.min(300, n("#set-desktop-rate") || 30)),
@@ -5898,6 +5906,121 @@
     }
   }
 
+  // ---------- shareable savings card ----------
+  function _fmtTokensShort(n) {
+    n = Math.max(0, Math.round(n || 0));
+    if (n >= 1e6) return +(n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return +(n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
+
+  // Build an offscreen 540x540 card styled with the app's own font
+  // (var(--font-sans)) so html2canvas captures it, not Claude's default.
+  // Fixed espresso palette so the shared image always looks premium
+  // regardless of the active theme.
+  function _savingsCardEl(logoDataUrl) {
+    const provider = CLOUD_PRICING[state.costProvider];
+    const saved = calcCost(state.costProvider);
+    const savedStr = saved < 0.005
+      ? "$0.00"
+      : "$" + saved.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const tokens = _fmtTokensShort((state._allTimeTokIn || 0) + (state._allTimeTokOut || 0));
+    const sessions = (state.chats && state.chats.order && state.chats.order.length) || 0;
+    const providerLabel = provider ? provider.label : state.costProvider;
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "position:fixed;left:-10000px;top:0;z-index:-1;";
+    wrap.innerHTML = `
+      <div style="width:540px;height:540px;box-sizing:border-box;background:#2B2722;border-radius:24px;padding:46px;display:flex;flex-direction:column;font-family:var(--font-sans);">
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div style="display:flex;align-items:center;gap:11px;">
+            ${logoDataUrl
+              ? `<img src="${logoDataUrl}" alt="" style="height:30px;width:auto;display:block;">`
+              : `<span style="width:14px;height:14px;border-radius:4px;background:#B5544A;display:inline-block;"></span>`}
+            <span style="color:#EAE1D0;font-size:18px;font-weight:500;letter-spacing:-0.01em;">accuretta</span>
+          </div>
+          <span style="color:#8A8170;font-size:13px;font-weight:500;letter-spacing:0.01em;">github.com/mkultraware/accuretta</span>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:2px;">
+          <span style="color:#8A8170;font-size:13px;font-weight:500;letter-spacing:0.18em;text-transform:uppercase;">saved by going local</span>
+          <span style="color:#67C28C;font-size:82px;font-weight:500;letter-spacing:-0.035em;line-height:1.05;">${savedStr}</span>
+          <span style="color:#B5AB95;font-size:17px;margin-top:8px;">vs running the same prompts on ${esc(providerLabel)}</span>
+        </div>
+        <div style="display:flex;border-top:1px solid #3D372E;padding-top:18px;margin-bottom:20px;">
+          <div style="flex:1;"><div style="color:#EAE1D0;font-size:19px;font-weight:500;">${tokens}</div><div style="color:#8A8170;font-size:12px;">tokens run</div></div>
+          <div style="flex:1;"><div style="color:#EAE1D0;font-size:19px;font-weight:500;">${sessions}</div><div style="color:#8A8170;font-size:12px;">sessions</div></div>
+          <div style="flex:1;"><div style="color:#EAE1D0;font-size:19px;font-weight:500;">$0.00</div><div style="color:#8A8170;font-size:12px;">sent to a cloud</div></div>
+        </div>
+        <div style="display:flex;align-items:center;">
+          <span style="color:#6E6555;font-size:13px;">your model, your machine</span>
+        </div>
+      </div>`;
+    return wrap;
+  }
+
+  function _downloadCanvasPng(canvas, name) {
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("Savings card saved", "ok", 2000, "share");
+    }, "image/png");
+  }
+
+  async function shareSavingsCard() {
+    if (typeof window.html2canvas !== "function") {
+      toast("Image library hasn't loaded yet — try again in a second.", "warn", 2500);
+      return;
+    }
+    // Inline the logo as a data URI so html2canvas captures it reliably (no
+    // mid-render async image load). Falls back to the accent square on failure.
+    let logoDataUrl = "";
+    try {
+      const blob = await (await fetch("/logo-mark-light.png")).blob();
+      logoDataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsDataURL(blob);
+      });
+    } catch { logoDataUrl = ""; }
+    const wrap = _savingsCardEl(logoDataUrl);
+    document.body.appendChild(wrap);
+    const card = wrap.firstElementChild;
+    try {
+      const canvas = await window.html2canvas(card, {
+        backgroundColor: "#2B2722",
+        scale: 2,
+        useCORS: true,
+        logging: false,
+      });
+      const fname = `accuretta-savings-${Date.now()}.png`;
+      // Prefer clipboard (one tap to paste into a post); fall back to download.
+      if (navigator.clipboard && window.ClipboardItem) {
+        await new Promise((resolve) => {
+          canvas.toBlob(async (blob) => {
+            try {
+              await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+              toast("Savings card copied — paste it anywhere", "ok", 2400, "share");
+            } catch {
+              _downloadCanvasPng(canvas, fname);
+            }
+            resolve();
+          }, "image/png");
+        });
+      } else {
+        _downloadCanvasPng(canvas, fname);
+      }
+    } catch (e) {
+      toast(`Card render failed: ${e.message || e}`, "err", 3500);
+    } finally {
+      wrap.remove();
+    }
+  }
+
   function initCostWidget() {
     // Restore persisted provider selection
     const saved = localStorage.getItem("accuretta:cost-provider");
@@ -5928,6 +6051,9 @@
         renderCostWidget();
       });
     }
+    // Wire up the shareable savings card
+    const shareBtn = $("#cost-share");
+    if (shareBtn) shareBtn.addEventListener("click", shareSavingsCard);
     renderCostWidget();
   }
 
@@ -6441,6 +6567,7 @@
       saveSettings({ theme: next });
     });
     $("#sw-desktop-enabled")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    $("#sw-red-team-enabled")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
     $("#btn-desktop-panic")?.addEventListener("click", async () => {
       try {
         await api("/api/desktop/panic", { method: "POST" });
@@ -6649,6 +6776,84 @@
       const tmpl = "Run a network snapshot on this machine (call network_snapshot). Then: list the active TCP connections grouped by process, flag anything that looks unusual (unknown processes, connections to suspicious IPs/domains, unexpected open ports), summarize the recent DNS queries, and tell me whether anything warrants a closer look.";
       $("#toolbar-overflow-menu")?.classList.remove("open");
       send({ prompt: tmpl, invisible: true });
+    });
+
+    // ----- authorized recon / pentest: gate -> target -> invisible prompt -----
+    let reconObjective = "recon";
+    const reconClose = () => {
+      $("#recon-scrim")?.classList.remove("open");
+      $("#recon-modal")?.classList.remove("open");
+    };
+    const reconOpen = (objective) => {
+      if (!state.settings || !state.settings.red_team_enabled) {
+        toast("Enable Red team tools in Settings first.", "warn", 3000);
+        return;
+      }
+      reconObjective = objective || "recon";
+      const access = reconObjective === "gain_access";
+      const h3 = $("#recon-modal h3"); if (h3) h3.textContent = access ? "Authorized pentest" : "Authorized recon";
+      const go = $("#recon-go"); if (go) go.textContent = access ? "Find a way in" : "Run recon";
+      const hint = $("#recon-step-target .recon-hint");
+      if (hint) hint.textContent = access
+        ? "The model chains recon, exposure checks, weakness identification and access attempts (default creds, exposed services), captures proof, then reports. Only run against systems you are authorized to test."
+        : "A bare domain or hostname. The model runs a stealth port scan, TLS audit, HTTP fingerprint, passive subdomain enumeration and DNS recon, then summarizes.";
+      $("#recon-step-auth")?.classList.remove("hidden");
+      $("#recon-step-target")?.classList.add("hidden");
+      const inp = $("#recon-target-input"); if (inp) inp.value = "";
+      $("#recon-scrim")?.classList.add("open");
+      $("#recon-modal")?.classList.add("open");
+    };
+    const reconRun = () => {
+      const raw = ($("#recon-target-input")?.value || "").trim();
+      if (!raw) { toast("Enter a target first.", "warn", 2200); return; }
+      const target = raw.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").replace(/\s+/g, "").trim();
+      if (!target) { toast("That doesn't look like a domain.", "warn", 2200); return; }
+      reconClose();
+      const reconTmpl =
+        `Authorized reconnaissance on ${target}. I have confirmed I am authorized to test this target. ` +
+        `Run, in order: recon_dns (domain "${target}"), recon_subdomains (domain "${target}"), ` +
+        `recon_tls_audit (host "${target}"), recon_http_fingerprint (url "${target}"), and ` +
+        `recon_port_scan (host "${target}"). ` +
+        `Then present a clean recon report with sections: DNS & infrastructure, Subdomains, ` +
+        `TLS / certificate posture, HTTP fingerprint, and Open ports. Use markdown tables where they help. ` +
+        `End with a short "Findings worth a look" heading. Be concise and factual.`;
+      const accessTmpl =
+        `Authorized penetration test on ${target}. I have confirmed I am authorized to test this target and I accept responsibility. ` +
+        `Objective: find a way in and prove it. Work methodically across phases, using each tool's result to decide the next step:\n` +
+        `1) RECON — recon_dns, recon_subdomains, recon_http_fingerprint, recon_tls_audit, recon_port_scan on ${target}.\n` +
+        `2) ATTACK SURFACE — recon_content_discovery and recon_check_exposure on the web root(s); recon_subdomain_takeover on discovered subdomains; recon_open_services on the host.\n` +
+        `3) WEAKNESSES — if you find component versions (Server header, package.json, JS libs) use recon_cve_match; if you find URLs with parameters use recon_injection_probe.\n` +
+        `4) ACCESS — if you find a login/admin panel try recon_auth_spray with default creds; an exposed .git/.env or an open unauthenticated service IS access.\n` +
+        `5) PROOF — for every confirmed access or critical exposure, call recon_capture_evidence to store the artifact.\n` +
+        `Stop when you have gained access or exhausted these avenues. Then write a report: Executive summary (did you get in and how), What's broken (each finding with severity + evidence), Access achieved (what you reached + the captured evidence path and sha256), Recommendations. ` +
+        `Never claim access you did not verify with a tool result or a captured artifact. Be factual.`;
+      send({ prompt: reconObjective === "gain_access" ? accessTmpl : reconTmpl, invisible: true });
+    };
+    $("#quick-recon-target")?.addEventListener("click", () => {
+      $("#toolbar-overflow-menu")?.classList.remove("open");
+      $("#btn-toolbar-overflow")?.classList.remove("open");
+      reconOpen("recon");
+    });
+    $("#quick-gain-access")?.addEventListener("click", () => {
+      $("#toolbar-overflow-menu")?.classList.remove("open");
+      $("#btn-toolbar-overflow")?.classList.remove("open");
+      reconOpen("gain_access");
+    });
+    $("#recon-auth-no")?.addEventListener("click", reconClose);
+    $("#btn-close-recon")?.addEventListener("click", reconClose);
+    $("#recon-scrim")?.addEventListener("click", reconClose);
+    $("#recon-auth-yes")?.addEventListener("click", () => {
+      $("#recon-step-auth")?.classList.add("hidden");
+      $("#recon-step-target")?.classList.remove("hidden");
+      setTimeout(() => $("#recon-target-input")?.focus(), 50);
+    });
+    $("#recon-back")?.addEventListener("click", () => {
+      $("#recon-step-target")?.classList.add("hidden");
+      $("#recon-step-auth")?.classList.remove("hidden");
+    });
+    $("#recon-go")?.addEventListener("click", reconRun);
+    $("#recon-target-input")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); reconRun(); }
     });
 
     // preview: screenshot the iframe to PNG
