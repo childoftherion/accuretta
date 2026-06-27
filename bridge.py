@@ -436,6 +436,11 @@ DEFAULT_SETTINGS = {
     # red-team recon suite (off by default — opt-in; keeps ~13 recon tools out
     # of the prompt for normal coding turns)
     "red_team_enabled": False,
+    # discord remote bridge (off by default — DM accuretta from your phone with
+    # push notifications + reaction approvals; outbound only, locked to owner id)
+    "discord_enabled": False,
+    "discord_bot_token": "",
+    "discord_owner_id": "",
     "desktop_app_allowlist": [],            # e.g. ["notepad", "chrome", "code"]; matched case-insensitive against exe/launch target
     "desktop_max_actions_per_minute": 30,   # hard rate limit for agent-driven actions
     "desktop_auto_approve_read": True,      # screenshot/describe/list_windows never require approval
@@ -697,8 +702,13 @@ def truncate_messages(msgs: list[dict], max_tokens: int, reserve: int = 256) -> 
 # (which loses "we hit bug X, fixed it by Y" and makes the model repeat fixed
 # mistakes), we compress the oldest turns into a dense summary folded into the
 # system message. Recent turns stay raw; only the old middle becomes gist.
-_SUMMARY_KEEP_RAW = 16        # most-recent messages always replayed verbatim
-_SUMMARY_TRIGGER = 28         # fold once un-summarized count exceeds this
+# Token-aware trigger: only fold when the unsummarized tail actually approaches
+# the context window, so short sessions keep full detail and we never spend a
+# summary call prematurely. Fractions are of the LIVE context limit, so a bigger
+# window naturally summarizes later.
+_SUMMARY_MIN_KEEP = 6          # always keep at least this many recent messages raw
+_SUMMARY_TRIGGER_FRAC = 0.55  # summarize once the unsummarized tail exceeds this much of ctx
+_SUMMARY_KEEP_FRAC = 0.35     # after folding, keep ~this much of ctx as recent raw turns
 _SUMMARY_INSTR = (
     "You are compressing an earlier slice of a coding-assistant conversation into a dense, "
     "factual summary for the assistant's OWN future reference. Merge the PRIOR SUMMARY (if any) "
@@ -757,20 +767,37 @@ def _update_rolling_summary(old_summary: str, slice_msgs: list[dict]) -> str:
         return old_summary
 
 
-def _maybe_roll_summary(chat: dict) -> bool:
-    """Fold the oldest un-kept turns of `chat` into chat['rolling_summary'].
-    Mutates chat in place. Returns True if the summary advanced (caller persists)."""
+def _maybe_roll_summary(chat: dict, ctx_limit: int) -> bool:
+    """Token-aware: fold the oldest un-kept turns into chat['rolling_summary']
+    ONLY when the conversation actually approaches the context window. Short
+    sessions keep full detail; we never spend a summary call prematurely.
+    Mutates chat in place; returns True if the summary advanced."""
     msgs = chat.get("messages", [])
     through = int(chat.get("summary_through", 0) or 0)
-    if (len(msgs) - through) <= _SUMMARY_TRIGGER:
+    tail = msgs[through:]
+    if len(tail) <= _SUMMARY_MIN_KEEP:
         return False
-    end = len(msgs) - _SUMMARY_KEEP_RAW   # fold everything older than the raw-keep window
-    if end <= through:
+    tail_tokens = sum(_count_msg_tokens(m) for m in tail)
+    if tail_tokens <= ctx_limit * _SUMMARY_TRIGGER_FRAC:
+        return False  # plenty of headroom — don't summarize yet
+    # Fold oldest turns until the remaining RAW tail is ~KEEP_FRAC of ctx. Walk
+    # newest-first, keeping recent turns until the keep budget fills; the rest
+    # (older) get folded into the summary.
+    keep_budget = ctx_limit * _SUMMARY_KEEP_FRAC
+    kept, cut = 0, through
+    for i in range(len(msgs) - 1, through - 1, -1):
+        kept += _count_msg_tokens(msgs[i])
+        if kept >= keep_budget:
+            cut = i
+            break
+    # never fold so far that fewer than MIN_KEEP recent messages remain raw
+    cut = min(cut, len(msgs) - _SUMMARY_MIN_KEEP)
+    if cut <= through:
         return False
-    new_summary = _update_rolling_summary(chat.get("rolling_summary", ""), msgs[through:end])
+    new_summary = _update_rolling_summary(chat.get("rolling_summary", ""), msgs[through:cut])
     if new_summary and new_summary != chat.get("rolling_summary", ""):
         chat["rolling_summary"] = new_summary
-        chat["summary_through"] = end
+        chat["summary_through"] = cut
         return True
     return False
 
@@ -4935,13 +4962,6 @@ _APK_DANGEROUS_PERMS = {
     "android.permission.DISABLE_KEYGUARD",
     "android.permission.SYSTEM_OVERLAY_WINDOW",
 }
-
-
-def _apk_string_runs(data: bytes, min_len: int = 6) -> list[bytes]:
-    """Pull printable ASCII runs of length >= min_len from a binary blob.
-    Used to feed the secret regex pass. Caps total output to keep memory sane
-    on huge .so files (some games ship 200 MB native libs)."""
-    return re.findall(rb"[\x20-\x7e]{%d,}" % min_len, data)
 
 
 def _apk_hunt_secrets(label: str, data: bytes, max_per_pattern: int = 25) -> list[dict]:
@@ -9853,15 +9873,6 @@ def tools_for_llama() -> list[dict]:
 
 
 
-def tools_for_prompt() -> str:
-    lines = ["Available tools (call via <tool_call>{\"name\":\"...\",\"arguments\":{...}}</tool_call>):"]
-    for name, t in _active_tools().items():
-        params = t["parameters"].get("properties", {})
-        sig = ", ".join(f"{k}:{v.get('type','any')}" for k, v in params.items())
-        lines.append(f"- {name}({sig}) — {t['description']}")
-    return "\n".join(lines)
-
-
 # Common synonyms the model invents instead of the canonical tool names. Map
 # them so a single typo doesn't burn an entire tool round on "unknown tool".
 TOOL_ALIASES = {
@@ -10651,17 +10662,6 @@ def _tools_spec_overhead_tokens(tools_json: str) -> int:
         overhead = int(len(tools_json) / 2.0) + 1024
     _TOOLS_OVERHEAD_CACHE = (tools_json, overhead)
     return overhead
-
-
-def _parse_size_to_b(s: str) -> float:
-    """parse '7.6B' / '13b' / '70B' -> billions of params. Returns 0.0 on fail."""
-    if not s:
-        return 0.0
-    m = re.search(r"([\d.]+)\s*([bBmM])", s)
-    if not m:
-        return 0.0
-    val = float(m.group(1))
-    return val if m.group(2).lower() == "b" else val / 1000.0
 
 
 def recommended_settings(model: str) -> dict:
@@ -12894,12 +12894,14 @@ class Handler(BaseHTTPRequestHandler):
         # Rolling summary: fold the oldest un-kept turns into a compact summary
         # instead of letting truncate_messages delete them outright. Keeps the
         # "we hit bug X, fixed it by Y" lessons alive so the model stops
-        # repeating mistakes it already fixed on long tasks. One extra (quick)
-        # model call fires only when old turns age out — every ~12 turns, not
-        # every turn. Fully graceful: any failure just keeps the prior summary.
+        # repeating mistakes it already fixed on long tasks. Token-aware: one
+        # extra (quick) model call fires only once the conversation actually
+        # fills ~55% of the live context window, NOT on a fixed message count —
+        # so short sessions keep full detail. Graceful: failure keeps the prior summary.
         if get_settings().get("summarize_history", True):
             try:
-                if _maybe_roll_summary(chat):
+                _ctx_for_summary = _llama_props_ctx() or int(get_settings().get("num_ctx") or 32768)
+                if _maybe_roll_summary(chat, _ctx_for_summary):
                     save_json(CHATS_FILE, chats)
             except Exception:
                 traceback.print_exc()
@@ -14537,6 +14539,254 @@ def _start_vision_fallback_if_needed(s: dict) -> None:
 
 # ---- main ------------------------------------------------------------------
 
+# ============================================================
+# DISCORD REMOTE BRIDGE (optional)
+# DM accuretta from your phone, with native push notifications, and approve
+# risky actions by reacting. Connects OUTBOUND to Discord (no port forwarding,
+# no inbound exposure — your PC stays closed). Locked to ONE owner Discord user
+# id; everyone else is ignored. Requires: pip install discord.py
+# ============================================================
+DISCORD_CHAT_ID = "discord"
+_discord_state: dict = {"client": None, "loop": None, "running": False}
+_discord_approvals: dict = {}          # discord message id -> approval id
+_discord_approvals_lock = threading.Lock()
+
+
+def _discord_split(text: str, limit: int = 1900) -> list[str]:
+    """Split a reply into Discord's 2000-char message limit (with headroom)."""
+    text = (text or "").strip()
+    if not text:
+        return ["(empty reply)"]
+    out = []
+    while text:
+        out.append(text[:limit])
+        text = text[limit:]
+    return out
+
+
+def _discord_strip_think(text: str) -> str:
+    return re.sub(r"<think>[\s\S]*?</think>", "", text or "", flags=re.IGNORECASE).strip()
+
+
+_DISCORD_FRIEND_PROMPT = (
+    "you are accuretta, a local AI running on the owner's machine, chatting casually in a discord "
+    "server with the owner's friends. keep replies short and friendly. you have NO tools: you cannot "
+    "read, write, or delete files, run commands, scan anything, or touch the machine in any way. if "
+    "someone asks you to do work like that, tell them only the owner can ask you to do real work."
+)
+
+
+def _run_discord_turn(user_text: str, chat_id: str, use_tools: bool) -> str:
+    """Run one Discord turn. The owner (use_tools=True) gets the full agent with
+    tools; everyone else gets a locked chat-only turn that cannot touch the
+    machine. Tool approvals fire on the event bus and mirror to Discord. Returns
+    the visible reply. Never raises."""
+    try:
+        if not llama_ping(timeout=2.0):
+            return "im offline right now"
+        chats = get_chats()
+        chat = chats["chats"].setdefault(chat_id, {
+            "id": chat_id, "title": chat_id, "messages": [],
+            "created": int(time.time()),
+        })
+        chat.setdefault("messages", [])
+        chat["messages"].append({"role": "user", "content": user_text})
+        if len(chat["messages"]) > CHAT_HISTORY_MAX:
+            chat["messages"] = chat["messages"][-CHAT_HISTORY_MAX:]
+        chat["updated"] = int(time.time())
+        save_json(CHATS_FILE, chats)
+
+        replay_from = 0
+        if use_tools:
+            # Owner path: same long-session memory as the web UI — token-aware
+            # rolling summary + pinned facts/fixes, replaying only the un-folded
+            # tail. Keeps the bot just as sharp over discord on long tasks.
+            ctx_limit = _llama_props_ctx() or int(get_settings().get("num_ctx") or 32768)
+            if get_settings().get("summarize_history", True):
+                try:
+                    if _maybe_roll_summary(chat, ctx_limit):
+                        save_json(CHATS_FILE, chats)
+                except Exception:
+                    traceback.print_exc()
+            system_prompt = build_system_prompt(include_tools=True, chat_mode="agent")
+            _pins = chat.get("pins") or []
+            if _pins:
+                system_prompt += ("\n\n=== PINNED FOR THIS SESSION (established facts/fixes — do NOT undo or repeat) ===\n"
+                                  + "\n".join(f"- {p}" for p in _pins))
+            _roll = chat.get("rolling_summary", "")
+            if _roll:
+                system_prompt += ("\n\n=== EARLIER IN THIS SESSION (older turns condensed to save context; "
+                                  "treat as established facts — do not redo work or re-ask) ===\n" + _roll)
+            system_prompt += ("\n\nWhen you fix a bug, settle a design decision, or the user states a constraint, "
+                              "call pin_note to lock it in for this session so you never undo it or repeat the mistake.")
+            replay_from = int(chat.get("summary_through", 0) or 0)
+        else:
+            system_prompt = _DISCORD_FRIEND_PROMPT
+        msgs = [{"role": "system", "content": system_prompt}]
+        for m in chat["messages"][replay_from:]:
+            role = m.get("role")
+            if role not in ("user", "assistant", "tool"):
+                continue
+            out = {"role": role, "content": m.get("content", "") or ""}
+            if role == "assistant" and m.get("tool_calls"):
+                out["tool_calls"] = m["tool_calls"]
+            if role == "tool":
+                if m.get("tool_call_id"):
+                    out["tool_call_id"] = m["tool_call_id"]
+                if m.get("name"):
+                    out["name"] = m["name"]
+            msgs.append(out)
+
+        final = run_chat_turn(chat_id, msgs, use_tools=use_tools, emit=lambda e: None)
+        if not final:
+            return "(no reply — stopped or empty)"
+
+        # persist intermediate tool rounds + the final assistant message so the
+        # next message has continuity.
+        chats = get_chats()
+        chat = chats["chats"].get(chat_id)
+        if chat is not None:
+            for im in (final.get("_appended_intermediate") or []):
+                chat["messages"].append(im)
+            amsg = {"role": "assistant", "content": final.get("content", "")}
+            if final.get("tool_calls"):
+                amsg["tool_calls"] = final["tool_calls"]
+            chat["messages"].append(amsg)
+            chat["updated"] = int(time.time())
+            save_json(CHATS_FILE, chats)
+        return _discord_strip_think(final.get("content", "")) or "(done)"
+    except Exception as e:
+        traceback.print_exc()
+        return f"error: {e}"
+
+
+def _discord_approval_listener(client) -> None:
+    """Subscribe to the event bus and mirror every approval:new to the owner's
+    DM as a ✅/❌ reaction prompt. A reaction resolves the same approval the
+    browser would — first responder wins."""
+    import asyncio
+    owner_id = str(get_settings().get("discord_owner_id") or "").strip()
+    q, _snap = subscribe()
+
+    async def post_approval(entry):
+        try:
+            owner = await client.fetch_user(int(owner_id))
+            ch = owner.dm_channel or await owner.create_dm()
+            title = entry.get("title", "approval")
+            cmd = str(entry.get("command", ""))[:1500]
+            msg = await ch.send(f"approve: **{title}**\n```\n{cmd}\n```\nreact ✅ approve · ❌ deny")
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
+            with _discord_approvals_lock:
+                _discord_approvals[msg.id] = entry.get("id")
+        except Exception as e:
+            print(f"[discord] approval post failed: {e}", flush=True)
+
+    while _discord_state.get("running"):
+        try:
+            evt = q.get(timeout=1.0)
+        except Exception:
+            continue
+        if isinstance(evt, dict) and evt.get("type") == "approval:new":
+            loop = _discord_state.get("loop")
+            entry = evt.get("approval") or {}
+            if loop and entry:
+                asyncio.run_coroutine_threadsafe(post_approval(entry), loop)
+    unsubscribe(q)
+
+
+def _discord_start() -> None:
+    """Run the Discord bot (blocking — call in a daemon thread). Outbound only."""
+    s = get_settings()
+    token = (s.get("discord_bot_token") or "").strip()
+    owner_id = str(s.get("discord_owner_id") or "").strip()
+    if not token or not owner_id:
+        print("[discord] enabled but bot token / owner id missing — not starting.", flush=True)
+        return
+    try:
+        import discord
+    except Exception:
+        print("[discord] discord.py not installed. run: pip install discord.py", flush=True)
+        return
+
+    intents = discord.Intents.default()
+    intents.message_content = True  # requires Message Content Intent in the dev portal
+    client = discord.Client(intents=intents)
+    _discord_state["client"] = client
+    _discord_state["running"] = True
+
+    @client.event
+    async def on_ready():
+        _discord_state["loop"] = client.loop
+        print(f"[discord] connected as {client.user}. obeying owner id {owner_id}.", flush=True)
+        threading.Thread(target=_discord_approval_listener, args=(client,), daemon=True).start()
+
+    @client.event
+    async def on_message(message):
+        try:
+            if client.user and message.author.id == client.user.id:
+                return
+            is_owner = str(message.author.id) == owner_id
+            is_dm = message.guild is None
+            mentioned = bool(client.user) and client.user in getattr(message, "mentions", [])
+            # DMs are always handled; in a server channel only respond when the
+            # bot is actually @mentioned (so it ignores normal chatter).
+            if not is_dm and not mentioned:
+                return
+            print(f"[discord] incoming author={message.author.id} owner={owner_id!r} "
+                  f"is_owner={is_owner} is_dm={is_dm} mentioned={mentioned} "
+                  f"content={(message.content or '')[:40]!r}", flush=True)
+            text = (message.content or "").strip()
+            if client.user:
+                text = text.replace(f"<@{client.user.id}>", "").replace(f"<@!{client.user.id}>", "").strip()
+            if not text:
+                return
+            # owner => full agent with tools; everyone else => locked chat-only,
+            # in their own per-user chat so friends never touch the owner's
+            # context (or the machine).
+            use_tools = is_owner
+            chat_id = DISCORD_CHAT_ID if is_owner else f"discord-{message.author.id}"
+            async with message.channel.typing():
+                reply = await client.loop.run_in_executor(
+                    None, _run_discord_turn, text, chat_id, use_tools)
+            for chunk in _discord_split(reply):
+                await message.channel.send(chunk)
+        except Exception as e:
+            print(f"[discord] on_message error: {e}", flush=True)
+
+    @client.event
+    async def on_raw_reaction_add(payload):
+        # raw event fires for EVERY reaction regardless of message cache —
+        # on_reaction_add silently missed approval taps (uncached DM messages).
+        try:
+            if str(payload.user_id) != owner_id:
+                return  # only the owner resolves approvals
+            with _discord_approvals_lock:
+                aid = _discord_approvals.get(payload.message_id)
+            emoji = str(payload.emoji)
+            print(f"[discord] reaction user={payload.user_id} msg={payload.message_id} "
+                  f"emoji={emoji!r} matched_approval={aid}", flush=True)
+            if not aid:
+                return
+            if "✅" in emoji:
+                decide_approval(aid, "approve")
+            elif "❌" in emoji:
+                decide_approval(aid, "deny")
+            else:
+                return
+            with _discord_approvals_lock:
+                _discord_approvals.pop(payload.message_id, None)
+        except Exception as e:
+            print(f"[discord] reaction error: {e}", flush=True)
+
+    try:
+        client.run(token, log_handler=None)
+    except Exception as e:
+        print(f"[discord] bot stopped: {e}", flush=True)
+    finally:
+        _discord_state["running"] = False
+
+
 def main():
     print(f"accuretta bridge")
     print(f"  root:    {ROOT}")
@@ -14689,6 +14939,12 @@ def main():
             except Exception:
                 pass
     threading.Thread(target=_workspace_watcher, daemon=True).start()
+
+    # Discord remote bridge — outbound only, owner-locked. Daemon thread so it
+    # never blocks shutdown; fully optional and self-disabling if misconfigured.
+    if get_settings().get("discord_enabled"):
+        threading.Thread(target=_discord_start, daemon=True).start()
+        print("  discord: bridge starting (DM the bot from your phone)")
 
     try:
         httpd.serve_forever()

@@ -5532,6 +5532,9 @@
     // desktop automation
     $("#sw-desktop-enabled")?.classList.toggle("on", !!s.desktop_enabled);
     $("#sw-red-team-enabled")?.classList.toggle("on", !!s.red_team_enabled);
+    $("#sw-discord-enabled")?.classList.toggle("on", !!s.discord_enabled);
+    fill("#set-discord-token", s.discord_bot_token || "");
+    fill("#set-discord-owner", s.discord_owner_id || "");
     const al = $("#set-desktop-allowlist");
     if (al) al.value = (s.desktop_app_allowlist || []).join("\n");
     fill("#set-desktop-rate", s.desktop_max_actions_per_minute || 30);
@@ -5612,6 +5615,9 @@
       allow_web_preview: $("#sw-web").classList.contains("on"),
       desktop_enabled: $("#sw-desktop-enabled")?.classList.contains("on") || false,
       red_team_enabled: $("#sw-red-team-enabled")?.classList.contains("on") || false,
+      discord_enabled: $("#sw-discord-enabled")?.classList.contains("on") || false,
+      discord_bot_token: ($("#set-discord-token")?.value || "").trim(),
+      discord_owner_id: ($("#set-discord-owner")?.value || "").trim(),
       desktop_app_allowlist: ($("#set-desktop-allowlist")?.value || "")
         .split("\n").map(x => x.trim()).filter(Boolean),
       desktop_max_actions_per_minute: Math.max(1, Math.min(300, n("#set-desktop-rate") || 30)),
@@ -6566,8 +6572,35 @@
       applyTheme(next);
       saveSettings({ theme: next });
     });
-    $("#sw-desktop-enabled")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
-    $("#sw-red-team-enabled")?.addEventListener("click", e => e.currentTarget.classList.toggle("on"));
+    // Auto-save on toggle (the "Save settings" button isn't the only path, and
+    // "save & quit" doesn't flush the form — so persist eagerly or an enabled
+    // toggle silently vanishes on restart). Feature gates only; load-time
+    // toggles stay on the explicit Save since they trigger a model reload.
+    $("#sw-desktop-enabled")?.addEventListener("click", (e) => {
+      e.currentTarget.classList.toggle("on");
+      saveSettings({ desktop_enabled: e.currentTarget.classList.contains("on") });
+      toast("desktop setting saved", "ok", 1500);
+    });
+    $("#sw-red-team-enabled")?.addEventListener("click", (e) => {
+      e.currentTarget.classList.toggle("on");
+      saveSettings({ red_team_enabled: e.currentTarget.classList.contains("on") });
+      toast("red team setting saved", "ok", 1500);
+    });
+    // Discord controls auto-save on change (the drawer's Save button isn't the
+    // only path, and "save & quit" doesn't flush settings — so persist eagerly
+    // or an enabled toggle silently vanishes on restart).
+    const _saveDiscord = () => saveSettings({
+      discord_enabled: $("#sw-discord-enabled")?.classList.contains("on") || false,
+      discord_bot_token: ($("#set-discord-token")?.value || "").trim(),
+      discord_owner_id: ($("#set-discord-owner")?.value || "").trim(),
+    });
+    $("#sw-discord-enabled")?.addEventListener("click", (e) => {
+      e.currentTarget.classList.toggle("on");
+      _saveDiscord();
+      toast("discord settings saved — restart to apply", "ok", 1800);
+    });
+    $("#set-discord-token")?.addEventListener("change", _saveDiscord);
+    $("#set-discord-owner")?.addEventListener("change", _saveDiscord);
     $("#btn-desktop-panic")?.addEventListener("click", async () => {
       try {
         await api("/api/desktop/panic", { method: "POST" });

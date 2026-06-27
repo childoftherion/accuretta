@@ -257,6 +257,22 @@ No cloud relay, no port forwarding, no exposing your machine to the open interne
 
 A nice side effect: your conversations and your model never round-trip through someone else's data center. The privacy story holds even when you are not at home.
 
+## Remote control over Discord
+
+Tailscale gives you the full web UI from anywhere. Discord gives you something different: a chat thread you can fire off from your phone's lock screen, with real push notifications, while Accuretta does the work on your PC. Handy when the mobile browser has suspended the web app, or when you just want to kick off a task and get pinged when it finishes.
+
+Accuretta runs as a Discord bot that connects outbound to Discord. No port forwarding, no inbound hole in your firewall, your machine stays closed. It obeys exactly one Discord user id (yours), and every write, command, or file change still needs approval. You approve straight from the chat by reacting, so the safety gate works from your pocket.
+
+Setup, once:
+
+1. `pip install discord.py`
+2. Create an application at https://discord.com/developers/applications, open the Bot tab, copy the token, and turn on the Message Content Intent.
+3. Invite the bot to any server you are in (OAuth2, URL Generator, `bot` scope) so Discord lets you open a DM with it.
+4. In Discord, enable Developer Mode, then right click your own name and Copy User ID.
+5. In Accuretta Settings, under Discord remote bridge, paste the token and your user id, toggle it on, and restart the bridge.
+
+Now DM the bot and ask it to do anything you would ask in the web UI. When a tool needs approval it posts the command with a check and a cross, and your tap runs or denies it. Friends you let into the server can chat with it too, but only you can make it touch the machine, and if no model is loaded it simply says it is offline.
+
 ## Repository layout
 
 ```

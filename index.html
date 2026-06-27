@@ -70,7 +70,7 @@
         <img class="brand-mark brand-mark-light" src="/logo-mark-light.png" alt="" aria-hidden="true">
         <img class="brand-mark brand-mark-dark" src="/logo-mark-dark.png" alt="" aria-hidden="true">
         <span class="brand-title">Accuretta</span>
-        <span class="v" id="brand-v">v0.5.8</span>
+        <span class="v" id="brand-v">v0.5.9</span>
         <span class="grow"></span>
         <button class="iconbtn" id="btn-toggle-sidebar" title="Collapse sidebar"><i class="ph ph-sidebar-simple"></i></button>
       </div>
@@ -755,6 +755,25 @@
     </div>
 
     <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+      <span>Discord remote bridge</span>
+    </div>
+    <div class="form-row">
+      <span class="hint">DM accuretta from your phone with push notifications (gets around iOS suspending the app), and approve risky actions by reacting. outbound only, no port forwarding, your PC stays closed. it obeys ONLY your discord user id. requires <code>pip install discord.py</code> and a restart.<br><br><b>setup:</b> discord.com/developers &rarr; New Application &rarr; Bot &rarr; copy the token below &rarr; turn on "Message Content Intent" &rarr; DM the bot. for your owner id: enable Developer Mode in discord, right click your name, Copy User ID.</span>
+    </div>
+    <div class="form-row inline">
+      <label>Enable discord bridge</label>
+      <div class="sw" id="sw-discord-enabled"></div>
+    </div>
+    <div class="form-row">
+      <label>Bot token</label>
+      <input type="password" id="set-discord-token" placeholder="bot token from the developer portal" autocomplete="off" spellcheck="false" style="font-family:ui-monospace,Consolas,monospace;font-size:12px;">
+    </div>
+    <div class="form-row inline">
+      <label>Your discord user id (owner)</label>
+      <input type="text" id="set-discord-owner" placeholder="e.g. 123456789012345678" autocomplete="off" spellcheck="false" style="max-width:240px;font-family:ui-monospace,Consolas,monospace;font-size:12px;">
+    </div>
+
+    <div class="form-group" style="display:flex;align-items:center;gap:8px;">
       <span>Desktop automation</span>
       <span class="grow" style="flex:1;"></span>
       <span id="desktop-deps-badge" class="hint" style="font-size:10px;"></span>
@@ -866,7 +885,7 @@
   </div>
 </div>
 
-<script src="/app.js?v=202606231230"></script>
+<script src="/app.js?v=202606231600"></script>
 <script>
   // Splash fade-out timer. Lives inline (not in app.js) so it fires
   // independently of when app.js finishes loading — the splash hides on

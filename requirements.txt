@@ -59,3 +59,9 @@ flake8>=7.3.0             # Fast local python linter for the auto-healing loop
 # ------------------------------------------------------------------------------
 evtx>=0.8.0                # Fast Rust-based Windows EVTX event log parser
 dpkt>=1.9.8                # Lightweight PCAP/PCAPNG packet capture parser
+cryptography>=41.0.0       # Certificate parsing for the authorized recon TLS audit (self-signed / unverified chains)
+
+# ------------------------------------------------------------------------------
+# Remote bridge (Optional)
+# ------------------------------------------------------------------------------
+discord.py>=2.3.0          # Discord remote bridge: DM accuretta from your phone + reaction approvals
