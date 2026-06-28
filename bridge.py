@@ -292,6 +292,16 @@ _chat_emitters: dict[str, callable] = {}
 
 # last known prompt token count from llama-server — updated after each turn
 _last_prompt_tokens: int = 0
+# Same value, but keyed by chat so the context gauge and the rolling-summary
+# trigger reflect the ACTIVE chat, not whichever chat last ran a turn. This is
+# the real tokenizer count llama-server reports (prompt_eval_count) — the
+# ground truth for "how full is the context".
+_last_prompt_tokens_by_chat: dict[str, int] = {}
+# Cache for the tokenize-based cold-start estimate (used only before a chat has
+# completed its first turn, so there is no real prompt_eval_count yet). Keyed by
+# chat_id → (fingerprint, tokens) so the 2s gauge poll doesn't re-tokenize
+# unchanged history every tick.
+_CTX_EST_CACHE: dict[str, tuple] = {}
 
 # per-chat cancellation. `cancel` flips when user hits Stop (via /api/cancel or
 # client disconnect). `resp` is the live urllib response to llama-server, which
@@ -777,9 +787,19 @@ def _maybe_roll_summary(chat: dict, ctx_limit: int) -> bool:
     tail = msgs[through:]
     if len(tail) <= _SUMMARY_MIN_KEEP:
         return False
-    tail_tokens = sum(_count_msg_tokens(m) for m in tail)
-    if tail_tokens <= ctx_limit * _SUMMARY_TRIGGER_FRAC:
-        return False  # plenty of headroom — don't summarize yet
+    # Trustworthy fill signal: llama-server's real prompt_eval_count from this
+    # chat's last turn (the whole prompt — system + tools + history). That is
+    # the true "how close to the limit" measure, so the fold can't misfire on a
+    # bad char estimate. Only fall back to the char count before a chat has run
+    # a turn (no real number exists yet).
+    real_fill = _last_prompt_tokens_by_chat.get(chat.get("id") or "", 0)
+    if real_fill > 0:
+        if real_fill <= ctx_limit * _SUMMARY_TRIGGER_FRAC:
+            return False  # plenty of headroom — don't summarize yet
+    else:
+        tail_tokens = sum(_count_msg_tokens(m) for m in tail)
+        if tail_tokens <= ctx_limit * _SUMMARY_TRIGGER_FRAC:
+            return False  # plenty of headroom — don't summarize yet
     # Fold oldest turns until the remaining RAW tail is ~KEEP_FRAC of ctx. Walk
     # newest-first, keeping recent turns until the keep budget fills; the rest
     # (older) get folded into the summary.
@@ -8195,14 +8215,104 @@ def tool_read_skeleton(args: dict) -> dict:
         return {"error": f"Unsupported file extension: {ext}"}
 
 
+# HTML void elements never take a closing tag — they must not be tracked on
+# the nesting stack or we'd report every <br>/<img> as "unclosed".
+_HTML_VOID_TAGS = frozenset((
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+))
+# Elements whose closing tag is OPTIONAL per the HTML spec — browsers auto-close
+# them, so a missing </p> or </li> is valid, not a bug. We never flag these as
+# unclosed, otherwise the model "fixes" markup that was already correct.
+_HTML_OPTIONAL_CLOSE = frozenset((
+    "html", "head", "body", "p", "li", "dt", "dd", "option", "optgroup",
+    "thead", "tbody", "tfoot", "tr", "td", "th", "colgroup", "caption",
+    "rp", "rt", "menuitem",
+))
+
+
+def _check_html_syntax(file_path: str) -> dict:
+    """Structural sanity check for HTML using only the stdlib HTMLParser.
+    HTML is lenient by design, so we deliberately report ONLY high-confidence
+    breakage — unclosed <script>/<style>, explicit close tags with no matching
+    open, and tags left open at EOF — while ignoring void and optional-close
+    elements. This avoids false positives that would push the model into
+    "fixing" valid markup."""
+    from html.parser import HTMLParser
+
+    problems: list[str] = []
+    stack: list[tuple[str, int]] = []  # (tagname, lineno)
+
+    class _Checker(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag in _HTML_VOID_TAGS:
+                return
+            stack.append((tag, self.getpos()[0]))
+
+        def handle_startendtag(self, tag, attrs):
+            pass  # self-closing (<br/>) — nothing to track
+
+        def handle_endtag(self, tag):
+            if tag in _HTML_VOID_TAGS:
+                return
+            # Find the nearest matching open tag. Tags left dangling between it
+            # and the close are implicitly closed by the browser; that's fine
+            # for optional-close elements (an open <li> when </ul> arrives) but
+            # a dangling non-optional element (e.g. an open <div> when </body>
+            # arrives) is a real missing-close-tag bug, so we flag those.
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == tag:
+                    for dtag, dline in stack[i + 1:]:
+                        if dtag not in _HTML_OPTIONAL_CLOSE:
+                            problems.append(f"line {dline}: unclosed <{dtag}> — missing </{dtag}> (implicitly closed by </{tag}>)")
+                    del stack[i:]
+                    return
+            # No matching open tag anywhere — a real stray close tag, unless
+            # it's an optional-close element the parser can safely ignore.
+            if tag not in _HTML_OPTIONAL_CLOSE:
+                problems.append(f"line {self.getpos()[0]}: stray </{tag}> with no matching open tag")
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            src = f.read()
+    except Exception as e:
+        return {"error": f"read failed: {e}"}
+
+    parser = _Checker(convert_charrefs=True)
+    try:
+        parser.feed(src)
+        parser.close()
+    except Exception as e:
+        # HTMLParser rarely raises, but malformed declarations can — surface it.
+        return {"error": f"HTML parse error: {e}"}
+
+    # Anything left open that REQUIRES closing is a genuine structural error.
+    # <script>/<style> are called out by name because an unclosed one swallows
+    # the rest of the document and is the most common real HTML break.
+    for tag, lineno in stack:
+        if tag in _HTML_OPTIONAL_CLOSE:
+            continue
+        if tag in ("script", "style"):
+            problems.append(f"line {lineno}: unclosed <{tag}> — missing </{tag}> (this hides everything after it)")
+        else:
+            problems.append(f"line {lineno}: unclosed <{tag}> — missing </{tag}>")
+
+    if problems:
+        return {"error": "HTML structural errors:\n" + "\n".join(problems)}
+    return {"result": "Syntax OK (HTML is lenient — structural check only: tag nesting, "
+                      "unclosed script/style. Browser-tolerated quirks are not flagged.)"}
+
+
 def tool_check_syntax(args: dict) -> dict:
     file_path = normalize_path(args.get("path", ""))
     if not is_in_workspace(file_path):
         return {"error": "Path is outside workspace bounds."}
     if not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
-    
-    ext = os.path.splitext(file_path)[1]
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in ('.html', '.htm', '.xhtml'):
+        return _check_html_syntax(file_path)
     if ext == '.py':
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -8477,7 +8587,7 @@ TOOLS: dict[str, dict] = {
         "fn": tool_unpin_note,
     },
     "check_syntax": {
-        "description": "Check the syntax of a Python or JS/TS file without executing it. Returns line numbers of any errors.",
+        "description": "Check the syntax of a Python, JS/TS, or HTML file without executing it. Returns line numbers of any errors. HTML gets a lenient structural check (tag nesting, unclosed script/style) — browser-tolerated quirks are not flagged.",
         "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Path to the file."}},
@@ -10664,6 +10774,67 @@ def _tools_spec_overhead_tokens(tools_json: str) -> int:
     return overhead
 
 
+def _estimate_context_tokens(chat_id: str) -> int:
+    """Accurate context-fill estimate for a chat that hasn't completed a turn
+    yet (so llama-server has not reported a real prompt_eval_count). We tokenize
+    the ACTUAL assembled prompt text with the model's own tokenizer via
+    /tokenize — far better than a char count — and add the measured tools-spec
+    overhead and any image-token cost. Mirrors how _handle_chat assembles the
+    prompt (system + pins + rolling summary + replayed tail past summary_through)
+    so the number matches what would actually be sent. Cached per chat by a
+    cheap content fingerprint so the 2s gauge poll doesn't re-tokenize unchanged
+    history. Returns 0 if the chat is unknown."""
+    chats = get_chats()
+    chat = chats.get("chats", {}).get(chat_id)
+    if not chat:
+        return 0
+    msgs = chat.get("messages", [])
+    last_len = len(str(msgs[-1].get("content", ""))) if msgs else 0
+    fp = (len(msgs), last_len, len(chat.get("rolling_summary", "")), len(chat.get("pins") or []))
+    cached = _CTX_EST_CACHE.get(chat_id)
+    if cached and cached[0] == fp:
+        return cached[1]
+
+    try:
+        sysp = build_system_prompt(include_tools=True, chat_mode=chat.get("last_mode") or "auto")
+    except Exception:
+        sysp = ""
+    for p in (chat.get("pins") or []):
+        sysp += "\n" + str(p)
+    if chat.get("rolling_summary"):
+        sysp += "\n" + chat["rolling_summary"]
+
+    parts = [sysp]
+    img_count = 0
+    start = int(chat.get("summary_through", 0) or 0)
+    for m in msgs[start:]:
+        if m.get("role") not in ("user", "assistant", "tool"):
+            continue
+        content = m.get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(part.get("text") or "")
+                elif isinstance(part, dict) and part.get("type") == "image_url":
+                    img_count += 1
+        else:
+            parts.append(str(content or ""))
+        if m.get("tool_calls"):
+            parts.append(json.dumps(m["tool_calls"], ensure_ascii=False))
+        img_count += len(m.get("images") or [])
+
+    joined = "\n".join(parts)
+    exact = _llama_tokenize(joined)
+    total = exact if exact is not None else int(len(joined) / CHARS_PER_TOKEN)
+    try:
+        total += _tools_spec_overhead_tokens(json.dumps(tools_for_llama(), ensure_ascii=False))
+    except Exception:
+        pass
+    total += img_count * 600  # vision tokens, matching _count_msg_tokens
+    _CTX_EST_CACHE[chat_id] = (fp, total)
+    return total
+
+
 def recommended_settings(model: str) -> dict:
     """Return heuristic defaults for the UI. llama-server's context window,
     GPU layers, batch size and thread count are server-launch flags, not
@@ -11022,6 +11193,24 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                 "stream": True,
                 **llama_options(settings),
             }
+            # Agentic turns need a tighter, deterministic sampling profile than
+            # IDE/creative turns. The user's global sliders may be tuned for
+            # design work (high temp, presence_penalty for variety) — but those
+            # same values make a capable model second-guess correct tool work
+            # and loop ("wait, that wasn't right"), because presence/frequency
+            # penalties push it AWAY from reaffirming what it just did and a
+            # loose temp/top_p lets the "reconsider" tokens win. When tools are
+            # in play we clamp temperature down and zero the presence/frequency
+            # penalties — matching how dedicated coding agents sample — while
+            # leaving the user's settings untouched for IDE turns.
+            if use_tools:
+                try:
+                    _t = float(payload.get("temperature", 0.4) or 0.0)
+                except (ValueError, TypeError):
+                    _t = 0.4
+                payload["temperature"] = min(_t, 0.4)
+                payload["presence_penalty"] = 0.0
+                payload["frequency_penalty"] = 0.0
             # Qwen3 / reasoner-family chat_template_kwargs. llama-server forwards
             # these into the Jinja chat template: lets us toggle thinking mode
             # per-request and cap thinking tokens so the model can't spin forever.
@@ -11173,6 +11362,11 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit):
                     emit({"type": "stats", **last_stats})
                     global _last_prompt_tokens
                     _last_prompt_tokens = last_stats.get("prompt_eval_count") or 0
+                    # Per-chat truth for the gauge + summary trigger. Once set,
+                    # the cold-start tokenize estimate for this chat is moot.
+                    if _last_prompt_tokens:
+                        _last_prompt_tokens_by_chat[chat_id] = _last_prompt_tokens
+                        _CTX_EST_CACHE.pop(chat_id, None)
             finally:
                 try:
                     resp.close()
@@ -11974,8 +12168,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, fetch_link_preview(url))
         if p == "/api/ctx-stats":
             s = get_settings()
-            cap = int(s.get("num_ctx") or 32768)
-            return self._send_json(200, {"prompt_tokens": _last_prompt_tokens, "capacity": cap})
+            # Live server ctx is the real capacity — settings.num_ctx can drift
+            # from how llama-server was actually launched.
+            cap = _llama_props_ctx() or int(s.get("num_ctx") or 32768)
+            qs = urllib.parse.parse_qs(parsed.query)
+            chat_id = (qs.get("chat_id", [""])[0] or "").strip()
+            # Per-chat real count (llama-server's prompt_eval_count) is the
+            # ground truth once a turn has completed. Before that, tokenize the
+            # assembled prompt for an accurate cold-start number.
+            real = _last_prompt_tokens_by_chat.get(chat_id, 0) if chat_id else _last_prompt_tokens
+            if real > 0:
+                return self._send_json(200, {"prompt_tokens": real, "capacity": cap, "source": "live"})
+            est = _estimate_context_tokens(chat_id) if chat_id else 0
+            return self._send_json(200, {"prompt_tokens": est, "capacity": cap,
+                                         "source": "tokenize" if est else "none"})
         if p == "/api/chats":
             return self._send_json(200, get_chats())
         if p == "/api/approvals":

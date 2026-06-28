@@ -1745,6 +1745,18 @@
     }
     state.tokTotal = chatOutTok;
     state.tokPromptTotal = chatPromptTok;
+    // Seed the context gauge from the last turn's real prompt-token count so a
+    // freshly-loaded chat shows true context fill immediately, instead of the
+    // crude char estimate until the next poll/turn. Walk newest-first for the
+    // most recent message that carries a real count.
+    state._lastMsgPromptTokens = 0;
+    state._ctxSource = "";
+    if (chat && chat.messages) {
+      for (let i = chat.messages.length - 1; i >= 0; i--) {
+        const pt = chat.messages[i].prompt_tokens;
+        if (Number.isFinite(pt) && pt > 0) { state._lastMsgPromptTokens = pt; state._ctxSource = "live"; break; }
+      }
+    }
     state.totalGenDuration = 0;
     state._streamOutEstimate = 0;
     state._streamPromptEstimate = 0;
@@ -1767,9 +1779,14 @@
     clearInterval(state._ctxPoll);
     state._ctxPoll = setInterval(async () => {
       try {
-        const r = await api("/api/ctx-stats");
-        if (r && typeof r.prompt_tokens === "number") {
+        const cid = state.chatId;
+        if (!cid) return;
+        const r = await api("/api/ctx-stats?chat_id=" + encodeURIComponent(cid));
+        // Guard against a slow response landing after the user switched chats.
+        if (r && typeof r.prompt_tokens === "number" && state.chatId === cid) {
           state._lastMsgPromptTokens = r.prompt_tokens;
+          state._ctxSource = r.source || "";
+          if (Number.isFinite(r.capacity) && r.capacity > 0) state._ctxCapacity = r.capacity;
           renderCtxGauge();
         }
       } catch (_) {}
@@ -3407,7 +3424,10 @@
       }
       state.messages.push(msg);
       state._lastMsgTokens = 0;
-      state._lastMsgPromptTokens = 0;
+      // Keep the real prompt-token count from this turn so the gauge holds the
+      // true context fill between turns instead of flashing back to the char
+      // estimate. The next turn (or the 2s poll) refreshes it.
+      if (msg.prompt_tokens > 0) state._lastMsgPromptTokens = msg.prompt_tokens;
       // update the meta tooltip on the bubble we just rendered
       const rows = [...document.querySelectorAll("#chat-inner .bubble-row")];
       const lastRow = rows.reverse().find(r => r.querySelector(".bubble.agent"));
@@ -5803,7 +5823,9 @@
     const arc = $("#ctx-gauge-arc");
     const label = $("#ctx-gauge-label");
     if (!arc || !label) return;
-    const capacity = Math.max(1, Number(state.settings.num_ctx) || 32768);
+    // Prefer the live server ctx reported by /api/ctx-stats — settings.num_ctx
+    // can drift from how llama-server was actually launched.
+    const capacity = Math.max(1, Number(state._ctxCapacity) || Number(state.settings.num_ctx) || 32768);
     // Prefer llama-server's actual reported prompt-token count from the most
     // recent turn. The visible-bubble char count below is blind to tool calls,
     // tool results, and intermediate assistant rounds — for tool-heavy work
@@ -5812,7 +5834,12 @@
     let used, source;
     if (livePromptTokens > 0) {
       used = Math.min(capacity, livePromptTokens);
-      source = "llama-server prompt_eval_count";
+      // _ctxSource is set by the poll / chat-load seed: "live" = real
+      // prompt_eval_count from a completed turn, "tokenize" = exact tokenizer
+      // count of the assembled prompt before the first turn has run.
+      source = state._ctxSource === "tokenize"
+        ? "tokenizer count (no completed turn yet)"
+        : "llama-server prompt_eval_count";
     } else {
       const systemPromptChars = 2500;
       const msgChars = (state.messages || []).reduce((a, m) => {
