@@ -94,6 +94,14 @@
   color: var(--fg);
 }
 
+/* Mobile session rows position the chat icon absolutely (phone layout in
+   app.css). The ID-scoped padding shorthand above outranks that file's
+   class-scoped padding-left, so reserve the icon slot here at the same
+   specificity — otherwise the icon paints on top of the title. */
+@media (max-width: 600px) {
+  #app .chatlist .chatrow { padding-left: 36px; }
+}
+
 #app .chatrow .d { font-size: 9px; color: var(--fg-faint); }
 #app .sidebar-divider { margin: 12px 16px; }
 #app .side-stats { gap: 8px; }

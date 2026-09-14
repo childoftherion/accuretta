@@ -6269,6 +6269,58 @@ body.remote-client .chat-scroll {
   cursor: wait;
 }
 
+/* Validated DFlash/DSpark pair marker on a model row. Vector only, tinted with
+   the accent so it reads as "this model has a fast draft ready". */
+.mm-row-draft {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.mm-row-draft svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+/* Settings: detected-draft picker + validation status line. */
+.spec-draft-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0 6px;
+}
+
+.spec-draft-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 14px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.spec-draft-status:empty {
+  display: none;
+}
+
+.spec-draft-status svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
+.spec-draft-status.is-match {
+  color: var(--accent);
+}
+
+.spec-draft-status.is-warn {
+  color: var(--warning);
+}
+
 /* "vision capable" eye chip — appended to the model pill when llama-server
    was booted with --mmproj. Tinted with the success/mint hue so it reads as
    an additive capability rather than a warning. */
@@ -18335,6 +18387,28 @@ body.remote-client .chat-scroll {
   [data-theme] .composer-foot { justify-self: end; max-width: 100%; }
   [data-theme] .composer-foot-actions { flex-wrap: wrap; justify-content: flex-end; }
   .topbar .status-line { overflow: hidden; white-space: nowrap; }
+}
+
+/* Phones already compact the toolbar (chips move into the overflow menu), so
+   tools + foot share one baseline row. Without this, the narrow-pane container
+   rule above stacks them and the right group floats ~50px below the left. */
+@media (max-width: 600px) {
+  [data-theme] .composer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "deck deck"
+      "queue queue"
+      "tray tray"
+      "input input"
+      "tools foot";
+    gap: 4px 8px;
+  }
+  [data-theme] .composer-tools,
+  [data-theme] .composer-foot {
+    align-self: center;
+  }
+  [data-theme] .composer-tools { flex-wrap: nowrap; }
+  [data-theme] .composer-foot { justify-self: end; max-width: 100%; }
 }
 
 /* Folio: paper surfaces, book typography and cut-paper forms. */

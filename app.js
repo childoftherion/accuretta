@@ -29,6 +29,7 @@
     skills: null,            // [ {name, description, budget, body_chars, lines} ] catalog
     skillsAt: 0,
     activeSkill: null,       // { name, budget, body_chars } of the chat's active skill
+    draftPairs: {},          // model path -> { draft, reasons } when a DFlash pair is valid
     compactingChats: new Set(),
     compactionRows: new Map(),
     skillSaveRows: new Map(),
@@ -406,6 +407,28 @@
     return { idx, stats: mark };
   }
 
+  // Insert the durable fold divider straight from stored state when there is no
+  // live working row to settle (the start event was missed on a reconnect, or
+  // the page loaded mid-fold). Mirrors the anchor logic in renderMessages so
+  // the divider lands at the same visible boundary.
+  function insertFoldDivider(chatId, stats) {
+    if (!chatId || chatId !== state.chatId) return null;
+    const inner = $("#chat-inner");
+    if (!inner || !(state.foldBoundaryIdx > 0)) return null;
+    const escId = String(chatId).replace(/["\\]/g, "\\$&");
+    if (inner.querySelector(`.compaction-inline-row.is-divider[data-chat-id="${escId}"]`)) return null;
+    const start = Math.max(0, Math.min(state.messageWindowStart || 0, state.messages.length));
+    if (!(state.foldBoundaryIdx > start && state.foldBoundaryIdx <= state.messages.length)) return null;
+    const bubbles = Array.from(inner.querySelectorAll("#chat-inner > .bubble-row"));
+    const at = Math.max(0, state.foldBoundaryIdx - start);
+    const divider = buildFoldDivider(stats || state.foldMark, { chatId });
+    divider.classList.add("is-done");
+    if (bubbles[at]) inner.insertBefore(divider, bubbles[at]);
+    else inner.appendChild(divider);
+    if (isNearBottom()) requestAnimationFrame(() => scrollToBottom(true));
+    return divider;
+  }
+
   function ensureCompactionRow(chatId) {
     if (!chatId || chatId !== state.chatId) return null;
     const inner = $("#chat-inner");
@@ -442,7 +465,13 @@
   function finishCompactionRow(chatId, outcome = "done", stats) {
     state.compactingChats.delete(chatId);
     const row = compactionRowFor(chatId);
-    if (!row) return;
+    if (!row) {
+      // No live working row: the start event was missed (reconnect, late load,
+      // or a backgrounded client). Still leave the durable divider so history
+      // records that compaction happened here.
+      if (outcome === "done") insertFoldDivider(chatId, stats);
+      return;
+    }
     clearTimeout(row._safetyTimer);
     if (outcome === "done") {
       // Settle into a PERSISTENT divider: hides the dot matrix, keeps the row
@@ -3274,6 +3303,7 @@
       state.reasoningCapability = r.reasoning_capability || { supported: false, mode: "none" };
       state.modelsList = Array.isArray(r.models) ? r.models : [];
       state.models = state.modelsList.map(m => m.name).filter(Boolean);
+      refreshDraftPairs();
       if (r.error) state.modelsError = r.error;
       else if (!state.modelsDir) state.modelsError = "no models folder set — pick one above.";
       else if (!state.models.length) state.modelsError = "no .gguf files found in " + state.modelsDir;
@@ -4398,11 +4428,60 @@
       r.readAsDataURL(file);
     });
   }
+
+  // Vision models spend tokens in proportion to pixels, and every agentic
+  // round replays the stored image, so send a bounded copy: 1568px on the long
+  // edge (the usual vision-model working size). PNG sources stay PNG so
+  // screenshots and fine print keep every pixel of legibility; photos become
+  // q90 JPEG. Smaller images are passed through untouched.
+  const IMAGE_SEND_MAX_EDGE = 1568;
+
+  function loadImageForShrink(file) {
+    if (typeof createImageBitmap === "function") {
+      return createImageBitmap(file, { imageOrientation: "from-image" })
+        .catch(() => createImageBitmap(file));
+    }
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    });
+  }
+
+  async function shrinkImageFile(file) {
+    if (/image\/(gif|svg\+xml)/i.test(file.type || "")) return fileToDataURL(file);
+    let source;
+    try { source = await loadImageForShrink(file); }
+    catch (_) { return fileToDataURL(file); }
+    const width = source.width || source.naturalWidth || 0;
+    const height = source.height || source.naturalHeight || 0;
+    if (!width || !height || Math.max(width, height) <= IMAGE_SEND_MAX_EDGE) {
+      source.close?.();
+      return fileToDataURL(file);
+    }
+    const scale = IMAGE_SEND_MAX_EDGE / Math.max(width, height);
+    const targetW = Math.max(1, Math.round(width * scale));
+    const targetH = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    const jpeg = /image\/jpe?g/i.test(file.type || "");
+    if (jpeg) { ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, targetW, targetH); }
+    ctx.drawImage(source, 0, 0, targetW, targetH);
+    source.close?.();
+    return jpeg ? canvas.toDataURL("image/jpeg", 0.9) : canvas.toDataURL("image/png");
+  }
+
   async function addImageFiles(files) {
     for (const f of files) {
       if (!f.type.startsWith("image/")) continue;
       try {
-        const dataUrl = await fileToDataURL(f);
+        const dataUrl = await shrinkImageFile(f);
         state.pendingImages.push({ dataUrl, name: f.name });
       } catch (e) { console.warn("read failed", e); }
     }
@@ -10338,23 +10417,46 @@
     const deck = $("#revealer-deck");
     if (!deck) return;
     
-    deck.querySelectorAll(".revealer-card.permissions").forEach(c => c.remove());
-    
-    if (state.approvals.size === 0) {
+    const approvals = [...state.approvals.values()];
+    const liveIds = new Set(approvals.map(a => String(a.id)));
+    const existing = new Map();
+    deck.querySelectorAll(".revealer-card.permissions").forEach(card => {
+      if (liveIds.has(card.dataset.approvalId)) existing.set(card.dataset.approvalId, card);
+      else card.remove();
+    });
+    if (!approvals.length) {
       if (deck.children.length === 0) deck.innerHTML = "";
       return;
     }
-    
-    const approvals = [...state.approvals.values()];
     const newestIndex = approvals.length - 1;
     approvals.forEach((a, index) => {
-      const card = document.createElement("div");
       const depth = newestIndex - index;
-      card.className = "revealer-card permissions collapsed " + (
-        depth === 0 ? "approval-front"
-          : depth === 1 ? "approval-depth-1"
-            : depth === 2 ? "approval-depth-2" : "approval-depth-hidden"
-      );
+      const depthClass = depth === 0 ? "approval-front"
+        : depth === 1 ? "approval-depth-1"
+          : depth === 2 ? "approval-depth-2" : "approval-depth-hidden";
+      const prior = existing.get(String(a.id));
+      if (prior) {
+        // Reconcile in place: never rebuild a card the user is reading, so an
+        // expanded card and its scroll position survive polls and pushes.
+        prior.classList.remove("approval-front", "approval-depth-1", "approval-depth-2", "approval-depth-hidden");
+        prior.classList.add(depthClass);
+        const head = prior.querySelector(".revealer-card-head");
+        const grow = head?.querySelector(".grow");
+        let count = head?.querySelector(".approval-stack-count");
+        if (depth === 0 && approvals.length > 1) {
+          if (!count && grow) {
+            count = document.createElement("span");
+            count.className = "approval-stack-count";
+            grow.after(count);
+          }
+          if (count) count.textContent = `${approvals.length} pending`;
+        } else if (count) {
+          count.remove();
+        }
+        return;
+      }
+      const card = document.createElement("div");
+      card.className = "revealer-card permissions collapsed " + depthClass;
       card.dataset.cardType = "permissions";
       card.dataset.approvalId = a.id;
       
@@ -10484,15 +10586,15 @@
     }
   }
 
-  let approvalSyncTimer = null;
+  let approvalSyncStarted = false;
   function startApprovalSync() {
-    if (approvalSyncTimer) return;
-    const sync = () => {
-      if (document.visibilityState !== "visible") return;
-      if (!state.streaming && state.approvals.size === 0) return;
-      loadApprovals({ announceNew: true }).catch(error => console.warn("approval sync failed", error));
-    };
-    approvalSyncTimer = setInterval(sync, 2000);
+    if (approvalSyncStarted) return;
+    approvalSyncStarted = true;
+    // The SSE `approval:new` / `approval:decided` push is the primary path.
+    // These catch-ups cover the case where the tab was backgrounded, or the
+    // connection had dropped, when the push fired (e.g. driving the PC from
+    // another device): resync the pending list the moment the tab is visible
+    // again, so a missed push still surfaces its approval gate.
     window.addEventListener("focus", () => {
       loadApprovals({ announceNew: true }).catch(error => console.warn("approval sync failed", error));
     });
@@ -10510,9 +10612,13 @@
   // showing a "bridge restarted" toast distinct from a normal reconnect.
   let _lastSnapshotId = -1;
 
+  let _sseSource = null;
+  let _lastSseEventAt = 0;
+  let _sseWatchdog = null;
+
   function subscribeSSE() {
-    const es = new EventSource("/api/events");
-    es.onmessage = (e) => {
+    const handleMessage = (e) => {
+      _lastSseEventAt = Date.now();
       let evt;
       try { evt = JSON.parse(e.data); } catch { return; }
       if (evt.type === "approval:new") {
@@ -10729,10 +10835,38 @@
         appendSandboxText(line + "\n", isError, false);
       }
     };
-    es.onerror = () => {
-      es.close();
-      setTimeout(subscribeSSE, 3000);
+
+    const connect = () => {
+      _lastSseEventAt = Date.now();
+      try { _sseSource?.close(); } catch {}
+      const es = new EventSource("/api/events");
+      _sseSource = es;
+      es.onmessage = handleMessage;
+      es.onerror = () => {
+        es.close();
+        if (_sseSource === es) _sseSource = null;
+        setTimeout(connect, 3000);
+      };
     };
+    connect();
+
+    if (!_sseWatchdog) {
+      _sseWatchdog = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        // A backgrounded or occluded WebView can have its SSE stream silently
+        // severed: the bridge drops the slow subscriber but keeps the socket
+        // open, so EventSource never fires onerror and never reconnects. The
+        // heartbeat event resets this timer; rebuild the stream ourselves when
+        // it has been quiet far longer than one heartbeat interval.
+        if (Date.now() - _lastSseEventAt > 45000) connect();
+      }, 10000);
+    }
+    window.addEventListener("online", () => {
+      if (Date.now() - _lastSseEventAt > 45000) connect();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && Date.now() - _lastSseEventAt > 45000) connect();
+    });
   }
 
   // ---------- settings drawer ----------
@@ -11986,6 +12120,130 @@
     }
   }
 
+  // ---- speculative draft picker (DFlash / DSpark) ----
+  // The bridge validates a draft against the model's tokenizer and base-model
+  // metadata. This picker lists every draft-named GGUF on disk, marks validated
+  // pairs, and keeps the text field as the source of truth for saving.
+  const SPEC_DRAFT_OK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+  const SPEC_DRAFT_WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.6 19.5h18.8L12 3z"/><path d="M12 9.5v4.2M12 17.2h.01"/></svg>';
+
+  function setSpecDraftStatus(kind, text) {
+    const el = $("#spec-draft-status");
+    if (!el) return;
+    el.classList.toggle("is-match", kind === "match");
+    el.classList.toggle("is-warn", kind === "warn");
+    el.innerHTML = (kind === "match" ? SPEC_DRAFT_OK_SVG
+      : kind === "warn" ? SPEC_DRAFT_WARN_SVG : "") + esc(text || "");
+  }
+
+  function specStrategyWantsDraft() {
+    const value = ($("#set-spec-strategy")?.value || "").toLowerCase();
+    return value === "dflash" || value === "dspark";
+  }
+
+  function syncSpecDraftSelection() {
+    const sel = $("#set-spec-draft-select");
+    const input = $("#set-spec-draft-model");
+    if (!sel || !input) return;
+    const path = (input.value || "").trim();
+    const match = Array.from(sel.options).find(o => o.value && o.value === path);
+    sel.value = match ? path : "";
+  }
+
+  function renderSpecDraftStatus(data) {
+    if (!specStrategyWantsDraft()) { setSpecDraftStatus("", ""); return; }
+    const input = ($("#set-spec-draft-model")?.value || "").trim();
+    const selected = data && data.selected_match;
+    const paired = data && data.paired_match;
+    if (input && selected && selected.path === input) {
+      if (selected.matched) {
+        setSpecDraftStatus("match", `matches this model — ${(selected.reasons || []).join(" · ")}`);
+      } else {
+        setSpecDraftStatus("warn", `not validated for this model — ${(selected.reasons || []).join(" · ")}`);
+      }
+      return;
+    }
+    if (paired && paired.matched) {
+      const name = (paired.path || "").split(/[\\/]/).pop();
+      setSpecDraftStatus("match", `${name} detected — ${(paired.reasons || []).join(" · ")}`);
+      return;
+    }
+    const drafts = (data && data.drafts) || [];
+    if (drafts.length) {
+      setSpecDraftStatus("warn", "draft files found, but none validate for this model");
+    } else {
+      setSpecDraftStatus("warn", "no matching draft found beside this model");
+    }
+  }
+
+  let _specDraftRequest = 0;
+  async function refreshSpecDrafts() {
+    const sel = $("#set-spec-draft-select");
+    if (!sel) return;
+    const modelPath = ($("#set-model")?.value || state.loadedModel || state.settings?.model_path || "").trim();
+    const input = $("#set-spec-draft-model");
+    const request = ++_specDraftRequest;
+    if (!modelPath) {
+      sel.innerHTML = '<option value="">Auto — select a model first</option>';
+      setSpecDraftStatus("", "");
+      return;
+    }
+    try {
+      const chosen = (input?.value || "").trim();
+      const query = `/api/models/spec-drafts?model_path=${encodeURIComponent(modelPath)}`
+        + (chosen ? `&draft_path=${encodeURIComponent(chosen)}` : "");
+      const data = await api(query);
+      if (request !== _specDraftRequest) return;
+      if (!data || data.error || !Array.isArray(data.drafts)) {
+        // Endpoint missing (bridge not restarted yet) or failing: keep the
+        // saved path selectable and say what to do — never claim "no match"
+        // when the truth is "could not check".
+        const chosenPath = (input?.value || "").trim();
+        sel.innerHTML = "";
+        const unavailable = document.createElement("option");
+        unavailable.value = "";
+        unavailable.textContent = "Auto — draft list unavailable";
+        sel.appendChild(unavailable);
+        if (chosenPath) {
+          const option = document.createElement("option");
+          option.value = chosenPath;
+          option.textContent = `${chosenPath.split(/[\\/]/).pop()} — manual`;
+          sel.appendChild(option);
+        }
+        syncSpecDraftSelection();
+        setSpecDraftStatus("warn", "draft list unavailable — restart the bridge to enable validation");
+        return;
+      }
+      const drafts = data.drafts || [];
+      sel.innerHTML = "";
+      const auto = document.createElement("option");
+      auto.value = "";
+      auto.textContent = data.paired
+        ? `Auto — ${String(data.paired).split(/[\\/]/).pop()}`
+        : "Auto — no matching draft found";
+      sel.appendChild(auto);
+      for (const d of drafts) {
+        const option = document.createElement("option");
+        option.value = d.path;
+        const gb = d.size ? ` · ${(d.size / 1e9).toFixed(2)} GB` : "";
+        option.textContent = `${d.name}${d.matched ? " — matches" : " — not validated"}${gb}`;
+        sel.appendChild(option);
+      }
+      if (chosen && !drafts.some(d => d.path === chosen)) {
+        const option = document.createElement("option");
+        option.value = chosen;
+        option.textContent = `${chosen.split(/[\\/]/).pop()} — manual`;
+        sel.appendChild(option);
+      }
+      syncSpecDraftSelection();
+      renderSpecDraftStatus(data);
+    } catch (error) {
+      if (request !== _specDraftRequest) return;
+      console.warn("spec draft lookup failed", error);
+      setSpecDraftStatus("warn", "could not load draft list");
+    }
+  }
+
   function populateSettingsForm() {
     $("#set-offline-mode").checked = !!state.settings.offline_mode;
     $("#offline-status").textContent = !!state.settings.offline_mode !== !!state.settings.offline_active
@@ -12090,6 +12348,8 @@
     if (xa) xa.value = s.llama_extra_args || "";
     const draftModel = $("#set-spec-draft-model");
     if (draftModel) draftModel.value = s.spec_draft_model || "";
+    syncSpecDraftSelection();
+    refreshSpecDrafts();
     fill("#set-temp", s.temperature);
     fill("#set-topp", s.top_p);
     fill("#set-topk", s.top_k ?? 40);
@@ -13503,6 +13763,18 @@
     }
   }
 
+  // Validated DFlash/DSpark pairs per model path, used for the model-picker
+  // badge. Fetched once after the model list loads; the bridge caches the
+  // GGUF fingerprints, so repeat calls are cheap.
+  async function refreshDraftPairs() {
+    try {
+      const r = await api("/api/models/draft-pairs");
+      state.draftPairs = (r && r.pairs) || {};
+    } catch (_) {
+      state.draftPairs = {};
+    }
+  }
+
   // Build the rows for the model-pill dropdown from state.modelsList. Re-run
   // on every open so the "loaded" indicator stays in sync with whatever the
   // bridge actually has running right now.
@@ -13533,6 +13805,14 @@
       name.textContent = m.name;
       row.appendChild(dot);
       row.appendChild(name);
+      const pair = state.draftPairs && state.draftPairs[m.path];
+      if (pair) {
+        const badge = document.createElement("span");
+        badge.className = "mm-row-draft";
+        badge.title = `DFlash draft paired: ${pair.draft}`;
+        badge.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5h6L9 22l10.5-12.5h-6.5z"/></svg>';
+        row.appendChild(badge);
+      }
       if (m.size_gb) {
         const size = document.createElement("span");
         size.className = "mm-row-size";
@@ -14522,6 +14802,18 @@
       } finally { btn.disabled = false; }
     });
     $("#set-mmproj-mode")?.addEventListener("change", syncMmprojModeUi);
+    $("#set-spec-strategy")?.addEventListener("change", () => refreshSpecDrafts());
+    $("#set-model")?.addEventListener("change", () => refreshSpecDrafts());
+    $("#set-spec-draft-select")?.addEventListener("change", (e) => {
+      const input = $("#set-spec-draft-model");
+      if (input) input.value = e.currentTarget.value || "";
+      refreshSpecDrafts();
+    });
+    $("#set-spec-draft-model")?.addEventListener("input", () => {
+      syncSpecDraftSelection();
+      clearTimeout(window._specDraftInputTimer);
+      window._specDraftInputTimer = setTimeout(() => refreshSpecDrafts(), 350);
+    });
     $("#btn-spec-draft-browse")?.addEventListener("click", async () => {
       const btn = $("#btn-spec-draft-browse");
       const modelPath = ($("#set-model")?.value || state.loadedModel || state.settings?.model_path || "").trim();
@@ -14533,6 +14825,7 @@
         });
         if (!r.path) return;
         $("#set-spec-draft-model").value = r.path;
+        await refreshSpecDrafts();
         toast("draft model selected; save settings to load it", "ok", 3500);
       } catch (e) {
         toast("draft-model picker failed: " + (e.message || e), "error");

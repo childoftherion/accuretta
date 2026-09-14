@@ -33,7 +33,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Any
 import webbrowser
 import base64 as _b64
@@ -1664,6 +1664,18 @@ def _public_model_health() -> dict:
                         changed = True
                 if rec and rec.get("dismissed_at"):
                     rec = None
+                if rec:
+                    # A stored recommendation can go stale once the live settings
+                    # catch up with it (e.g. a manual decoder choice landed or
+                    # auto-tune adopted the same flags). Drop it instead of
+                    # nagging with a change that is no longer a change.
+                    _live_cfg = _model_runtime_config(settings)
+                    outstanding = {k: v for k, v in (rec.get("updates") or {}).items()
+                                   if _live_cfg.get(k) != v}
+                    if not outstanding:
+                        cfg.pop("recommendation", None)
+                        rec = None
+                        changed = True
             else:
                 observed = _model_observed(row)
                 rec = None
@@ -2022,11 +2034,28 @@ def update_settings(updates: dict) -> dict:
             and any(k in allowed for k in ("spec_strategy", "spec_draft_model"))):
         draft_model = str(cur.get("spec_draft_model") or "").strip()
         if not draft_model:
-            raise ValueError(f"{cur['spec_strategy'].upper()} requires a matching draft-model GGUF file.")
-        if Path(draft_model).suffix.lower() != ".gguf":
+            # An empty path is fine when the selected model has a metadata-
+            # validated pair on disk: the spawn path auto-pairs it.
+            pair = find_spec_draft_for(str(cur.get("model_path") or "").strip())
+            if not (pair.get("matched") and pair.get("path")):
+                raise ValueError(
+                    f"{cur['spec_strategy'].upper()} needs a matching draft GGUF beside the "
+                    "selected model (or pick one explicitly).")
+        elif Path(draft_model).suffix.lower() != ".gguf":
             raise ValueError("Speculative draft model must be a .gguf file.")
-        if not safe_exists(draft_model):
+        elif not safe_exists(draft_model):
             raise ValueError(f"Speculative draft model does not exist: {draft_model}")
+        elif cur.get("model_path") and safe_exists(str(cur["model_path"])):
+            match = spec_draft_match(str(cur["model_path"]), draft_model)
+            if not match.get("matched"):
+                # Only reject when both headers were readable enough to prove a
+                # mismatch; unverifiable files stay the user's explicit choice.
+                draft_ok = bool((match.get("draft") or {}).get("ok"))
+                target_ok = bool(_spec_fingerprint(str(cur["model_path"])).get("ok"))
+                if draft_ok and target_ok:
+                    raise ValueError(
+                        "That draft does not match the selected model: "
+                        + "; ".join(match.get("reasons") or []))
 
     if "composer_mode" in allowed:
         cur["composer_mode"] = _normalize_composer_mode(cur.get("composer_mode"))
@@ -3840,6 +3869,16 @@ _summary_last_notice_by_chat: dict[str, float] = {}
 _context_trim_last_notice_by_chat: dict[str, float] = {}
 _summary_fold_lock = threading.Lock()
 _summary_folds_inflight: set[str] = set()
+
+
+def list_inflight_folds() -> list[str]:
+    """Chat ids with a summarizer call currently in flight. The SSE handler
+    re-emits these as `summary_folding` on connect: the start event is
+    transient, so a reconnect would otherwise never redraw the live row."""
+    with _summary_fold_lock:
+        return sorted(_summary_folds_inflight)
+
+
 # Hard cap on one synchronous summarizer call. Local models and hardware vary
 # widely, and preserving a long autonomous run matters more than making the
 # fold feel instant. Five minutes gives a slow model room to finish while still
@@ -4169,6 +4208,58 @@ def _splice_rolling_summary(system_content: str, new_summary: str) -> str:
     return system_content + section
 
 
+# Vision prompts spend tokens in proportion to pixels, and every agentic round
+# replays the stored images. Cap what reaches the model so a 4K screenshot does
+# not cost thousands of vision tokens, re-encode the vision tower each round,
+# and pressure VRAM on tight cards. 1568px on the long edge keeps screenshots
+# and text legible; PNG stays lossless for exactly that case.
+IMAGE_WIRE_MAX_EDGE = 1568
+_clamped_image_cache: dict[str, str] = {}
+_CLAMPED_IMAGE_CACHE_MAX = 48
+
+
+def _clamp_image_data_url(url: str, max_edge: int = IMAGE_WIRE_MAX_EDGE) -> str:
+    """Downscale one image data URL to `max_edge` on its long side.
+
+    Returns the original untouched on any failure or when it already fits, and
+    caches results so replayed history re-encodes at most once per image."""
+    if not isinstance(url, str) or not url.startswith("data:image/") or not _HAVE_PIL:
+        return url
+    key = url if len(url) <= 160 else (
+        hashlib.sha1(url.encode("utf-8", "ignore")).hexdigest() + ":" + str(len(url)))
+    cached = _clamped_image_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        header, _, payload = url.partition(",")
+        mime = header[5:].split(";", 1)[0].strip().lower()
+        if mime not in {"image/png", "image/jpeg", "image/jpg", "image/webp"}:
+            return url
+        img = Image.open(_io.BytesIO(_b64.b64decode(payload, validate=False)))
+        width, height = img.size
+        if max(width, height) <= max_edge:
+            return url
+        scale = max_edge / float(max(width, height))
+        size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        img = img.resize(size, Image.LANCZOS)
+        buf = _io.BytesIO()
+        if mime in {"image/jpeg", "image/jpg"}:
+            img.convert("RGB").save(buf, format="JPEG", quality=90, optimize=True)
+            out_mime = "image/jpeg"
+        else:
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA")
+            img.save(buf, format="PNG", optimize=True)
+            out_mime = "image/png"
+        result = f"data:{out_mime};base64," + _b64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return url
+    if len(_clamped_image_cache) >= _CLAMPED_IMAGE_CACHE_MAX:
+        _clamped_image_cache.pop(next(iter(_clamped_image_cache)))
+    _clamped_image_cache[key] = result
+    return result
+
+
 def _replay_wire_msg(m: dict, replay_vision: bool) -> dict | None:
     """Map one STORED chat message to its wire shape for the model (the same
     mapping the chat handler's replay loop uses). Returns None for roles that
@@ -4188,7 +4279,7 @@ def _replay_wire_msg(m: dict, replay_vision: bool) -> dict | None:
             if not isinstance(img, str) or not img:
                 continue
             url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
-            parts.append({"type": "image_url", "image_url": {"url": url}})
+            parts.append({"type": "image_url", "image_url": {"url": _clamp_image_data_url(url)}})
         out: dict = {"role": role, "content": parts if parts else (txt or "")}
     else:
         out = {"role": role, "content": m.get("content", "") or ""}
@@ -6762,9 +6853,22 @@ def unsubscribe(q: Queue) -> None:
 # broadcast_event). ctx_fill fires once per agentic round.
 _TRANSIENT_EVENT_TYPES = frozenset({"ctx_fill", "summary_folding"})
 
+# Stream chatter already delivered to the active client over the chat POST
+# response. No SSE consumer renders it (the browser handles only out-of-band
+# state; the Discord listener only reads approval:new), and mirroring every
+# token into each subscriber queue is what let slow or backgrounded clients
+# overflow and get dropped. Skip it on the SSE bus entirely.
+_SSE_SKIP_EVENT_TYPES = frozenset({"delta", "thinking_delta"})
+
+# Count of events discarded for a slow subscriber (queue full). Never removes
+# the subscriber; surfaced only so a persistent flood is observable.
+_dropped_event_count = 0
+
 
 def broadcast_event(evt: dict) -> None:
-    global _event_log_id
+    global _event_log_id, _dropped_event_count
+    if evt.get("type") in _SSE_SKIP_EVENT_TYPES:
+        return
     with _subs_lock:
         # High-frequency gauge noise (one per agentic round) is forwarded to
         # live subscribers but NOT logged — a 120-round turn would otherwise
@@ -6781,15 +6885,20 @@ def broadcast_event(evt: dict) -> None:
         if evt_id is not None:
             logged["_id"] = evt_id
             _event_log.append((evt_id, logged))
-        dead = []
         for q in _subscribers:
             try:
                 q.put_nowait(logged)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            try:
-                _subscribers.remove(q)
+            except Full:
+                # A slow subscriber (backgrounded window, busy browser) must
+                # never be silently unsubscribed while its HTTP stream stays
+                # open — EventSource would never see an error and would never
+                # reconnect. Drop the oldest queued event and keep it alive.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(logged)
+                    _dropped_event_count += 1
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -26395,16 +26504,17 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit,
 
         def _apply_task_updates(updates: list[dict]) -> bool:
             for update in updates:
-                stored = {"role": "user", "content": update["text"], "images": update.get("images", [])}
+                update_images = [_clamp_image_data_url(u) for u in (update.get("images") or [])]
+                stored = {"role": "user", "content": update["text"], "images": update_images}
                 wire = _replay_wire_msg(stored, _llama.is_vision_capable())
                 wire.update(_steering_id=update["id"], _steering_text=update["text"],
-                            _steering_images=update.get("images", []))
+                            _steering_images=update_images)
                 conversation.append(wire)
                 _turn_journal_checkpoint(chat_id, _turn_id, conversation[_start_len:],
                                          activity=_activity_tail, mission=_rt_chat.get("mission"),
                                          verification_debt=_verification_debt)
                 _steering.applied(chat_id, update["id"])
-                emit({"type": "steering_applied", "chat_id": chat_id, **update})
+                emit({"type": "steering_applied", "chat_id": chat_id, **update, "images": update_images})
             return bool(updates)
 
         def _finish_compaction_failure() -> dict:
@@ -30082,6 +30192,17 @@ class RequestError(ValueError):
         super().__init__(message)
 
 
+def _json_default(value: Any):
+    """Last-resort encoder for API payloads. Sets (GGUF identity fingerprints)
+    are the common case; anything else falls back to its string form so one odd
+    field can never turn a whole endpoint into a 500."""
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(item) for item in value)
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Accuretta/1.0"
 
@@ -30170,7 +30291,7 @@ class Handler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def _send_json(self, status: int, obj: Any):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8")
         accepts_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
         encoded = accepts_gzip and len(body) >= 1024
         if encoded:
@@ -30490,6 +30611,48 @@ class Handler(BaseHTTPRequestHandler):
                 "reasoning_capability": reasoning_capability,
                 "models": files,
             })
+        if p == "/api/models/spec-drafts":
+            # Draft GGUFs (DFlash/DSpark) available for the selected model,
+            # best metadata-validated match first. `paired` is what auto-tune
+            # and the spawn path would use; `drafts` feeds the settings picker.
+            # `draft_path` additionally validates one explicitly chosen file.
+            qs = urllib.parse.parse_qs(parsed.query)
+            model_path = (qs.get("model_path") or [""])[0].strip()
+            chosen = (qs.get("draft_path") or [""])[0].strip()
+            target = _spec_fingerprint(model_path) if model_path and safe_exists(model_path) else {}
+            paired = find_spec_draft_for(model_path) if model_path else {}
+            selected: dict = {}
+            if chosen and model_path and safe_exists(chosen):
+                selected = draft_match_payload(
+                    {"path": chosen, **spec_draft_match(model_path, chosen)})
+            return self._send_json(200, {
+                "model_path": model_path,
+                "model": {
+                    "name": target.get("name", ""),
+                    "architecture": target.get("architecture", ""),
+                    "vocab": target.get("vocab", 0),
+                    "identities": sorted(target.get("identities") or []),
+                },
+                "drafts": list_spec_drafts(model_path),
+                "paired": paired.get("path", ""),
+                "paired_match": draft_match_payload(paired),
+                "selected_match": selected,
+            })
+        if p == "/api/models/draft-pairs":
+            # Which models in the models dir have a validated DFlash/DSpark pair
+            # beside them. Cached fingerprints keep repeat calls cheap; the UI
+            # fetches this once to mark model-picker rows with a badge.
+            s = get_settings()
+            mdir = (s.get("models_dir") or "").strip()
+            pairs: dict[str, dict] = {}
+            for item in (scan_gguf_dir(mdir) if mdir else []):
+                found = find_spec_draft_for(item["path"])
+                if found.get("matched") and found.get("path"):
+                    pairs[item["path"]] = {
+                        "draft": os.path.basename(found["path"]),
+                        "reasons": found.get("reasons") or [],
+                    }
+            return self._send_json(200, {"pairs": pairs})
         if p.startswith("/api/model-info/"):
             name = urllib.parse.unquote(p[len("/api/model-info/"):])
             return self._send_json(200, recommended_settings(name))
@@ -31729,6 +31892,12 @@ class Handler(BaseHTTPRequestHandler):
             # so a fresh tab finds them even if the original event aged out.
             for a in list_approvals():
                 self._sse_send({"type": "approval:new", "approval": a})
+            # An in-flight fold is state too, but its start event is
+            # deliberately not in the resume ring (it is transient). Re-emit
+            # it on every (re)connect so a reconnected or late client still
+            # draws the live compaction row instead of silently missing it.
+            for fold_chat_id in list_inflight_folds():
+                self._sse_send({"type": "summary_folding", "chat_id": fold_chat_id})
             last_ping = time.time()
             while True:
                 try:
@@ -31737,8 +31906,10 @@ class Handler(BaseHTTPRequestHandler):
                 except Empty:
                     if time.time() - last_ping > 14:
                         try:
-                            self.wfile.write(b": ping\n\n")
-                            self.wfile.flush()
+                            # A named heartbeat reaches JavaScript (a bare
+                            # comment ping does not), so the client can tell a
+                            # live stream from a silently dead one.
+                            self._sse_send({"type": "heartbeat", "t": int(time.time())})
                             last_ping = time.time()
                         except Exception:
                             break
@@ -31897,8 +32068,9 @@ class Handler(BaseHTTPRequestHandler):
             if vision_native:
                 # Stored as data URLs so replay on the next turn (or after a
                 # reload) reattaches them. Frontend stripped non-image fields
-                # already; we re-attach as user-attached metadata.
-                user_msg["images"] = list(images)
+                # already; we re-attach as user-attached metadata. Clamp once
+                # here so storage and every later replay stay bounded.
+                user_msg["images"] = [_clamp_image_data_url(u) for u in images]
             chat["messages"].append(user_msg)
             global _last_user_text
             _last_user_text = user_text
@@ -33312,9 +33484,55 @@ def _resolve_mmproj_for_tune(model_path: str, s: dict) -> str:
     return ""
 
 
+def _resolve_spec_draft_for_tune(model_path: str, s: dict) -> str:
+    """The DFlash/DSpark draft GGUF a load of `model_path` would boot with, so
+    auto_tune can reserve its VRAM. Mirrors the spawn path: only DFlash/DSpark
+    use a side model; draft-mtp and n-gram draft from the main model itself."""
+    strategy = str((s or {}).get("spec_strategy") or "").strip().lower()
+    if strategy not in {"dflash", "dspark"}:
+        return ""
+    configured = str((s or {}).get("spec_draft_model") or "").strip()
+    if configured and safe_exists(configured):
+        return configured
+    # No explicit path: fall back to the metadata-validated pair on disk, which
+    # is what the UI auto-fill selects for this model.
+    paired = find_spec_draft_for(model_path) if model_path else {}
+    if paired.get("matched") and paired.get("path") and safe_exists(paired["path"]):
+        return paired["path"]
+    return ""
+
+
 def _runtime_spec_strategy(spec_strategy: str, mmproj_path: str) -> str:
     """Keep the chosen decoder loaded alongside native multimodal support."""
     return str(spec_strategy or "off").strip().lower()
+
+
+def _speculative_choice(settings: dict, has_mtp: bool, is_moe: bool, nextn: int,
+                        pair: dict, draft_kind: str) -> tuple[str, str]:
+    """Pick the speculative-decoding strategy and its auto-tune note.
+
+    A MANUAL choice always wins — auto-tuning and the setup advisor must never
+    replace what the user explicitly selected. Otherwise a metadata-validated
+    DFlash/DSpark pair on disk beats MTP: measured ~+50% decode (112 vs 75
+    tok/s) on the reference Qwen3.8-27B + DFlash2 pair at equal context.
+    Falls back to MTP heads → n-gram (dense) → off (MoE)."""
+    manual = str((settings or {}).get("spec_strategy_source") or "").strip().lower() == "manual"
+    saved = str((settings or {}).get("spec_strategy") or "").strip().lower()
+    if manual and saved in {"off", "ngram-mod", "draft-mtp", "dflash", "dspark"}:
+        return saved, f"speculative decoding: {saved} (manual choice kept)."
+    if pair:
+        kind = draft_kind if draft_kind in {"dflash", "dspark"} else "dflash"
+        name = os.path.basename(str(pair.get("path") or "")) or "draft"
+        return kind, (f"speculative decoding: {kind} (validated draft {name}; "
+                      "measured faster than draft-mtp on this setup).")
+    if has_mtp:
+        if nextn:
+            return "draft-mtp", (
+                f"speculative decoding: draft-mtp ({nextn} MTP heads detected, ~1.85x decode win).")
+        return "draft-mtp", "speculative decoding: draft-mtp (MTP-capable model by name, ~1.85x decode win)."
+    if is_moe:
+        return "off", "speculative decoding: OFF (n-gram is net-negative on MoE per public benchmarks)."
+    return "ngram-mod", "speculative decoding: ngram-mod (free win on dense models)."
 
 
 def _probe_ram_bandwidth_gbps() -> float:
@@ -33470,6 +33688,47 @@ def auto_tune(model_path: str, vram_gb: float, profile: dict = None, min_ctx: in
             budget_mb = max(budget_mb - mmproj_mb, 256.0)
     except Exception:
         mmproj_mb = 0.0
+    # Speculative intent — decided BEFORE the draft reserve so an auto-tuned
+    # pick also pays for its draft:
+    #   * a manual choice is honored as-is (the advisor must not nag it away);
+    #   * otherwise prefer a metadata-validated DFlash/DSpark pair (measured
+    #     ~+50% decode over draft-mtp on the reference box);
+    #   * otherwise the existing MTP / n-gram / off policy below decides.
+    _spec_manual = str(_s_tune.get("spec_strategy_source") or "").strip().lower() == "manual"
+    _spec_saved = str(_s_tune.get("spec_strategy") or "").strip().lower()
+    _spec_valid = {"off", "ngram-mod", "draft-mtp", "dflash", "dspark"}
+    if _spec_saved not in _spec_valid:
+        _spec_manual = False
+        _spec_saved = ""
+    _auto_pair: dict = {}
+    if not _spec_manual and model_path:
+        try:
+            _candidate = find_spec_draft_for(model_path)
+            if _candidate.get("matched") and _candidate.get("path"):
+                _auto_pair = _candidate
+        except Exception:
+            _auto_pair = {}
+    draft_mb = 0.0
+    _draft_name = ""
+    _draft_kind = ""
+    try:
+        _draft = _resolve_spec_draft_for_tune(model_path, _s_tune)
+        if not _draft and _auto_pair.get("path"):
+            _draft = str(_auto_pair["path"])
+        if _draft:
+            _draft_name = os.path.basename(_draft)
+            try:
+                _draft_kind = str(_spec_fingerprint(_draft).get("architecture") or "").lower()
+            except Exception:
+                _draft_kind = ""
+            draft_mb = os.path.getsize(_draft) / (1024 * 1024)
+            # The draft needs its own small KV cache and compute graph too.
+            # Five-layer sliding-window drafts (DFlash) are only a few hundred
+            # MB there, so reserve a bounded extra rather than a flat guess.
+            draft_mb += max(192.0, draft_mb * 0.15)
+            budget_mb = max(budget_mb - draft_mb, 256.0)
+    except Exception:
+        draft_mb = 0.0
     if src == "gguf":
         moe_tag = ""
         if is_moe:
@@ -33490,6 +33749,11 @@ def auto_tune(model_path: str, vram_gb: float, profile: dict = None, min_ctx: in
         notes.append(
             f"vision projector: {mmproj_mb:.0f} MB reserved "
             f"({_mp_name} loads alongside the model — disable mmproj to reclaim it)."
+        )
+    if draft_mb:
+        notes.append(
+            f"speculative draft: {draft_mb:.0f} MB reserved "
+            f"({_draft_name} loads alongside the model — context sized to fit it)."
         )
 
     # -- KV cache dtype --
@@ -34078,29 +34342,11 @@ def auto_tune(model_path: str, vram_gb: float, profile: dict = None, min_ctx: in
             notes.append(f"num_gpu: {out['num_gpu']} layers (dense partial offload).")
 
     # -- Speculative decoding --
-    # Three-way pick (detection itself is hoisted above the context solver):
-    #   1. If the model ships MTP heads (Qwen 3.5/3.6, DeepSeek V3/R1) → "draft-mtp".
-    #      The model's own MTP heads draft 3 tokens/step; reported ~1.85x decode
-    #      win on Qwen3.6 27B with ~75% acceptance. Beats both n-gram and off on
-    #      these architectures and stays in-budget on MoE since drafts come from
-    #      the same forward pass instead of pulling fresh experts.
-    #   2. Else if MoE → "off". Independent benchmarks (RTX 3090 + Qwen3.6
-    #      35B-A3B post llama.cpp #19493) show n-gram speculation is net-negative
-    #      on MoE: every drafted token pulls a fresh expert through the memory
-    #      hierarchy, even at 100% draft acceptance.
-    #   3. Else (dense, non-MTP) → "ngram-mod". Free win, no model requirements.
-    if has_mtp:
-        out["spec_strategy"] = "draft-mtp"
-        if nextn:
-            notes.append(f"speculative decoding: draft-mtp ({nextn} MTP heads detected, ~1.85x decode win).")
-        else:
-            notes.append("speculative decoding: draft-mtp (MTP-capable model by name, ~1.85x decode win).")
-    elif is_moe:
-        out["spec_strategy"] = "off"
-        notes.append("speculative decoding: OFF (n-gram is net-negative on MoE per public benchmarks).")
-    else:
-        out["spec_strategy"] = "ngram-mod"
-        notes.append("speculative decoding: ngram-mod (free win on dense models).")
+    # One decision table (see _speculative_choice): manual wins, then a
+    # validated DFlash/DSpark pair, then MTP, then n-gram/off.
+    out["spec_strategy"], _spec_note = _speculative_choice(
+        _s_tune, has_mtp, is_moe, nextn, _auto_pair, _draft_kind)
+    notes.append(_spec_note)
 
     # -- batch / ubatch / threads --
     # When offloading to CPU, bigger batches dramatically improve prompt eval
@@ -34338,11 +34584,12 @@ def _parse_llama_port() -> int:
     return int(m.group(1)) if m else 8080
 
 
-def _gguf_model_identities(path: str | Path) -> set[str]:
+def _gguf_model_identities(path: str | Path, keys: dict | None = None) -> set[str]:
     """Return normalized model identities from GGUF metadata, including mmproj files."""
     try:
-        meta = read_gguf_metadata(str(path))
-        keys = meta.get("keys") if isinstance(meta, dict) else {}
+        if keys is None:
+            meta = read_gguf_metadata(str(path))
+            keys = meta.get("keys") if isinstance(meta, dict) else {}
         if not isinstance(keys, dict):
             return set()
         values = []
@@ -34439,10 +34686,221 @@ def _is_mmproj_name(name: str) -> bool:
     return "mmproj" in l or "mm-proj" in l or "mm_proj" in l
 
 
-def scan_gguf_dir(root: str) -> list[dict]:
+# ---- speculative draft models (DFlash / DSpark) -----------------------------
+# A draft GGUF is a small network trained against one specific target model; it
+# runs alongside it via --spec-draft-model and is not loadable on its own. The
+# picker must hide it, and auto-tune must pair it by metadata — never by name
+# alone, because pairing a mismatched draft wastes VRAM and can crash the server.
+
+_DRAFT_NAME_RE = re.compile(r"(^|[^a-z0-9])(dflash|dspark|spec[-_]?draft|draft)(?![a-z])",
+                            re.IGNORECASE)
+_SPEC_FINGERPRINT_CACHE: dict[tuple[str, int, int], dict] = {}
+_SPEC_FINGERPRINT_CACHE_MAX = 64
+
+
+def _is_draft_name(name: str) -> bool:
+    """Filename hint that a .gguf is a speculative draft rather than a chat model."""
+    return bool(_DRAFT_NAME_RE.search((name or "").lower()))
+
+
+def _spec_fingerprint(path: str | Path) -> dict:
+    """Cheap metadata fingerprint used to pair a draft with its target model.
+
+    DFlash/DSpark GGUFs ship `general.basename` / `general.base_model.*.name`
+    alongside the target's tokenizer identity (same vocab size, merges and
+    tokenizer model). Cache keyed by path + size + mtime so repeated UI scans
+    don't re-read GGUF headers."""
+    try:
+        p = Path(path)
+        st = p.stat()
+    except Exception:
+        return {}
+    key = (str(p), int(st.st_size), int(st.st_mtime))
+    cached = _SPEC_FINGERPRINT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    meta = read_gguf_metadata(str(p))
+    keys = meta.get("keys") if isinstance(meta.get("keys"), dict) else {}
+
+    def array_len(name: str) -> int:
+        value = keys.get(name)
+        if isinstance(value, dict) and isinstance(value.get("__array_len__"), int):
+            return int(value["__array_len__"])
+        return 0
+
+    out = {
+        "path": str(p),
+        "name": p.name,
+        "size": int(st.st_size),
+        "ok": bool(meta.get("ok")),
+        "architecture": str(meta.get("architecture") or "").lower(),
+        "vocab": array_len("tokenizer.ggml.tokens"),
+        "tokenizer": str(keys.get("tokenizer.ggml.model") or "").lower(),
+        "embedding_length": int(meta.get("embedding_length") or 0),
+        "block_count": int(meta.get("block_count") or 0),
+        "identities": _gguf_model_identities(p, keys),
+        "is_draft": str(meta.get("architecture") or "").lower() in {"dflash", "dspark"},
+    }
+    if len(_SPEC_FINGERPRINT_CACHE) >= _SPEC_FINGERPRINT_CACHE_MAX:
+        _SPEC_FINGERPRINT_CACHE.pop(next(iter(_SPEC_FINGERPRINT_CACHE)))
+    _SPEC_FINGERPRINT_CACHE[key] = out
+    return out
+
+
+def _identity_match(target_ids: set[str], draft_ids: set[str]) -> tuple[int, list[str]]:
+    """Normalized base-model identities: exact intersection is decisive;
+    containment catches publishers that suffix the identity differently."""
+    exact = sorted(target_ids & draft_ids)
+    if exact:
+        return 100, exact
+    contained: list[str] = []
+    for target in target_ids:
+        for draft in draft_ids:
+            if not target or not draft:
+                continue
+            if (target in draft or draft in target) and min(len(target), len(draft)) >= 6:
+                contained.append(draft if len(draft) >= len(target) else target)
+    if contained:
+        return 60, sorted(set(contained))
+    return 0, []
+
+
+def spec_draft_match(model_path: str, draft_path: str) -> dict:
+    """Compare a draft GGUF against a target model. Returns
+    {matched, score, reasons, draft}. A draft is trusted when:
+      * both sides name the same base model (identity intersection), or
+      * neither side carries identities but tokenizer vocab, tokenizer model
+        and embedding length all match.
+    Positive evidence of a different base model always rejects the pair."""
+    target = _spec_fingerprint(model_path) if model_path else {}
+    draft = _spec_fingerprint(draft_path)
+    if not draft:
+        return {"matched": False, "score": 0, "reasons": ["draft file unreadable"], "draft": {}}
+    reasons: list[str] = []
+    score = 0
+    ids_score, ids = _identity_match(target.get("identities") or set(), draft.get("identities") or set())
+    if ids_score:
+        score += ids_score
+        reasons.append("base model match: " + ", ".join(ids))
+    if target.get("vocab") and target["vocab"] == draft.get("vocab"):
+        score += 40
+        reasons.append(f"tokenizer vocab {draft['vocab']:,}")
+    if target.get("tokenizer") and target["tokenizer"] == draft.get("tokenizer"):
+        score += 10
+        reasons.append(f"tokenizer {draft['tokenizer']}")
+    if target.get("embedding_length") and target["embedding_length"] == draft.get("embedding_length"):
+        score += 20
+        reasons.append(f"embedding {draft['embedding_length']}")
+
+    matched = score >= 60
+    identity_known = bool(target.get("identities")) and bool(draft.get("identities"))
+    if identity_known and not ids_score:
+        matched = False
+        reasons.append("different base model")
+    if draft.get("ok") and not draft.get("is_draft"):
+        # Readable metadata wins over the filename: a full model that happens
+        # to be named "…draft…" is not a loadable speculative companion.
+        matched = False
+        reasons.append("not a DFlash/DSpark draft")
+    if not reasons:
+        reasons.append("no shared tokenizer or base-model identity")
+    return {"matched": matched, "score": score, "reasons": reasons, "draft": draft}
+
+
+def _draft_candidates(model_path: str) -> list[Path]:
+    """Draft-named .gguf files next to the model (same dir, then one level up),
+    plus the configured models directory."""
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add_dir(folder: Path) -> None:
+        try:
+            for p in folder.glob("*.gguf"):
+                key = str(p).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                if _is_draft_name(p.name):
+                    candidates.append(p)
+        except Exception:
+            return
+
+    if model_path:
+        mp = Path(model_path)
+        if safe_exists(mp):
+            add_dir(mp.parent)
+            if mp.parent.parent and mp.parent.parent != mp.parent:
+                add_dir(mp.parent.parent)
+    mdir = str(get_settings().get("models_dir") or "").strip()
+    if mdir and safe_exists(mdir):
+        add_dir(Path(mdir))
+    return candidates
+
+
+def find_spec_draft_for(model_path: str) -> dict:
+    """Best **validated** DFlash/DSpark draft for a model, or {} when there is
+    none. Auto-tune and the spawn path use this strict result: a mismatched or
+    unverified draft must never be enabled silently. Unverified candidates are
+    surfaced by list_spec_drafts() for the settings picker instead."""
+    if not model_path or not safe_exists(model_path):
+        return {}
+    scored: list[tuple[int, int, int, Path, dict]] = []
+    for candidate in _draft_candidates(model_path):
+        if str(candidate) == str(model_path):
+            continue
+        match = spec_draft_match(model_path, str(candidate))
+        if match["matched"]:
+            same_dir = 0 if candidate.parent == Path(model_path).parent else 1
+            scored.append((match["score"], same_dir, len(candidate.name), candidate, match))
+    if not scored:
+        return {}
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    _, _, _, best, match = scored[0]
+    return {"path": str(best.resolve()), **match}
+
+
+def draft_match_payload(match: dict) -> dict:
+    """JSON-safe summary of a draft match (the full match carries a fingerprint
+    with a set of identities; API responses only need these four fields)."""
+    return {
+        "path": str((match or {}).get("path") or ""),
+        "matched": bool((match or {}).get("matched")),
+        "score": int((match or {}).get("score") or 0),
+        "reasons": list((match or {}).get("reasons") or []),
+    }
+
+
+def list_spec_drafts(model_path: str = "") -> list[dict]:
+    """Draft GGUFs available for the settings picker, best match first."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for candidate in _draft_candidates(model_path):
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        fingerprint = _spec_fingerprint(candidate)
+        match = spec_draft_match(model_path, str(candidate)) if model_path else {
+            "matched": False, "score": 0, "reasons": []}
+        out.append({
+            "path": str(candidate.resolve()),
+            "name": fingerprint.get("name") or candidate.name,
+            "size": fingerprint.get("size", 0),
+            "architecture": fingerprint.get("architecture", ""),
+            "base": ", ".join(sorted(fingerprint.get("identities") or []))[:160],
+            "matched": bool(match.get("matched")),
+            "score": int(match.get("score", 0)),
+            "reasons": match.get("reasons", []),
+        })
+    out.sort(key=lambda row: (-row["matched"], -row["score"], row["name"].lower()))
+    return out
+
+
+def scan_gguf_dir(root: str, include_drafts: bool = False) -> list[dict]:
     """List selectable .gguf models under root (recursive). Vision projectors
-    (mmproj) are excluded — they're part of another model, not something you can
-    load on its own. Returns [{name,path,size,modified_at}]."""
+    (mmproj) and speculative drafts (DFlash/DSpark) are excluded — both are
+    companions of another model, not something you can load on their own.
+    Returns [{name,path,size,modified_at}]."""
     if not root:
         return []
     try:
@@ -34452,6 +34910,8 @@ def scan_gguf_dir(root: str) -> list[dict]:
     out = []
     for p in files:
         if _is_mmproj_name(p.name):
+            continue
+        if not include_drafts and _is_draft_name(p.name):
             continue
         try:
             st = p.stat()
@@ -34577,6 +35037,7 @@ def _watchdog_self_heal(attempt: int) -> None:
     try:
         s = get_settings()
         changed: list[str] = []
+        bad_draft = ""
         if attempt == 2:
             cur = int(s.get("num_ctx") or 32768)
             new = max(4096, cur // 2)
@@ -34587,6 +35048,13 @@ def _watchdog_self_heal(attempt: int) -> None:
             if (s.get("spec_strategy") or "off") != "off":
                 s["spec_strategy"] = "off"
                 changed.append("speculative decoding → off")
+            bad_draft = str(s.get("spec_draft_model") or "").strip()
+            if bad_draft:
+                # A draft that helped crash the server three times must not be
+                # retried silently on every restart: drop it here and remember
+                # the failure in this model's saved config.
+                s["spec_draft_model"] = ""
+                changed.append(f"speculative draft {os.path.basename(bad_draft)} disabled")
             try:
                 mp = s.get("model_path") or ""
                 prof = inspect_model(mp) if mp else {}
@@ -34606,6 +35074,12 @@ def _watchdog_self_heal(attempt: int) -> None:
                     changed.append(f"num_gpu {cur} → {new}")
         if changed:
             save_json(SETTINGS_FILE, s)
+            if bad_draft:
+                try:
+                    _save_model_config(str(s.get("model_path") or ""),
+                                       {"spec_strategy": "off", "spec_draft_model": ""})
+                except Exception:
+                    pass
             msg = f"watchdog self-heal (attempt {attempt}): " + "; ".join(changed)
             print(f"[watchdog] {msg}", file=sys.stderr)
             broadcast_event({"type": "llama:auto_degraded", "message": msg, "changes": changed})
@@ -35325,14 +35799,43 @@ class LlamaProcess:
                 ]
         elif spec_strategy in ("dflash", "dspark"):
             # DFlash and DSpark use a separate draft network trained for the
-            # exact target model. A CLI flag without that sidecar is invalid.
-            if caps.get(spec_strategy) and spec_draft_model and safe_exists(spec_draft_model):
+            # exact target model. Validate a configured path against the target
+            # before trusting it, and fall back to the validated on-disk pair
+            # when the user hasn't named one.
+            resolved_draft = ""
+            if spec_draft_model and safe_exists(spec_draft_model):
+                match = spec_draft_match(model_path, spec_draft_model)
+                draft_readable = bool((match.get("draft") or {}).get("ok"))
+                target_readable = bool(_spec_fingerprint(model_path).get("ok"))
+                if match.get("matched") or not (draft_readable and target_readable):
+                    resolved_draft = spec_draft_model
+                    if not match.get("matched"):
+                        print(f"[llama] {spec_strategy}: draft metadata unreadable — "
+                              f"using configured {os.path.basename(spec_draft_model)} unverified",
+                              file=sys.stderr)
+                else:
+                    print(f"[llama] {spec_strategy}: configured draft does not match the model "
+                          f"({'; '.join(match.get('reasons') or [])}) — trying auto-pair",
+                          file=sys.stderr)
+            if not resolved_draft:
+                paired = find_spec_draft_for(model_path) if model_path else {}
+                if paired.get("matched"):
+                    resolved_draft = paired.get("path") or ""
+                    if resolved_draft:
+                        note = (f"{spec_strategy.upper()}: auto-paired {os.path.basename(resolved_draft)} "
+                                f"({'; '.join(paired.get('reasons') or [])})")
+                        print(f"[llama] {note}", file=sys.stderr)
+                        try:
+                            broadcast_event({"type": "notice", "note": note, "quiet": False})
+                        except Exception:
+                            pass
+            if caps.get(spec_strategy) and resolved_draft:
                 # CLI type names are prefixed draft- (draft-dflash / draft-dspark)
                 # even though the settings value is the short form.
-                cmd += ["--spec-draft-model", spec_draft_model, "--spec-type",
+                cmd += ["--spec-draft-model", resolved_draft, "--spec-type",
                         {"dflash": "draft-dflash", "dspark": "draft-dspark"}.get(
                             spec_strategy, spec_strategy)]
-                print(f"[llama] speculative decoding: {spec_strategy} ({os.path.basename(spec_draft_model)})",
+                print(f"[llama] speculative decoding: {spec_strategy} ({os.path.basename(resolved_draft)})",
                       file=sys.stderr)
             else:
                 print(f"[llama] {spec_strategy} needs a supported build and matching draft GGUF — spec_strategy→off",

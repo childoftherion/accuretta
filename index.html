@@ -27,9 +27,9 @@
   })();
 </script>
 <script src="/appearance.js?v=1"></script>
-<link rel="stylesheet" href="/app.css?v=76">
+<link rel="stylesheet" href="/app.css?v=77">
 <link rel="stylesheet" href="/ui-refresh.css?v=1">
-<link rel="stylesheet" href="/workspace-shell.css?v=2">
+<link rel="stylesheet" href="/workspace-shell.css?v=3">
 <link rel="stylesheet" href="/research-ui.css?v=2">
 <link rel="stylesheet" href="/assets/vendor/web/icons.css">
 <script src="/assets/vendor/html2canvas/dist/html2canvas.min.js" defer></script>
@@ -63,7 +63,7 @@
           </g>
         </svg>
         <span class="brand-title">Accuretta</span>
-        <span class="v" id="brand-v">v0.8.7</span>
+        <span class="v" id="brand-v">v0.8.8</span>
         <span class="grow"></span>
         <button class="iconbtn" id="btn-toggle-sidebar" title="Collapse sidebar"><i class="ph ph-sidebar-simple"></i></button>
       </div>
@@ -1239,15 +1239,21 @@
         <option value="off">off · no speculative decoding</option>
         <option value="ngram-mod">ngram-mod · works on any model (default)</option>
         <option value="draft-mtp">draft-mtp · uses the model's MTP heads (Qwen 3.5/3.6, DeepSeek V3/R1) · ~1.85x decode</option>
-        <option value="dflash">dflash · requires a matching DFlash draft GGUF</option>
-        <option value="dspark">dspark · requires a matching DSpark draft GGUF</option>
+        <option value="dflash">dflash · runs a matching DFlash draft beside the model</option>
+        <option value="dspark">dspark · runs a matching DSpark draft beside the model</option>
       </select>
-      <span class="hint">manual choices stay fixed during background auto-tuning. a loaded projector can coexist with speculative decoding.</span>
+      <span class="hint">manual choices stay fixed during background auto-tuning. auto-tune reserves the draft's VRAM and sizes context to fit it.</span>
+      <div class="spec-draft-row">
+        <select id="set-spec-draft-select" aria-label="Detected DFlash and DSpark drafts">
+          <option value="">Auto — use the matching draft beside the model</option>
+        </select>
+        <span class="spec-draft-status" id="spec-draft-status" role="status" aria-live="polite"></span>
+      </div>
       <div style="display:flex;gap:6px;">
         <input type="text" id="set-spec-draft-model" placeholder="DFlash / DSpark draft .gguf path" style="flex:1;">
         <button class="btn sm" id="btn-spec-draft-browse" title="Choose a matching speculative draft model"><i class="ph ph-folder-open"></i></button>
       </div>
-      <span class="hint">only needed for DFlash or DSpark. Draft MTP uses heads already stored in the main model.</span>
+      <span class="hint">only needed for DFlash or DSpark. the draft is validated against the model's tokenizer and base-model metadata before launch.</span>
     </div>
     <div class="form-row inline">
       <label>Skip warmup <i class="ph ph-info" title="--no-warmup. Saves a few seconds at startup. First reply may be slightly slower."></i></label>
@@ -1713,7 +1719,7 @@
 <script src="/research-ui.js?v=2"></script>
 <script src="/dropdown-menus.js?v=1"></script>
 <script src="/agent-orb.js?v=1"></script>
-<script src="/app.js?v=2026091201"></script>
+<script src="/app.js?v=2026091401"></script>
 <script>
   // Setup wizard — auto-detect llama-server and models on load.
   (function () {
