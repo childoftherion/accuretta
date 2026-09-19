@@ -94,6 +94,14 @@
   color: var(--fg);
 }
 
+/* Theme hover/active nudges (aperture translateX, base translateY) slide the
+   row sideways, pushing the right-hand status slot under the sidebar's clip
+   edge so the active icon renders cut off. The flat chrome carries no motion,
+   so pin rows in place and keep both icon gutters symmetrical. */
+#app .sidebar .chatrow,
+#app .sidebar .chatrow:hover,
+#app .sidebar .chatrow.active { transform: none; }
+
 /* Mobile session rows position the chat icon absolutely (phone layout in
    app.css). The ID-scoped padding shorthand above outranks that file's
    class-scoped padding-left, so reserve the icon slot here at the same
@@ -102,7 +110,53 @@
   #app .chatlist .chatrow { padding-left: 36px; }
 }
 
-#app .chatrow .d { font-size: 9px; color: var(--fg-faint); }
+#app .chatrow .t {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#app .chatrow > i.ph:first-child {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#app .chatrow .d {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  color: var(--fg-subtle);
+}
+#app .chatrow .d svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* The timestamp-era hover dim would wash the icons out; keep them legible. */
+#app .chatrow:hover .d { opacity: 1; }
+#app .chatrow .del { flex: 0 0 auto; }
+#app .chatrow .d .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 #app .sidebar-divider { margin: 12px 16px; }
 #app .side-stats { gap: 8px; }
 #app .cost-widget-amount { font: 500 18px/1.3 var(--font-sans); letter-spacing: -.03em; }
@@ -230,12 +284,144 @@
 .task-review-file-actions { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
 #app[data-activity-detail="detailed"] .tool-group.live-activity .tool-line.activity-older { display: flex; }
 #app[data-activity-detail="detailed"] .activity-overflow { display: none; }
-#app [data-task-state="needs-you"] .d, #app [data-task-state="failed"] .d { color: var(--accent); }
-#app [data-task-state="working"] .d { color: var(--fg); }
+#app [data-task-state="finished"] .d { color: var(--success); }
+#app [data-task-state="working"] .d,
+#app [data-task-state="needs-you"] .d { color: var(--accent); }
+#app [data-task-state="interrupted"] .d,
+#app [data-task-state="failed"] .d { color: var(--danger); }
+#app [data-task-state="stopped"] .d { color: var(--warning); }
+#app [data-task-state="ready"] .d { color: var(--fg-subtle); opacity: .8; }
+/* Active-row wash in aperture-light dropped faint 9px text below readable
+   contrast. Icons carry their own 3:1+ stroke color, and the title keeps
+   full --fg so selection no longer washes anything out. */
+#app .chatrow.active .t { color: var(--fg); }
+#app .chatrow[data-task-state="ready"].active .d { opacity: 1; }
+#app [data-task-state="working"] .d svg { animation: session-status-spin .9s linear infinite; }
+@keyframes session-status-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  #app [data-task-state="working"] .d svg { animation: none; }
+}
 @media (max-width: 640px) {
   #app .bubble-row.task-update-message { padding-left: 24px; }
   #app .task-update-card { max-width: 94%; }
   .workflow-location { max-width: 38vw; }
   .task-review-toolbar { flex-direction: column; }
   .task-review-file-actions { flex-direction: row; flex-wrap: wrap; }
+}
+
+/* ---- Flat boring monotone chrome (unreleased) -----------------------
+   Chrome-only overrides. No theme variables, no layout changes.
+   Kills gradients / glass / lift / glow so the app reads like
+   Codex / Opencode: 1px borders, 6-8px radii, no motion. */
+#app .ctx-gauge,
+#app .cost-widget,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"], [data-theme="operator"]) .ctx-gauge,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"], [data-theme="operator"]) .cost-widget {
+  background: var(--bg-raised) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transition: border-color 120ms ease !important;
+}
+#app .ctx-gauge svg,
+#app .cost-widget svg { transition: none !important; overflow: hidden !important; }
+#app .ctx-gauge:hover svg { transform: none !important; }
+#app #ctx-gauge-arc {
+  filter: none !important;
+  transition: stroke-dashoffset 200ms linear !important;
+}
+#app .ctx-gauge svg circle:first-child,
+:is([data-theme="dark"], [data-theme="aurora"], [data-theme="nebula"], [data-theme="operator"]) .ctx-gauge svg circle:first-child {
+  stroke: var(--border-strong) !important;
+  opacity: 0.5 !important;
+}
+#app .composer-wrap > .composer {
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent) !important;
+  border-radius: 12px !important;
+  background: var(--bg-raised) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transform: none !important;
+  transition: border-color 120ms ease !important;
+}
+#app .composer-wrap > .composer:focus-within {
+  transform: none !important;
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent) !important;
+  box-shadow: 0 0 0 2px var(--accent-subtle) !important;
+}
+/* Tighter bubble footer: tok/s meta, action icons, task-details link. */
+#app .bubble-actions { margin-top: 2px !important; }
+#app .task-handoff { padding: 4px 0 !important; }
+#app .bubble-meta { line-height: 1.4 !important; }
+#app .topbar .iconbtn,
+#app .sidebar .iconbtn,
+#app .iconbtn:hover,
+#app .iconbtn:active,
+#app .iconbtn.active {
+  transform: none !important;
+  box-shadow: none !important;
+}
+#app .iconbtn:hover { background: var(--bg-inset) !important; color: var(--fg) !important; }
+#app .iconbtn:active { background: var(--bg-inset) !important; }
+#app .heartbeat-icon { animation: none !important; opacity: 0.7 !important; transform: none !important; }
+#app .welcome-blobs,
+#app .wb-blob,
+#app .wb-pillars,
+#app .wb-soften { display: none !important; }
+#app .welcome-blobs { opacity: 0 !important; }
+#app .welcome-suggest-btn,
+#app .toolbar-overflow-menu,
+#app .security-dialog {
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+#app .security-dialog { background-image: none !important; }
+#app .composer-tools > .toolbar-overflow-menu { border-radius: 8px !important; }
+
+/* Custom tooltips. Same card treatment as the dropdown menus: flat
+   bg-raised surface, 1px border, small radius, soft shadow. Fades in
+   below the anchor and flips above when space runs out. */
+.acc-tooltip {
+  position: fixed;
+  z-index: 4000;
+  max-width: 260px;
+  padding: 6px 10px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  font: 400 12px/1.5 var(--font-sans);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.acc-tooltip[data-place="above"] { transform: translateY(-4px); }
+.acc-tooltip.is-visible { opacity: 1; transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .acc-tooltip { transition: none; transform: none; }
+}
+
+/* Aperture themes strip the sidebar stat cards to borderless flush rows
+   (padding 12px 0, gap 0). With flat card chrome restored above they need
+   their inner padding and stack gap back, or content touches the card edge. */
+[data-theme="aperture"] #app .sidebar .side-stats,
+[data-theme="aperture-dark"] #app .sidebar .side-stats { gap: 10px !important; padding: 0 16px 14px !important; }
+[data-theme="aperture"] #app .sidebar .side-stats > *,
+[data-theme="aperture-dark"] #app .sidebar .side-stats > *,
+[data-theme="aperture"] #app .sidebar .ctx-gauge,
+[data-theme="aperture-dark"] #app .sidebar .ctx-gauge,
+[data-theme="aperture"] #app .sidebar .cost-widget,
+[data-theme="aperture-dark"] #app .sidebar .cost-widget {
+  padding: 12px 14px !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 8px !important;
+  background: var(--bg-raised) !important;
+  box-shadow: none !important;
 }

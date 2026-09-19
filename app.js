@@ -1354,6 +1354,9 @@
     const activity = group.querySelector(".tool-group-activity");
     if (activity) activity.textContent = label;
     syncLiveActivityRows(group);
+    // Refresh the head now so the parallel marker appears with the first of a
+    // batch's calls, not only after the first result lands.
+    updateToolGroupHead(stack);
     return line;
   }
 
@@ -1423,6 +1426,24 @@
     const icon = group.querySelector(".tool-group-icon");
     const activity = group.querySelector(".tool-group-activity");
     const summary = group.querySelector(".tool-group-summary");
+    // Parallel marker: when one model reply lands several independent calls,
+    // they run at the same time. Show the count while the batch is live and
+    // drop it the moment it drains, so "parallel" is visible state instead of
+    // something the user has to infer from overlapping timings.
+    let parallelBadge = group.querySelector(".tool-group-parallel");
+    const setParallel = (count) => {
+      if (count > 1) {
+        if (!parallelBadge) {
+          parallelBadge = document.createElement("span");
+          parallelBadge.className = "tool-group-parallel";
+          activity?.after(parallelBadge);
+        }
+        parallelBadge.textContent = `${count} in parallel`;
+      } else if (parallelBadge) {
+        parallelBadge.remove();
+        parallelBadge = null;
+      }
+    };
     if (running.length > 0) {
       icon?.classList.add("spinning");
       // Activity stays as set by the tool_start label (the most recent one).
@@ -1430,6 +1451,7 @@
       if (activity) activity.hidden = false;
       if (summary) summary.hidden = true;
       group.classList.remove("done-pill");
+      setParallel(running.length);
     } else if (group.classList.contains("live-activity")) {
       icon?.classList.remove("spinning");
       if (activity) {
@@ -1438,11 +1460,13 @@
       }
       if (summary) summary.hidden = true;
       group.classList.remove("done-pill");
+      setParallel(0);
     } else {
       icon?.classList.remove("spinning");
       if (activity) activity.hidden = true;
       if (summary) summary.hidden = false;
       group.classList.add("done-pill");
+      setParallel(0);
       // Count commands separately from other tools so the summary reads as
       // "X tools · Y commands" — the user's exact ask.
       let cmd = 0, tools = 0;
@@ -1486,6 +1510,34 @@
     }
   }
 
+  // File-kind wording for tool labels: "Reading the HTML file index.html…"
+  // reads as a sentence, where the bare path reads as a filename dump. The
+  // kind is dropped when the extension isn't one we can name honestly.
+  const FILE_KIND_LABELS = {
+    html: "HTML file", htm: "HTML file", css: "stylesheet", scss: "stylesheet",
+    js: "script", mjs: "script", cjs: "script", jsx: "script",
+    ts: "script", tsx: "script", py: "Python file", json: "JSON file",
+    md: "Markdown file", txt: "text file", yml: "YAML file", yaml: "YAML file",
+    toml: "TOML file", ini: "config file", cfg: "config file", conf: "config file",
+    ps1: "PowerShell script", bat: "batch script", sh: "shell script",
+    sql: "SQL file", log: "log file", lock: "lockfile",
+  };
+
+  function fileKindPhrase(path) {
+    const name = shortPath(path);
+    if (!name) return "";
+    const extMatch = String(path || name).match(/\.([A-Za-z0-9]+)$/);
+    const kind = extMatch && FILE_KIND_LABELS[extMatch[1].toLowerCase()];
+    return kind ? `the ${kind} ${name}` : name;
+  }
+
+  // Unknown tools still get a sentence instead of a raw identifier: strip the
+  // MCP prefix, turn underscores into spaces, capitalize.
+  function humanizeToolName(name) {
+    const cleaned = String(name || "tool").replace(/^mcp_[^_]+_/, "").replaceAll("_", " ").trim();
+    return cleaned ? cleaned[0].toUpperCase() + cleaned.slice(1) : "Tool";
+  }
+
   function toolLabel(name, args) {
     args = args || {};
     // MCP tools register as `mcp_<server>_<tool>` — show a clean "server · tool"
@@ -1499,31 +1551,60 @@
     }
     switch (name) {
       case "list_directory": return `Looking in ${shortPath(args.path) || "folder"}…`;
-      case "read_file":      return `Reading ${shortPath(args.path)}…`;
-      case "read_skeleton":  return `Reading the structure of ${shortPath(args.path)}…`;
+      case "read_file":      return `Reading ${fileKindPhrase(args.path)}…`;
+      case "read_skeleton":  return `Reading the structure of ${fileKindPhrase(args.path)}…`;
       case "project_map":    return `Mapping ${shortPath(args.path) || "project"}…`;
       case "find_files":     return `Searching ${shortPath(args.path) || "files"}${args.pattern ? ` for ${String(args.pattern).slice(0, 48)}` : ""}…`;
       case "grep_files":     return `Searching ${shortPath(args.path) || "files"}${args.pattern ? ` for ${String(args.pattern).slice(0, 48)}` : ""}…`;
-      case "write_file":     return `Writing ${shortPath(args.path)}…`;
-      case "edit_file":      return `Editing ${shortPath(args.path)}…`;
-      case "delete_file":    return `Deleting ${shortPath(args.path)}…`;
+      case "write_file":     return `Writing ${fileKindPhrase(args.path)}…`;
+      case "edit_file":      return `Editing ${fileKindPhrase(args.path)}…`;
+      case "replace_ast_node": return `Editing the structure of ${fileKindPhrase(args.path)}…`;
+      case "delete_file":    return `Deleting ${fileKindPhrase(args.path)}…`;
       case "run_powershell": return `Running on host…`;
       case "run_tests":      return `Running project tests…`;
-      case "check_syntax":   return `Checking ${shortPath(args.path)}…`;
+      case "check_syntax":   return `Checking ${fileKindPhrase(args.path)}…`;
       case "research_plan": return "Planning the investigation…";
       case "research_note": return "Saving an evidence note…";
       case "research_notebook": return "Reading saved research…";
       case "research_publish": return "Preparing the research presentation…";
+      case "pin_note":       return `Pinning a session note…`;
+      case "unpin_note":     return `Unpinning a session note…`;
+      case "remember":       return `Saving that to memory…`;
+      case "search_memories": return `Searching saved memories…`;
+      case "edit_memory":    return `Updating a saved memory…`;
+      case "forget":         return `Removing a saved memory…`;
+      case "load_skill":     return `Loading skill${args.name ? ` ${args.name}` : ""}…`;
+      case "save_skill":     return `Saving skill${args.name ? ` ${args.name}` : ""}…`;
+      case "list_more_tools": return `Looking for more tools…`;
+      case "compact_history": return `Compacting the conversation…`;
       case "git_status":     return `Checking repository status…`;
       case "git_log":        return `Reading repository history…`;
       case "git_diff":       return `Reviewing repository changes…`;
+      case "git_show":       return `Inspecting a commit…`;
+      case "git_commit":     return `Committing changes…`;
+      case "git_push":       return `Pushing to the remote…`;
+      case "git_pull":       return `Pulling from the remote…`;
+      case "git_fetch":      return `Fetching from the remote…`;
+      case "git_add":        return `Staging changes…`;
+      case "git_branch":     return `Creating a branch…`;
+      case "git_checkout":   return `Switching branches…`;
+      case "git_remote":     return `Checking remotes…`;
+      case "git_clone":      return `Cloning the repository…`;
+      case "git_init":       return `Initializing a repository…`;
+      case "git_restore":    return `Restoring files…`;
+      case "git_reset":      return `Resetting the repository…`;
       case "update_plan":    return `Updating the task plan…`;
       case "capability_report": return `Checking available capabilities…`;
       case "switch_execution_target": return `Switching command target…`;
       case "sandbox_run":    return `Running in WSL guest…`;
+      case "session_start":  return `Starting an interactive session…`;
+      case "session_list":   return `Listing sessions…`;
+      case "session_send":   return `Sending input to the session…`;
+      case "session_read":   return `Reading session output…`;
+      case "session_stop":   return `Stopping the session…`;
       case "remote_shell":   return `Running on Mac…`;
-      case "remote_write_file": return `Writing ${shortPath(args.path)} on Mac…`;
-      case "remote_file_begin": return `Preparing ${shortPath(args.path)} on Mac…`;
+      case "remote_write_file": return `Writing ${fileKindPhrase(args.path)} on Mac…`;
+      case "remote_file_begin": return `Preparing ${fileKindPhrase(args.path)} on Mac…`;
       case "remote_file_append": return `Sending the next file chunk to Mac…`;
       case "remote_file_commit": return `Finishing the Mac file…`;
       case "remote_copy_to": return `Copying ${shortPath(args.destination)} to Mac…`;
@@ -1533,12 +1614,29 @@
       case "web_search":     return `Searching the web${args.query ? ` for ${String(args.query).slice(0, 56)}` : ""}…`;
       case "web_image_search": return `Searching for images${args.query ? ` of ${String(args.query).slice(0, 48)}` : ""}…`;
       case "network_snapshot": return `Scanning network…`;
+      case "parse_event_logs": return `Reading Windows event logs…`;
+      case "persistence_hunt": return `Hunting for persistence…`;
+      case "record_finding": return `Recording a finding…`;
+      case "list_findings":  return `Listing findings…`;
+      case "describe_screen": return `Looking at the screen…`;
+      case "screenshot":     return `Taking a screenshot…`;
+      case "list_windows":   return `Listing open windows…`;
+      case "desktop_snapshot": return `Inspecting the active window…`;
+      case "desktop_click":  return `Clicking on screen…`;
+      case "desktop_type_text": return `Typing on screen…`;
+      case "desktop_press_keys": return `Pressing keys…`;
+      case "desktop_invoke": return `Activating a control…`;
+      case "desktop_set_value": return `Setting a field value…`;
+      case "desktop_scroll": return `Scrolling the window…`;
+      case "desktop_launch_app": return `Launching an app…`;
+      case "desktop_focus_window": return `Focusing a window…`;
+      case "desktop_close_window": return `Closing a window…`;
       case "scan_apk":         return `Scanning APK${args.path ? " " + shortPath(args.path) : ""}…`;
       case "decompile_apk":    return `Decompiling APK${args.path ? " " + shortPath(args.path) : ""}…`;
       case "ghidra_analyze":   return `Analyzing with Ghidra${args.path ? " · " + shortPath(args.path) : ""}…`;
       case "binary_inspect":   return `Inspecting binary${args.path ? " · " + shortPath(args.path) : ""}…`;
       case "yara_scan":        return `Scanning with YARA${args.path ? " · " + shortPath(args.path) : ""}…`;
-      default:               return `Running ${name || "tool"}…`;
+      default:               return `${humanizeToolName(name)}…`;
     }
   }
   function toolResultLabel(name, res) {
@@ -1550,14 +1648,14 @@
         const n = (res.entries || []).length;
         return `Found ${n} item${n === 1 ? "" : "s"}${res.path ? " in " + shortPath(res.path) : ""}`;
       }
-      case "read_file":      return `Read ${shortPath(res.path)}${res.bytes != null ? ` (${res.bytes} bytes)` : ""}`;
-      case "read_skeleton":  return `Read the structure of ${shortPath(res.path)}`;
+      case "read_file":      return `Read ${fileKindPhrase(res.path)}${res.bytes != null ? ` (${res.bytes} bytes)` : ""}`;
+      case "read_skeleton":  return `Read the structure of ${fileKindPhrase(res.path)}`;
       case "project_map":    return `Mapped the project`;
       case "find_files":     return `Found ${Number(res.count || 0)} matching file${Number(res.count || 0) === 1 ? "" : "s"}`;
       case "grep_files":     return `Found ${Number(res.match_count || 0)} match${Number(res.match_count || 0) === 1 ? "" : "es"} in ${Number(res.files_scanned || 0)} file${Number(res.files_scanned || 0) === 1 ? "" : "s"}`;
-      case "write_file":     return `Wrote ${shortPath(res.path)}`;
-      case "edit_file":      return `Edited ${shortPath(res.path)} · ${res.edits_applied || 0} change${(res.edits_applied || 0) === 1 ? "" : "s"}`;
-      case "delete_file":    return `Deleted ${shortPath(res.path)}`;
+      case "write_file":     return `Wrote ${fileKindPhrase(res.path)}`;
+      case "edit_file":      return `Edited ${fileKindPhrase(res.path)} · ${res.edits_applied || 0} change${(res.edits_applied || 0) === 1 ? "" : "s"}`;
+      case "delete_file":    return `Deleted ${fileKindPhrase(res.path)}`;
       case "check_syntax":   return res.check_status === "unchecked" ? "Syntax not checked" : "Syntax check passed";
       case "research_plan": return "Research questions saved";
       case "research_note": return `Evidence note ${res.note_id || ""} saved`.replace(/\s+/g, " ");
@@ -1570,7 +1668,7 @@
       case "capability_report": return `Checked available capabilities`;
       case "switch_execution_target": return `Commands now target ${res.target_label || "the selected device"}`;
       case "remote_shell":   return `Mac command completed`;
-      case "remote_write_file": return `Wrote ${shortPath(res.path)} on Mac${res.bytes != null ? ` (${res.bytes} bytes)` : ""}`;
+      case "remote_write_file": return `Wrote ${fileKindPhrase(res.path)} on Mac${res.bytes != null ? ` (${res.bytes} bytes)` : ""}`;
       case "remote_file_begin": return `Mac file ready for chunks`;
       case "remote_file_append": return `Sent chunk ${res.chunks || ""}${res.bytes != null ? ` · ${res.bytes} bytes total` : ""}`;
       case "remote_file_commit": return `Finished ${shortPath(res.path)} on Mac${res.bytes != null ? ` (${res.bytes} bytes)` : ""}`;
@@ -1630,7 +1728,7 @@
         const scanned = res.files_scanned || 0;
         return `YARA · ${hits}/${scanned} file${scanned === 1 ? "" : "s"} hit · ${rules} rule${rules === 1 ? "" : "s"}`;
       }
-      default:               return `${name} complete`;
+      default:               return `${humanizeToolName(name)} finished`;
     }
   }
 
@@ -3388,9 +3486,17 @@
     try {
       const result = await api("/api/ctx-stats?chat_id=" + encodeURIComponent(chatId));
       if (!result || typeof result.prompt_tokens !== "number" || state.chatId !== chatId) return;
+      if (Number.isFinite(result.capacity) && result.capacity > 0) state._ctxCapacity = result.capacity;
+      // The poll can only report the last COMPLETED round, while ctx_fill SSE
+      // pushes the next round's estimate mid-turn. Applying a stale poll over
+      // a fresher estimate made the gauge jump backwards (e.g. 17% -> 13%)
+      // until the round's stats restored it. While streaming, never regress.
+      if (state.streaming && result.prompt_tokens < Number(state._lastMsgPromptTokens || 0)) {
+        renderStatus();
+        return;
+      }
       state._lastMsgPromptTokens = result.prompt_tokens;
       state._ctxSource = result.source || "";
-      if (Number.isFinite(result.capacity) && result.capacity > 0) state._ctxCapacity = result.capacity;
       renderStatus();
     } catch (_) {}
   }
@@ -3865,7 +3971,10 @@
   function renderChatList() {
     const wrap = $("#chatlist");
     wrap.innerHTML = "";
+    const seen = new Set();
     for (const id of state.chats.order) {
+      if (seen.has(id)) continue;
+      seen.add(id);
       const c = state.chats.chats[id];
       if (!c) continue;
       const row = document.createElement("div");
@@ -3874,6 +3983,17 @@
       const needsYou = [...state.approvals.values()].some(a => a.chat_id === id && a.status === "pending");
       const sessionState = needsYou ? "needs-you" : state.liveTurn?.chatId === id && state.streaming ? "working" : (c.task_state || "ready");
       const sessionLabels = { "needs-you": "Needs you", working: "Working", finished: "Finished", interrupted: "Interrupted", stopped: "Stopped", failed: "Failed", ready: "Ready" };
+      const sessionIcons = {
+        finished: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M5.4 8.3l1.8 1.8 3.4-4"/></svg>',
+        working: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25" stroke-opacity=".25"/><path d="M14.25 8A6.25 6.25 0 0 0 8 1.75"/></svg>',
+        interrupted: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 2.2h5.6l3 3v5.6l-3 3H5.2l-3-3V5.2z"/><path d="M8 5.6v3.2"/><circle cx="8" cy="11" r=".9" fill="currentColor" stroke="none"/></svg>',
+        stopped: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M6.4 5.8v4.4M9.6 5.8v4.4"/></svg>',
+        failed: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M6 6l4 4M10 6l-4 4"/></svg>',
+        "needs-you": '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5c-2 0-3.4 1.5-3.4 3.6 0 2.2-.8 3-1.3 3.6h9.4c-.5-.6-1.3-1.4-1.3-3.6 0-2.1-1.4-3.6-3.4-3.6"/><path d="M6.9 11.7a1.2 1.2 0 0 0 2.2 0"/></svg>',
+        ready: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/></svg>',
+      };
+      const sessionLabel = sessionLabels[sessionState] || "Ready";
+      const sessionHint = `${sessionLabel} · ${relTime(c.updated)}`;
       row.dataset.taskState = sessionState;
       // Mobile-born sessions get a phone glyph; everything else keeps the
       // chat-circle. The active row also shows the colored dot bullet via
@@ -3890,8 +4010,8 @@
       if (isProjectChat) row.classList.add("project-session");
       row.innerHTML = `
         <i class="${iconClass}"></i>
-        <span class="t">${esc(c.title)}</span>
-        <span class="d" title="${esc(relTime(c.updated))}">${sessionLabels[sessionState] || "Ready"}</span>
+        <span class="t">${esc(c.title || "new session")}</span>
+        <span class="d" role="img" aria-label="${esc(sessionLabel)}" title="${esc(sessionHint)}">${sessionIcons[sessionState] || sessionIcons.ready}<span class="sr-only">${esc(sessionLabel)}</span></span>
         <button class="del" title="Delete"><i class="ph ph-trash"></i></button>`;
       row.addEventListener("click", (e) => {
         if (e.target.closest(".del")) return;
@@ -6288,7 +6408,7 @@
           ctx.row._lastTpsUpdate = Date.now();
           const approxTokens = Math.max(1, Math.round(newBuf.length / 4));
           const liveTps = (approxTokens / elapsed).toFixed(1);
-          renderStatus(liveTps, "streaming");
+          renderStatusFast(liveTps, "streaming");
           const meta = ctx.row.querySelector(".bubble-meta.streaming");
           if (meta) {
             const dots = meta.querySelector(".typing");
@@ -6414,7 +6534,7 @@
       window.AccurettaOrb?.setState(row, orbPhase);
       if (!["run_powershell", "run_tests", "sandbox_run", "sandbox_nmap", "sandbox_sqlmap"].includes(evt.name)) {
         const lbl = toolLabel(evt.name, evt.arguments);
-        appendAgentLog(`Tool started: ${evt.name} -> ${lbl}`);
+        appendAgentLog(`Tool started: ${lbl}`);
       }
       
       // Update our activities state
@@ -6517,7 +6637,7 @@
       const isExecutionTool = ["run_powershell", "run_tests", "sandbox_run", "sandbox_nmap", "sandbox_sqlmap"].includes(evt.name);
       if (!isExecutionTool) {
         const label = toolResultLabel(evt.name, evt.result);
-        appendAgentLog(`Tool finished: ${evt.name} -> ${label}`);
+        appendAgentLog(`Tool finished: ${label}`);
       }
       // Mark the matching live activity finished and refresh the deck so it
       // drops out of the strip above the composer (only in-progress work stays).
@@ -6693,6 +6813,9 @@
       // stash for the final message object
       state._lastMsgTokens = tok;
       state._lastMsgPromptTokens = evt.prompt_eval_count;
+      // prompt_eval_count is measured truth from llama-server, not an
+      // estimate — mark it so the tooltip stops claiming otherwise.
+      state._ctxSource = "live";
       // refresh gauge live — prompt_eval_count is the truth from llama-server,
       // and tool-heavy turns can blow past where the char-count estimate sits.
       renderCtxGauge();
@@ -8199,6 +8322,19 @@
     const retryRecoveries = Number(interventions.context_retry || 0)
       + Number(interventions.server_retry || 0)
       + Number(interventions.empty_reply_retry || 0);
+    const errors = data.errors || {};
+    const errCounts = errors.counts || {};
+    const errTotal = Number(errors.total || 0);
+    const errTime = (t) => {
+      try {
+        const d = new Date(Number(t) * 1000);
+        return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+      } catch { return ""; }
+    };
+    const errRows = (Array.isArray(errors.recent) ? errors.recent : []).map((entry) => {
+      const n = Number(entry.count || 1);
+      return `<div><span>${esc(errTime(entry.t))} · ${esc(entry.type || "Error")} · ${esc(entry.location || "unknown")}${n > 1 ? ` · ×${n}` : ""}</span><button type="button" class="btn sm" data-error-copy="${esc(entry.id || "")}">Copy</button></div>`;
+    }).join("");
     content.innerHTML = `
       <section class="usage-kpis">
         <article><i class="ph ph-chat-centered-text"></i><span>Model turns</span><strong>${usageCompactNumber(totals.turns)}</strong><small>${usageCompactNumber(inputTokens + outputTokens)} tokens processed</small></article>
@@ -8242,6 +8378,17 @@
         <p class="usage-footnote">These recoveries stay out of the notification feed. Failures that need your attention still surface normally.</p>
       </section>
 
+      <section class="usage-panel usage-errors-panel">
+        <div class="usage-section-head"><div><span class="usage-eyebrow">Local only · never uploaded</span><h2>${errTotal ? `${errTotal.toLocaleString()} app errors` : "No errors recorded"}</h2></div><i class="ph ph-warning-circle"></i></div>
+        <div class="usage-breakdown">
+          <div><span>Bridge errors</span><strong>${Number(errCounts.bridge || 0).toLocaleString()}</strong></div>
+          <div><span>Interface errors</span><strong>${Number(errCounts.interface || 0).toLocaleString()}</strong></div>
+          <div><span>Backend faults</span><strong>${Number(errCounts.backend || 0).toLocaleString()}</strong></div>
+        </div>
+        ${errRows ? `<div class="usage-breakdown">${errRows}</div>` : '<div class="usage-empty">No entries yet.</div>'}
+        <p class="usage-footnote">Only error types and app locations are kept — never prompts, commands, or file contents. Nothing leaves this machine. <button type="button" class="btn sm" id="usage-errors-clear">Clear history</button></p>
+      </section>
+
       <section class="usage-two-col">
         <article class="usage-panel usage-compression-panel">
           <div class="usage-section-head"><div><span class="usage-eyebrow">Context compression</span><h2>${usageCompactNumber(compression.folded_messages)} messages folded</h2></div><i class="ph ph-arrows-in-line-vertical"></i></div>
@@ -8258,6 +8405,33 @@
       try { localStorage.setItem("accuretta:cost-provider", state.costProvider); } catch {}
       renderCostWidget();
       renderUsageStats(data);
+    });
+    content.querySelectorAll("[data-error-copy]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          const r = await api("/api/errors/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: btn.dataset.errorCopy }),
+          });
+          if (r && r.report) {
+            await copyText(r.report);
+            toast("Report copied", "ok", 2500);
+          } else {
+            toast((r && r.error) || "Copy failed", "error", 3000);
+          }
+        } catch {
+          toast("Copy failed", "error", 3000);
+        }
+      });
+    });
+    $("#usage-errors-clear")?.addEventListener("click", async () => {
+      try {
+        await api("/api/errors/clear", { method: "POST" });
+        renderUsageStats(await api("/api/usage-stats"));
+      } catch {
+        toast("Clear failed", "error", 3000);
+      }
     });
   }
 
@@ -12859,65 +13033,93 @@
     if (pane && stick) pane.scrollTop = pane.scrollHeight;
   }
 
-  function renderStatus(speed, stateStr) {
-    renderCtxGauge();
-    
+  function ensureStatusDOM(statusLine) {
+    if (!statusLine) return null;
+    if (statusLine.dataset.flatBuilt === "1") {
+      return {
+        model: statusLine.querySelector('[data-s="model"]'),
+        ctxLimit: statusLine.querySelector('[data-s="ctx-limit"]'),
+        ctxWrap: statusLine.querySelector('[data-s="ctx"]'),
+        ctxPct: statusLine.querySelector('[data-s="ctx-pct"]'),
+        speed: statusLine.querySelector('[data-s="speed"]'),
+        stateWrap: statusLine.querySelector('[data-s="state"]'),
+        stateText: statusLine.querySelector('[data-s="state-text"]'),
+      };
+    }
+    statusLine.dataset.flatBuilt = "1";
+    statusLine.innerHTML = `
+      <div class="status-item"><i class="ph ph-cpu"></i><span data-s="model"></span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item"><i class="ph ph-database"></i><span data-s="ctx-limit"></span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item status-ctx" data-s="ctx"><i class="ph ph-gauge"></i><span data-s="ctx-pct"></span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item"><i class="ph ph-lightning"></i><span data-s="speed"></span></div>
+      <span class="status-dot">·</span>
+      <div class="status-item status-state" data-s="state">
+        <svg class="heartbeat-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+        </svg>
+        <span data-s="state-text"></span>
+      </div>
+    `;
+    return ensureStatusDOM(statusLine);
+  }
+  function statusSpeedText(speed, isStreaming) {
+    if (isStreaming) {
+      if (speed && speed > 0) return `${Number(speed).toFixed(1)} tok/s`;
+      if (state._lastTps && state._lastTps > 0) return `${Number(state._lastTps).toFixed(1)} tok/s`;
+      return "- tok/s";
+    }
+    if (state.totalGenDuration && state.totalGenDuration > 0 && state.tokTotal && state.tokTotal > 0) {
+      return `${(state.tokTotal / state.totalGenDuration).toFixed(1)} tok/s`;
+    }
+    return "- tok/s";
+  }
+  function renderStatus(speed, stateStr, opts) {
     const statusLine = document.getElementById("status-line");
-    if (!statusLine) return;
-    
+    if (!statusLine) { renderCtxGauge(); return; }
+    const parts = ensureStatusDOM(statusLine);
+    if (!parts) return;
     const isStreaming = !!state.streaming || stateStr === "streaming";
     const statusText = state._reloading
       ? "reloading…"
       : (stateStr || (isStreaming ? "streaming" : "idle"));
-    
-    const modelName = state.settings.model || "no model loaded";
-    
-    const ctxUse = computeCtxUsage();
-    const ctxLimit = ctxUse.capacity >= 1024 ? Math.round(ctxUse.capacity / 1024) + "k" : ctxUse.capacity;
-    const ctxPct = Math.round(ctxUse.pct * 100);
-    const ctxCls = ctxUse.pct >= 0.9 ? "is-crit" : (ctxUse.pct >= 0.7 ? "is-warn" : "");
-    const ctxUsedTitle = `${ctxUse.used.toLocaleString()} / ${ctxUse.capacity.toLocaleString()} tokens of context used (~${ctxPct}%)`;
-    
-    let speedText = "- tok/s";
-    if (isStreaming) {
-      if (speed && speed > 0) {
-        speedText = `${Number(speed).toFixed(1)} tok/s`;
-      } else if (state._lastTps && state._lastTps > 0) {
-        speedText = `${Number(state._lastTps).toFixed(1)} tok/s`;
-      }
-    } else {
-      // Idle state: show average tok/s of the session
-      if (state.totalGenDuration && state.totalGenDuration > 0 && state.tokTotal && state.tokTotal > 0) {
-        const avg = state.tokTotal / state.totalGenDuration;
-        speedText = `${avg.toFixed(1)} tok/s`;
-      } else {
-        speedText = "- tok/s";
-      }
+    if (parts.model) {
+      const modelName = state.settings.model || "no model loaded";
+      if (parts.model.textContent !== modelName) parts.model.textContent = modelName;
     }
-    
-    const heartbeatSvg = `
-      <svg class="heartbeat-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-      </svg>
-    `;
-    
-    statusLine.innerHTML = `
-      <div class="status-item"><i class="ph ph-cpu"></i><span>${esc(modelName)}</span></div>
-      <span class="status-dot">·</span>
-      <div class="status-item"><i class="ph ph-database"></i><span>${ctxLimit} ctx</span></div>
-      <span class="status-dot">·</span>
-      <div class="status-item status-ctx ${ctxCls}" title="${esc(ctxUsedTitle)}"><i class="ph ph-gauge"></i><span>${ctxPct}%</span></div>
-      <span class="status-dot">·</span>
-      <div class="status-item"><i class="ph ph-lightning"></i><span>${speedText}</span></div>
-      <span class="status-dot">·</span>
-      <div class="status-item status-state ${isStreaming ? 'is-streaming' : ''}">
-        ${heartbeatSvg}
-        <span>${statusText}</span>
-      </div>
-    `;
+    if (!opts || !opts.skipCtx) {
+      const ctxUse = computeCtxUsage();
+      const ctxLimit = ctxUse.capacity >= 1024 ? Math.round(ctxUse.capacity / 1024) + "k" : ctxUse.capacity;
+      const ctxPct = Math.round(ctxUse.pct * 100);
+      const ctxCls = ctxUse.pct >= 0.9 ? "is-crit" : (ctxUse.pct >= 0.7 ? "is-warn" : "");
+      const ctxTitle = `${ctxUse.used.toLocaleString()} / ${ctxUse.capacity.toLocaleString()} tokens of context used (~${ctxPct}%)`;
+      if (parts.ctxLimit && parts.ctxLimit.textContent !== `${ctxLimit} ctx`) parts.ctxLimit.textContent = `${ctxLimit} ctx`;
+      if (parts.ctxPct && parts.ctxPct.textContent !== `${ctxPct}%`) parts.ctxPct.textContent = `${ctxPct}%`;
+      if (parts.ctxWrap) {
+        parts.ctxWrap.classList.toggle("is-warn", ctxCls === "is-warn");
+        parts.ctxWrap.classList.toggle("is-crit", ctxCls === "is-crit");
+        if (parts.ctxWrap.title !== ctxTitle) parts.ctxWrap.title = ctxTitle;
+      }
+      renderCtxGauge(ctxUse);
+    }
+    const speedText = statusSpeedText(speed, isStreaming);
+    if (parts.speed && parts.speed.textContent !== speedText) parts.speed.textContent = speedText;
+    if (parts.stateText && parts.stateText.textContent !== statusText) parts.stateText.textContent = statusText;
+    if (parts.stateWrap) parts.stateWrap.classList.toggle("is-streaming", isStreaming);
+  }
+  function renderStatusFast(speed, stateStr) {
+    renderStatus(speed, stateStr, { skipCtx: true });
   }
   // Shared context-window usage math, consumed by both the sidebar radial
   // gauge and the conversation status bar so the two never disagree.
+  // Memoized: live path keys on server tokens, estimate path keys on message
+  // count + tail lengths + pending images. During streaming state.messages
+  // does not grow per delta (buf lives in ctx), so repeated ticks hit cache
+  // instead of re-reducing the whole history. Estimates are approximate by
+  // design (chars/3); the next live prompt_eval_count corrects any drift.
+  let _ctxCache = { key: "", value: null };
   function computeCtxUsage() {
     // Prefer the live server ctx reported by /api/ctx-stats — settings.num_ctx
     // can drift from how llama-server was actually launched.
@@ -12927,54 +13129,80 @@
     // tool results, and intermediate assistant rounds — for tool-heavy work
     // (firmware, multi-step research) it under-reports by 10x or more.
     const livePromptTokens = Number(state._lastMsgPromptTokens || 0);
-    let used, source;
+    const sourceKey = String(state._ctxSource || "");
     if (livePromptTokens > 0) {
-      used = Math.min(capacity, livePromptTokens);
+      const key = `live|${capacity}|${livePromptTokens}|${sourceKey}`;
+      if (_ctxCache.key === key && _ctxCache.value) return _ctxCache.value;
+      const used = Math.min(capacity, livePromptTokens);
       // _ctxSource is set by the poll / chat-load seed: "live" = real
       // prompt_eval_count from a completed turn, "tokenize" = exact tokenizer
       // count of the assembled prompt before the first turn has run.
-      source = state._ctxSource === "tokenize"
+      const source = state._ctxSource === "tokenize"
         ? "estimated next prompt"
         : state._ctxSource === "estimate"
           ? "estimated prompt usage"
           : "last measured prompt";
+      const pct = Math.min(1, used / capacity);
+      const out = { used, capacity, pct, source };
+      _ctxCache = { key, value: out };
+      return out;
     } else {
+      const msgs = state.messages || [];
+      const pending = (state.pendingImages || []).length;
+      const n = msgs.length;
+      let tail = "";
+      for (let i = Math.max(0, n - 2); i < n; i++) {
+        const m = msgs[i] || {};
+        const c = m.content;
+        tail += `|${m.role === "tool" ? "t" : "m"}${typeof c === "string" ? c.length : String(c || "").length}`;
+      }
+      const key = `est|${capacity}|${n}|${pending}|${tail}|${sourceKey}`;
+      if (_ctxCache.key === key && _ctxCache.value) return _ctxCache.value;
       const systemPromptChars = 2500;
-      const msgChars = (state.messages || []).reduce((a, m) => {
+      const msgChars = msgs.reduce((a, m) => {
         const content = String(m.content || "");
         const multiplier = m.role === "tool" ? 1.5 : 1.0;
         return a + (content.length * multiplier);
       }, 0);
-      const imageOverhead = (state.pendingImages || []).length * 500;
+      const imageOverhead = pending * 500;
       const totalChars = systemPromptChars + msgChars + imageOverhead;
-      used = Math.min(capacity, Math.round(totalChars / 3.0));
-      source = "char-count estimate (no live data yet)";
+      const used = Math.min(capacity, Math.round(totalChars / 3.0));
+      const source = "char-count estimate (no live data yet)";
+      const pct = Math.min(1, used / capacity);
+      const out = { used, capacity, pct, source };
+      _ctxCache = { key, value: out };
+      return out;
     }
-    const pct = Math.min(1, used / capacity);
-    return { used, capacity, pct, source };
   }
 
-  function renderCtxGauge() {
+  function renderCtxGauge(pre) {
     const arc = $("#ctx-gauge-arc");
     const label = $("#ctx-gauge-label");
     if (!arc || !label) return;
-    const { used, capacity, pct, source } = computeCtxUsage();
+    const { used, capacity, pct, source } = pre || computeCtxUsage();
     const circ = 2 * Math.PI * 13;
-    arc.setAttribute("stroke-dasharray", circ.toFixed(2));
-    arc.setAttribute("stroke-dashoffset", (circ * (1 - pct)).toFixed(2));
-    label.textContent = `${Math.round(pct * 100)}%`;
+    const pctText = `${Math.round(pct * 100)}%`;
+    const offset = (circ * (1 - pct)).toFixed(2);
+    if (arc.getAttribute("stroke-dashoffset") !== offset) {
+      arc.setAttribute("stroke-dasharray", circ.toFixed(2));
+      arc.setAttribute("stroke-dashoffset", offset);
+    }
+    if (label.textContent !== pctText) label.textContent = pctText;
     const statusContext = document.querySelector(".status-ctx");
     if (statusContext) {
-      statusContext.title = `${used.toLocaleString()} / ${capacity.toLocaleString()} tokens (${source})`;
+      const title = `${used.toLocaleString()} / ${capacity.toLocaleString()} tokens (${source})`;
+      if (statusContext.title !== title) statusContext.title = title;
       statusContext.classList.toggle("is-warn", pct >= 0.7 && pct < 0.9);
       statusContext.classList.toggle("is-crit", pct >= 0.9);
-      const value = statusContext.querySelector("span");
-      if (value) value.textContent = `${Math.round(pct * 100)}%`;
+      const value = statusContext.querySelector('[data-s="ctx-pct"]') || statusContext.querySelector("span");
+      if (value && value.textContent !== pctText) value.textContent = pctText;
     }
     const gauge = $("#ctx-gauge");
+    if (!gauge) return;
     gauge.classList.toggle("warn", pct >= 0.7 && pct < 0.9);
     gauge.classList.toggle("crit", pct >= 0.9);
-    gauge.title = `${used.toLocaleString()} / ${capacity.toLocaleString()} tokens (~${Math.round(pct * 100)}%)\nsource: ${source}`;
+    const gaugeTitle = `${used.toLocaleString()} / ${capacity.toLocaleString()} tokens (~${Math.round(pct * 100)}%)\nsource: ${source}`;
+    if (gauge.title !== gaugeTitle) gauge.title = gaugeTitle;
   }
   function renderTokTotal() {
     const el = $("#tok-total");
@@ -14356,8 +14584,89 @@
     applyMobileToolbarLayout();
   }
 
+  function initTooltips() {
+    let tip = null;
+    let anchor = null;
+    let timer = 0;
+    const show = () => {
+      timer = 0;
+      if (!anchor || !anchor.isConnected) return;
+      const text = anchor.dataset.tip || "";
+      if (!text) return;
+      if (!tip) {
+        tip = document.createElement("div");
+        tip.className = "acc-tooltip";
+        tip.setAttribute("role", "tooltip");
+        document.body.appendChild(tip);
+      }
+      tip.textContent = text;
+      tip.dataset.place = "below";
+      tip.classList.remove("is-visible");
+      const a = anchor.getBoundingClientRect();
+      const w = tip.offsetWidth;
+      const h = tip.offsetHeight;
+      const below = window.innerHeight - a.bottom - 8;
+      const place = below >= h + 4 || below >= a.top ? "below" : "above";
+      tip.dataset.place = place;
+      const y = place === "below" ? a.bottom + 8 : a.top - h - 8;
+      const x = Math.max(8, Math.min(a.left + a.width / 2 - w / 2, window.innerWidth - w - 8));
+      tip.style.left = `${Math.round(x)}px`;
+      tip.style.top = `${Math.round(y)}px`;
+      requestAnimationFrame(() => { if (tip) tip.classList.add("is-visible"); });
+    };
+    const hide = () => {
+      if (timer) { clearTimeout(timer); timer = 0; }
+      anchor = null;
+      if (tip) tip.classList.remove("is-visible");
+    };
+    document.addEventListener("mouseover", (e) => {
+      const el = e.target && e.target.closest ? e.target.closest("[data-tip], [title]") : null;
+      if (!el || el === anchor) return;
+      if (el.hasAttribute("title")) {
+        el.dataset.tip = el.getAttribute("title");
+        el.removeAttribute("title");
+        if (!el.hasAttribute("aria-label")) el.setAttribute("aria-label", el.dataset.tip);
+      }
+      if (!el.dataset.tip) return;
+      if (timer) clearTimeout(timer);
+      anchor = el;
+      timer = setTimeout(show, 400);
+    });
+    document.addEventListener("mouseout", (e) => {
+      if (anchor && e.target && e.target.closest && e.target.closest("[data-tip]") === anchor
+          && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("[data-tip]") === anchor)) hide();
+    });
+    ["scroll", "resize", "click", "keydown"].forEach((name) => {
+      document.addEventListener(name, hide, name === "scroll" ? { capture: true, passive: true } : undefined);
+    });
+  }
   function wireEvents() {
     initChatJumpButton();
+    initTooltips();
+    let _lastClientError = 0;
+    const _sendClientError = (type, message, location, trace) => {
+      const now = Date.now();
+      if (now - _lastClientError < 5000) return;
+      _lastClientError = now;
+      try {
+        fetch("/api/client-error", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({ type, message, location, trace }),
+        }).catch(() => {});
+      } catch {}
+    };
+    window.addEventListener("error", (e) => {
+      _sendClientError("Error", e.message || "script error",
+        e.filename ? `${String(e.filename).split("/").pop()}:${e.lineno || 0}` : "interface", "");
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      const r = e.reason;
+      _sendClientError("UnhandledRejection",
+        String((r && (r.message || r)) || "rejection").slice(0, 500),
+        "interface", String((r && r.stack) || "").slice(0, 2000));
+    });
     $("#btn-new-chat").addEventListener("click", newChat);
     // Manual compaction: fold older turns into the session summary now. The
     // auto-summarizer only fires near the context limit (0.85) — this lets the
@@ -14535,12 +14844,17 @@
         loader.style.opacity = "0";
         setTimeout(() => {
           loader.innerHTML = `
-            <div class="shutdown-success-icon" style="font-size: 48px; color: var(--success); margin-bottom: 0.5rem; animation: success-bounce 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;">
-              <i class="ph ph-check-circle"></i>
+            <div style="display:grid;place-items:center;color:var(--accent);margin-bottom:0.5rem;">
+              <canvas class="agent-orb shutdown-orb" width="80" height="80" data-state="working" aria-hidden="true"></canvas>
             </div>
             <p style='color: var(--success); font-weight: 600; font-size: 1.1em; animation: fade-in-up 0.4s ease both;'>Saved. Closing Accuretta…</p>
           `;
           loader.style.opacity = "1";
+          if (window.AccurettaOrb) {
+            setTimeout(() => window.AccurettaOrb.setState(loader, "done"), 650);
+          } else {
+            loader.querySelector("canvas")?.replaceWith(Object.assign(document.createElement("i"), { className: "ph ph-check-circle" }));
+          }
         }, 300);
       }
       
@@ -15018,7 +15332,11 @@
       const tb = $("#btn-perms");
       if (tb) {
         tb.classList.toggle("on", mode !== "hard");
-        tb.title = "Access mode: " + mode + ". Soft runs routine project work and non-destructive commands automatically. Medium only trusts workspace writes. Hard asks for every action. Risky operations keep their stricter gates. Click to cycle.";
+        tb.title = mode === "soft"
+          ? "Access · Soft. Routine work runs on its own; risky actions still ask. Click for Medium."
+          : mode === "medium"
+            ? "Access · Medium. File writes save on their own; everything else asks. Click for Hard."
+            : "Access · Hard. Every action asks first. Click for Soft.";
       }
     };
     syncApprovalMode();

@@ -5492,6 +5492,22 @@ body.remote-client .chat-scroll {
   min-width: 0;
 }
 
+/* Parallel-activity marker: shows how many independent tool calls from one
+   model reply are executing at the same time. Sits beside the activity label
+   while the batch runs and disappears the moment it drains. */
+.tool-group-parallel {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--fg-muted);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+}
+
 /* Small "MCP" tag on the tool head — flags at a glance that the running tool
    comes from an external MCP server, without reading the command. */
 .tool-mcp-badge {
@@ -15928,6 +15944,10 @@ body,
   border-radius: 28px 5px 28px 28px;
   border: 1px solid var(--glass-border, var(--border-subtle));
   box-shadow: none;
+  /* Closed drawers hide via translateX(100%), which assumes right:0. The
+     10px floating offset above would leave a 10px sliver of the drawer
+     visible at the viewport edge, so push it fully off-screen. */
+  transform: translateX(calc(100% + 12px));
 }
 
 :is([data-theme="aperture"], [data-theme="aperture-dark"]) .drawer.open {

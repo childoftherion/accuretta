@@ -8,6 +8,7 @@
   const labels = {
     idle: "Agent", thinking: "Thinking", composing: "Writing response", working: "Working",
     searching: "Searching", connecting: "Connecting", planning: "Planning", waiting: "Waiting for you",
+    done: "Saved",
   };
   let frame = 0;
   let lastPaint = 0;
@@ -103,6 +104,25 @@
         size = index % 3 === 0 ? 1 : 0.7;
         break;
       }
+      case "done": {
+        const t = index / PARTICLE_COUNT;
+        const jx = Math.sin(index * 12.9898) * 0.02;
+        const jy = Math.cos(index * 7.233) * 0.02;
+        if (t < 0.38) {
+          const u = t / 0.38;
+          x = lerp(-0.55, -0.12, u) + jx;
+          y = lerp(0.02, 0.48, u) + jy;
+        } else {
+          const u = (t - 0.38) / 0.62;
+          x = lerp(-0.12, 0.62, u) + jx;
+          y = lerp(0.48, -0.52, u) + jy;
+        }
+        z = 0.3;
+        alpha = 1;
+        size = 1;
+        links = 0;
+        break;
+      }
       default: {
         const settle = 0.68 + 0.05 * wave;
         x *= settle;
@@ -139,15 +159,48 @@
     return pose;
   }
 
+  function checkStroke() {
+    const pts = [];
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const t = i / (PARTICLE_COUNT - 1);
+      let x, y;
+      if (t < 0.38) {
+        const u = t / 0.38;
+        x = lerp(-0.55, -0.12, u);
+        y = lerp(0.02, 0.48, u);
+      } else {
+        const u = (t - 0.38) / 0.62;
+        x = lerp(-0.12, 0.62, u);
+        y = lerp(0.48, -0.52, u);
+      }
+      pts.push({ x: 20 + x * 15, y: 20 + y * 15 });
+    }
+    return pts;
+  }
+
   function paint(canvas, info, time) {
     const context = canvas.getContext("2d");
     if (!context) return;
     const size = 40;
-    const ratio = Math.min(devicePixelRatio || 1, 2);
-    if (canvas.width !== size * ratio) canvas.width = canvas.height = size * ratio;
+    const css = canvas.clientWidth || size;
+    const ratio = Math.min(devicePixelRatio || 1, 2) * (css / size);
+    const px = Math.max(1, Math.round(size * ratio));
+    if (canvas.width !== px) canvas.width = canvas.height = px;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, size, size);
     context.fillStyle = getComputedStyle(canvas).color;
+    if (info.phase === "done" && !info.from) {
+      context.strokeStyle = context.fillStyle;
+      context.globalAlpha = 1;
+      context.lineWidth = 1.7;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.beginPath();
+      for (const p of checkStroke()) context.lineTo(p.x, p.y);
+      context.stroke();
+      context.globalAlpha = 1;
+      return;
+    }
     const points = visiblePose(info, time).map(point => ({ ...point, x: 20 + point.x * 15, y: 20 + point.y * 15 }))
       .sort((a, b) => a.z - b.z);
 

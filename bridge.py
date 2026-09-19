@@ -272,6 +272,34 @@ UPDATE_CHECK_FILE = DATA / "update_check.json"
 SYSTEM_CONTEXT_FILE = DATA / "ACCURETTA.md"
 MEMORIES_FILE = DATA / "memories.jsonl"
 _memory_store = MemoryStore(MEMORIES_FILE)
+ERRORS_FILE = DATA / "errors.jsonl"
+from error_log import ErrorStore
+_error_store = ErrorStore(ERRORS_FILE)
+
+
+def _install_error_hooks() -> None:
+    import sys as _sys
+
+    def _hook(exc_type, exc_value, exc_tb):
+        try:
+            if exc_value is not None:
+                _error_store.record_exception("bridge", exc_value)
+        except Exception:
+            pass
+        _sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_hook(args):
+        try:
+            if args.exc_value is not None:
+                _error_store.record_exception("bridge", args.exc_value)
+        except Exception:
+            pass
+
+    try:
+        _sys.excepthook = _hook
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass
 
 # User-curated skills: plain .md procedures in skills/ (frontmatter
 # name/description/budget). Lazily loaded ONLY on demand — zero context cost
@@ -552,6 +580,28 @@ def _normalize_chats_data(value: Any) -> dict:
         value["chats"] = {}
     if not isinstance(value["order"], list):
         value["order"] = []
+    # Self-heal: drop order ids with no record (stale deletes / corrupt
+    # saves) and collapse duplicate order entries to the first occurrence.
+    # A stale id left in order + a later re-create of that id used to insert
+    # it a second time, rendering as two empty same-title rows where deleting
+    # one made both vanish (DELETE removes every occurrence).
+    seen: set = set()
+    clean_order = []
+    for cid in value["order"]:
+        if cid in seen or cid not in value["chats"]:
+            continue
+        seen.add(cid)
+        clean_order.append(cid)
+    value["order"] = clean_order
+    for cid, record in value["chats"].items():
+        if not isinstance(record, dict):
+            continue
+        if not str(record.get("title") or "").strip():
+            record["title"] = "new session"
+        record.setdefault("id", cid)
+        record.setdefault("messages", [])
+        if not isinstance(record.get("messages"), list):
+            record["messages"] = []
     for record in value["chats"].values():
         if isinstance(record, dict) and "last_mode" in record:
             record["last_mode"] = _normalize_composer_mode(record.get("last_mode"))
@@ -623,7 +673,10 @@ def _save_chats_snapshot(snapshot: _ChatSnapshot) -> None:
         snap_order = snapshot.get("order", []) if isinstance(snapshot.get("order"), list) else []
         if snap_order != base_order:
             deleted = set(base_chats) - set(snap_chats)
-            order = [cid for cid in snap_order if cid in merged_chats]
+            order = []
+            for cid in snap_order:
+                if cid in merged_chats and cid not in order:
+                    order.append(cid)
             order.extend(cid for cid in current.get("order", [])
                          if cid in merged_chats and cid not in order and cid not in deleted)
             order.extend(cid for cid in merged_chats if cid not in order)
@@ -1435,6 +1488,7 @@ def _usage_stats() -> dict:
             "names": sorted(repo_names, key=str.casefold)[:12],
         },
         "longest": longest,
+        "errors": _error_store.summary(),
     }
 
 
@@ -25945,6 +25999,17 @@ you may occasionally append exactly one of these to the absolute end of your res
                 tool_lines.append(f"- {name}({sig})")
             tool_lines.append("- list_more_tools(bundle) — see/load specialized tool bundles")
             parts.append("\n".join(tool_lines))
+        # Parallel tool calls: run_chat_turn batches every call from one reply
+        # into a single concurrent round (8 workers), serializing same-file
+        # writes, commands, and shared-state tools. Without an explicit line the
+        # model only batches independent calls by accident, so say it plainly.
+        # Keep the dependent-calls half: racing those breaks ordering.
+        parts.append(
+            "parallel tools: independent calls emitted in the SAME reply run at the same time. "
+            "when steps don't depend on each other (reading several files, grep + git status, "
+            "two fetches), emit them together in one reply. never batch calls that need another "
+            "call's result, two writes to the same file, or two commands; those stay one per reply."
+        )
         # Nudge the progress panel: for genuinely multi-step work the model should
         # publish a checklist so the user can watch it advance. Kept opt-in so a
         # trivial one-shot turn doesn't spam a plan.
@@ -26924,18 +26989,21 @@ def run_chat_turn(chat_id: str, messages: list[dict], use_tools: bool, emit,
             # cached tools-spec overhead) lands before generation begins.
             def _emit_ctx_fill() -> None:
                 try:
-                    # Prefer the real prompt_eval_count from this chat's last
-                    # completed round — the char estimate below undercounts
-                    # tool traffic, which made the gauge read low while
-                    # compression fired on the true fill.
+                    # Lead the gauge with the CURRENT round's assembled prompt.
+                    # Re-emitting the last completed round's real count kept
+                    # the ring one round behind for the whole duration of the
+                    # new round. The estimate undercounts tool traffic, so
+                    # take the max: the real count still wins when it is
+                    # larger, and the round-end stats event corrects the
+                    # gauge with the true prompt_eval_count either way.
+                    est = sum(_count_msg_tokens(m) for m in payload["messages"]) + tools_overhead
                     real = _last_prompt_tokens_by_chat.get(chat_id, 0)
-                    if real > 0:
+                    if real >= est:
                         emit({"type": "ctx_fill", "prompt_tokens": real,
                               "capacity": ctx_limit, "source": "live"})
-                        return
-                    est = sum(_count_msg_tokens(m) for m in payload["messages"]) + tools_overhead
-                    emit({"type": "ctx_fill", "prompt_tokens": est,
-                          "capacity": ctx_limit, "source": "estimate"})
+                    else:
+                        emit({"type": "ctx_fill", "prompt_tokens": est,
+                              "capacity": ctx_limit, "source": "estimate"})
                 except Exception:
                     pass
             _emit_ctx_fill()
@@ -31531,6 +31599,8 @@ class Handler(BaseHTTPRequestHandler):
                 if project:
                     record["project_workspace"] = project
                 chats["chats"][chat_id] = record
+                if chat_id in chats["order"]:
+                    chats["order"].remove(chat_id)
                 chats["order"].insert(0, chat_id)
                 save_json(CHATS_FILE, chats)
             return self._send_json(200, chats["chats"][chat_id])
@@ -31787,6 +31857,26 @@ class Handler(BaseHTTPRequestHandler):
             r = tool_remember({"text": text, "kind": body.get("kind", "fact"), "tags": tags if isinstance(tags, list) else []})
             broadcast_event({"type": "memories:update"})
             return self._send_json(400 if r.get("error") else 200, r)
+        if p == "/api/client-error":
+            try:
+                _error_store.record("interface", str(body.get("type") or "Error")[:80],
+                                    str(body.get("message") or "")[:500],
+                                    str(body.get("location") or "interface")[:120],
+                                    str(body.get("trace") or ""))
+            except Exception:
+                pass
+            return self._send_json(200, {"ok": True})
+        if p == "/api/errors/clear":
+            try:
+                return self._send_json(200, _error_store.clear())
+            except Exception as e:
+                return self._send_json(500, {"error": str(e)})
+        if p == "/api/errors/report":
+            try:
+                result = _error_store.report(str(body.get("id") or ""))
+            except Exception as e:
+                return self._send_json(500, {"error": str(e)})
+            return self._send_json(404 if result.get("error") else 200, result)
         if p == "/api/snapshots":
             # save the currently-rendered preview html (or any html blob the
             # client wants to keep) to data/snapshots/ with a safe filename.
@@ -32025,6 +32115,8 @@ class Handler(BaseHTTPRequestHandler):
                 "updated": int(time.time()),
                 "messages": [],
             }
+            if chat_id in chats["order"]:
+                chats["order"].remove(chat_id)
             chats["order"].insert(0, chat_id)
         chat = chats["chats"][chat_id]
         # remember the mode this chat was last used in so the client can
@@ -32214,7 +32306,9 @@ class Handler(BaseHTTPRequestHandler):
                 "```tool_code\n"
                 "read_file(path=\"C:/notes.txt\")\n"
                 "```\n"
-                "- one call per turn; use the tool names listed above; keyword args with real quotes.\n"
+                "- use the tool names listed above; keyword args with real quotes. when calls are\n"
+                "  independent (several reads, a grep plus a status check), emit all their fences in\n"
+                "  one reply: they run together. dependent calls and same-file writes stay one per reply.\n"
                 "- for ordinary calls, do NOT wrap it in JSON, <tool_call> tags, or prose.\n"
                 "- if content already exists in a prior visible code fence, call write_file or "
                 "remote_write_file with source='visible_code_block'; NEVER repeat the full block.\n"
@@ -35467,6 +35561,11 @@ class LlamaProcess:
             file=sys.stderr,
         )
         try:
+            _error_store.record("backend", "ModelServerCrash",
+                                f"llama-server died; restart attempt {attempt}", "llama-server")
+        except Exception:
+            pass
+        try:
             broadcast_event({
                 "type": "llama:watchdog_restart",
                 "attempt": attempt,
@@ -36733,6 +36832,10 @@ def _main_owned(httpd):
     # the subprocess from underneath it, which would trigger an
     # at-shutdown respawn race.
     import atexit
+    try:
+        _install_error_hooks()
+    except Exception:
+        pass
     atexit.register(_session_mgr.stop_all)   # kill any interactive sessions on exit
     atexit.register(_stop_workspace_watching)
     atexit.register(_llama.stop)

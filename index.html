@@ -27,9 +27,9 @@
   })();
 </script>
 <script src="/appearance.js?v=1"></script>
-<link rel="stylesheet" href="/app.css?v=77">
-<link rel="stylesheet" href="/ui-refresh.css?v=1">
-<link rel="stylesheet" href="/workspace-shell.css?v=3">
+<link rel="stylesheet" href="/app.css?v=79">
+<link rel="stylesheet" href="/ui-refresh.css?v=2">
+<link rel="stylesheet" href="/workspace-shell.css?v=7">
 <link rel="stylesheet" href="/research-ui.css?v=2">
 <link rel="stylesheet" href="/assets/vendor/web/icons.css">
 <script src="/assets/vendor/html2canvas/dist/html2canvas.min.js" defer></script>
@@ -63,7 +63,7 @@
           </g>
         </svg>
         <span class="brand-title">Accuretta</span>
-        <span class="v" id="brand-v">v0.8.8</span>
+        <span class="v" id="brand-v">v0.8.9</span>
         <span class="grow"></span>
         <button class="iconbtn" id="btn-toggle-sidebar" title="Collapse sidebar"><i class="ph ph-sidebar-simple"></i></button>
       </div>
@@ -148,7 +148,7 @@
             <a class="side-social" href="https://huggingface.co/" target="_blank" rel="noopener noreferrer" title="You can download local models here" aria-label="Hugging Face">
               <svg class="hf-mark" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.9 11.1c0 3.8-2.6 6.7-5.9 6.7s-5.9-2.9-5.9-6.7V8.8c0-3.2 2.3-5.6 5.9-5.6s5.9 2.4 5.9 5.6z"/><circle cx="9.6" cy="9.5" r=".75" fill="currentColor" stroke="none"/><circle cx="14.4" cy="9.5" r=".75" fill="currentColor" stroke="none"/><path d="M9.2 12.7c.8.8 1.7 1.2 2.8 1.2s2-.4 2.8-1.2"/><path d="M6.4 12.5c-1.1-.1-2.1-.8-2.7-1.8-.4-.7-1.3-.9-1.9-.4-.5.4-.6 1.1-.3 1.7 1 1.9 2.7 3.2 4.7 3.5"/><path d="M17.6 12.5c1.1-.1 2.1-.8 2.7-1.8.4-.7 1.3-.9 1.9-.4.5.4.6 1.1.3 1.7-1 1.9-2.7 3.2-4.7 3.5"/><path d="M3.2 10.4 2.7 8.9M4.7 10.6 4.6 8.8M20.8 10.4l.5-1.5M19.3 10.6l.1-1.8"/></svg>
             </a>
-            <a class="side-social" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" title="@NoJetsNextDoor on X" aria-label="X / Twitter">
+            <a class="side-social" href="https://x.com/mkultraware" target="_blank" rel="noopener noreferrer" title="@mkultraware on X" aria-label="X / Twitter">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
             </a>
             <a class="side-social" href="https://github.com/mkultraware/" target="_blank" rel="noopener noreferrer" title="mkultraware on GitHub" aria-label="GitHub">
@@ -301,7 +301,7 @@
             </div>
             <button class="chip" id="btn-attach-image" title="Attach image — the vision model reads it and hands a description to the main model"><i class="ph ph-image"></i>Image</button>
             <button class="chip" id="btn-attach-file" title="Upload files from this browser into the PC workspace"><i class="ph ph-paperclip"></i>File</button>
-            <button class="chip" id="btn-perms" title="Access approval mode. Soft runs routine project work and non-destructive commands automatically. Medium only trusts workspace writes. Hard asks for every action. Risky operations keep their stricter gates. Click to cycle."><i class="ph ph-keyhole"></i>Access</button>
+            <button class="chip" id="btn-perms" title="Access. Controls what the agent may do on its own. Click to cycle Soft → Medium → Hard."><i class="ph ph-keyhole"></i>Access</button>
             <input type="file" id="file-image" accept="image/*" multiple hidden>
             <input type="file" id="file-client" multiple hidden>
             <div class="toolbar-overflow-wrap">
@@ -781,8 +781,8 @@
       <span class="faq-eyebrow">Local model field guide</span>
       <h1 id="faq-title">FAQ</h1>
     </div>
-    <a class="faq-author" href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer" aria-label="Follow NoJetsNextDoor on X">
-      <span>@NoJetsNextDoor</span><i class="ph ph-arrow-up-right"></i>
+    <a class="faq-author" href="https://x.com/mkultraware" target="_blank" rel="noopener noreferrer" aria-label="Follow mkultraware on X">
+      <span>@mkultraware</span><i class="ph ph-arrow-up-right"></i>
     </a>
   </header>
 
@@ -1014,7 +1014,7 @@
 
         <footer class="faq-footer">
           <span>Still stuck?</span>
-          <a href="https://x.com/NoJetsNextDoor" target="_blank" rel="noopener noreferrer">Ask @NoJetsNextDoor <i class="ph ph-arrow-up-right"></i></a>
+          <a href="https://x.com/mkultraware" target="_blank" rel="noopener noreferrer">Ask @mkultraware <i class="ph ph-arrow-up-right"></i></a>
         </footer>
       </main>
     </div>
@@ -1718,8 +1718,8 @@
   <script src="/security-scan-field.js?v=6"></script>
 <script src="/research-ui.js?v=2"></script>
 <script src="/dropdown-menus.js?v=1"></script>
-<script src="/agent-orb.js?v=1"></script>
-<script src="/app.js?v=2026091401"></script>
+<script src="/agent-orb.js?v=3"></script>
+<script src="/app.js?v=2026091604"></script>
 <script>
   // Setup wizard — auto-detect llama-server and models on load.
   (function () {

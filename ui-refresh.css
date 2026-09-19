@@ -11,6 +11,7 @@
 
 .agent-orb { display: block; width: 38px; height: 38px; color: inherit; }
 .agent-orb[data-state="waiting"] { color: var(--accent); }
+.agent-orb.shutdown-orb { width: 64px; height: 64px; }
 
 .usage-page { --muted: var(--fg-muted); }
 .usage-shell { max-width: 1100px; padding-top: 24px; }
